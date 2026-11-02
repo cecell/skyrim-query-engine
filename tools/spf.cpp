@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <fcntl.h>
 #include <fstream>
 #include <io.h>
@@ -145,14 +146,159 @@ std::string CsvCell(const Value& v) {
     return s;
 }
 
+const char kHelp[] = R"HELP(spf - read Skyrim SE plugins (.esm / .esp / .esl) and export their fields
+
+Use this instead of parsing plugin bytes yourself. It decodes every subrecord
+with 1,893 patterns covering 134 record types, and the decoder was checked
+value for value against a reference database built from the 80 Bethesda
+plugins (5.7 million values, 0 mismatches). It already handles the format's
+traps: compressed records, XXXX-sized subrecords, master-relative FormIDs,
+localized strings, repeating subrecords, context-dependent unions (PERK
+effects, conditions), and IMAD's non-ASCII signatures.
+
+COMMANDS
+  spf info   <plugin>             the plugin's masters and record counts by type
+  spf fields <plugin> <TYPE>      every field that record type has in this plugin
+  spf export <plugin> [options]   the fields you choose, of the forms you choose
+  spf help [command]              this text, or one command's details
+                                  (also: spf <command> --help)
+
+  Start with `info` to see what a plugin contains, then `fields <TYPE>` to see
+  which fields and sub-fields exist, then `export` what you need.
+
+DATA MODEL
+  plugin -> records grouped by type (WEAP, NPC_, CELL, ...)
+         -> one record per form, keyed by FormID
+         -> fields = subrecords (EDID, FULL, DATA, ...), each decoded into a
+            value: text, number, list, or an object of named sub-fields
+  A field path is the 4-letter subrecord signature, then a dotted path inside
+  its value: EDID   DATA.damage   SNAM.faction   CTDA[0].func_idx
+
+READING THE OUTPUT
+  form      "Owner.esm:XXXXXX" - the plugin that owns the form and its 6-digit
+            object ID. FormIDs inside values look the same. Never the raw
+            32-bit number, whose first byte means a different master in every
+            plugin. A null FormID ([00000000]) comes out as null.
+  type      the record signature.
+  in        the WRLD / CELL / DIAL the record sits in (placed objects in their
+            cell, cells in their worldspace, INFO lines in their topic).
+            Missing for top-level records.
+  deleted   true when the record carries the deleted flag (it has no fields).
+  fields    the requested fields. A subrecord that repeats within a record
+            (factions, leveled list entries, conditions, keywords...) gives a
+            list of its occurrences; one that occurs once gives its value; one
+            that is absent gives null.
+  Localized names / descriptions are their text, read from the plugin's
+  Strings\ folder, its .bsa, or Skyrim - Interface.bsa (English). If the
+  strings cannot be found the value stays "[LSTRING:0xXXXXXXXX]".
+  "#0A1B2C..." (hex) means the subrecord had no pattern, or its bytes did not
+  fit it; the raw bytes are given instead.
+  Field and sub-field names come from the pattern catalog; names like
+  "unknown1" or "unused" are fields whose meaning is not documented.
+
+LIMITS
+  - One plugin at a time: you see that plugin's version of a form, not the
+    winning override in a load order.
+  - Subrecords that belong together (LVLO + COED, CTDA + CIS1/CIS2, NPC tint
+    layers) come out as separate lists in file order, not paired.
+  - Strings: English only.
+
+EXIT CODES
+  0 ok   1 the plugin could not be opened or is not a plugin   2 bad arguments
+  or the pattern catalog (patterns.json next to spf.exe) could not be loaded
+
+OPTIONS FOR ALL COMMANDS
+  --patterns <file>   use another pattern catalog
+)HELP";
+
+const char kHelpInfo[] = R"HELP(spf info <plugin>
+
+Prints the plugin name (and "(localized)" when its strings live in separate
+files), its masters with their index - the first byte of a stored FormID - and
+the number of records of each type. Plain text.
+
+  spf info "D:\Games\Skyrim Special Edition\Data\Update.esm"
+  plugin: Update.esm (localized)
+    [00] Skyrim.esm
+  records: 16011
+    ACHR 39
+    ...
+)HELP";
+
+const char kHelpFields[] = R"HELP(spf fields <plugin> <TYPE>
+
+Lists every field (subrecord) that records of TYPE have in this plugin, how
+many records have it, and the sub-fields inside it: exactly the paths you can
+pass to `spf export --fields`. Plain text. TYPE is a record signature such as
+WEAP, ARMO, NPC_, LVLI, CELL, REFR (case does not matter).
+
+  spf fields Skyrim.esm WEAP
+  WEAP: 2484 records
+    DATA  (in 2484)
+      DATA.damage
+      DATA.value
+      DATA.weight
+    KWDA  (in 2470)
+    ...
+
+Fields only appear if at least one record in THIS plugin has them; another
+plugin may use more.
+)HELP";
+
+const char kHelpExport[] = R"HELP(spf export <plugin> [--type T,..] [--form F,..] [--fields P,..] [--csv | --json] [--out file]
+
+Exports fields of the plugin's records.
+
+  --type WEAP,ARMO        only records of these types (default: every type)
+  --form F,F,...          only these forms. Each F is either the FormID as
+                          stored in this plugin (00012EB7) or Owner:ObjectID
+                          (Skyrim.esm:012EB7), which works in any plugin.
+                          Missing forms are reported on stderr.
+  --fields P,P,...        only these field paths (see `spf fields`). Omitted
+                          or "*" = every field of each record (JSON only).
+  --json                  (default) a JSON array, one object per record:
+                            [{"form":"Skyrim.esm:012EB7","type":"WEAP",
+                              "in":"Skyrim.esm:00003C",       (if it has a parent)
+                              "deleted":true,                 (if deleted)
+                              "fields":{"EDID":"IronSword","DATA.damage":7}}]
+                          With --fields, "fields" is keyed by the paths you
+                          asked for; with all fields, by subrecord signature.
+  --csv                   one row per record: form,type,in,<your fields>.
+                          Needs --fields. Lists and objects are written as
+                          JSON text inside the cell.
+  --out <file>            write to a file (UTF-8) instead of the console
+
+Field paths
+  EDID              the whole value of that subrecord
+  DATA.damage       a named sub-field
+  CTDA[0]           the first element of a list
+  SNAM.faction      a name applied to a list applies to every element, so
+                    this gives the faction of every SNAM occurrence
+  A subrecord that repeats gives a list; a path that matches nothing gives null.
+
+Examples
+  spf export Skyrim.esm --type WEAP --fields EDID,FULL,DATA.damage,DATA.value --csv
+  spf export MyMod.esp --form Skyrim.esm:012EB7
+  spf export MyMod.esp --type LVLI --fields EDID,LVLO.reference,LVLO.level
+  spf export MyMod.esp --type REFR --fields NAME,DATA.pos_x,DATA.pos_y,DATA.pos_z --out refs.json
+)HELP";
+
 int Usage() {
     fprintf(stderr,
             "usage:\n"
             "  spf info   <plugin>\n"
             "  spf fields <plugin> <TYPE>\n"
             "  spf export <plugin> [--type T,..] [--form ID,..] [--fields F,..] [--csv|--json] [--out file]\n"
-            "  (all commands: --patterns <file>)\n");
+            "  spf help [command]      (full explanation)\n");
     return 2;
+}
+
+int Help(const std::string& topic) {
+    const char* text = topic == "info" ? kHelpInfo : topic == "fields" ? kHelpFields
+                     : topic == "export" ? kHelpExport : kHelp;
+    _setmode(_fileno(stdout), _O_BINARY);
+    fwrite(text, 1, strlen(text), stdout);
+    return 0;
 }
 
 // Collects the shape of a value: "DATA", "DATA.damage", "DATA.flags[]"...
@@ -169,7 +315,15 @@ void Shape(const Value& v, const std::string& prefix, std::set<std::string>* out
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc < 3) return Usage();
+    // spf help [cmd], spf --help, spf <cmd> --help
+    std::string arg1 = argc > 1 ? Utf8(argv[1]) : "";
+    if (arg1 == "help" || arg1 == "--help" || arg1 == "-h" || arg1 == "/?")
+        return Help(argc > 2 ? Utf8(argv[2]) : "");
+    for (int i = 2; i < argc; ++i) {
+        std::string a = Utf8(argv[i]);
+        if (a == "--help" || a == "-h") return Help(arg1);
+    }
+    if (argc < 3) return argc == 1 ? Help("") : Usage();
     std::string cmd = Utf8(argv[1]);
     std::wstring pluginPath = argv[2];
     std::string types, forms, fieldList, outPath, positional;
