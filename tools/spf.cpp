@@ -10,6 +10,8 @@
 //       --csv | --json            output format (default json)
 //       --out <file>              write there instead of the console
 //   --patterns <file>             pattern catalog (default: patterns.json next to spf.exe)
+//   spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..]
+//                                               a SQLite database of a whole load order
 //
 // A field that occurs once is a value; one that repeats (SNAM, LVLO, CTDA...)
 // is a list of its occurrences.
@@ -27,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "../src/db_build.h"
 #include "../src/plugin.h"
 
 using namespace spf;
@@ -160,6 +163,7 @@ COMMANDS
   spf info   <plugin>             the plugin's masters and record counts by type
   spf fields <plugin> <TYPE>      every field that record type has in this plugin
   spf export <plugin> [options]   the fields you choose, of the forms you choose
+  spf build-db [options]          a SQLite database of a whole load order
   spf help [command]              this text, or one command's details
                                   (also: spf <command> --help)
 
@@ -283,19 +287,74 @@ Examples
   spf export MyMod.esp --type REFR --fields NAME,DATA.pos_x,DATA.pos_y,DATA.pos_z --out refs.json
 )HELP";
 
+const char kHelpBuildDb[] = R"HELP(spf build-db --out <file.db> --data <Data folder> [options]
+
+Builds one SQLite database of a whole load order, for any app or script to
+query with plain SQLite. Plugins are read in parallel; Skyrim.esm and the
+Bethesda plugins take seconds.
+
+OPTIONS
+  --out <file.db>          the database to write. It is built as
+                           <file.db>.building and replaces <file.db> only
+                           when the build succeeds.
+  --data <folder>          the game's Data folder (plugins, Strings\, BSAs).
+  --load-order <file>      plugins.txt: its active (*) plugins, after the
+                           base masters and Skyrim.ccc's Creation Club
+                           plugins, which the game loads unlisted.
+  --plugins a.esm,b.esp    an explicit load order instead.
+                           Neither: every plugin in the Data folder (base
+                           masters, Skyrim.ccc order, then by name).
+                           Either way masters (ESM flag) load first.
+  --language <name>        strings language (default english).
+  --threads <n>            decode threads (default: logical cores - 1).
+  --quiet                  no progress output.
+
+WHAT IS IN IT (schema version 1: the core)
+  plugins         one row per plugin: plugin_no (its number in this DB),
+                  load_order, mod_index (light slot for light plugins),
+                  is_light, is_master, header facts, size, mtime, crc32.
+                  Masters that are not in the load order get a row with
+                  load_order NULL (file_exists says whether it is on disk).
+  plugin_masters  plugin_no, idx, master_no.
+  forms           one row per OCCURRENCE of a form: the plugin that owns it
+                  and every plugin that overrides it. form_key identifies
+                  the form, plugin_no where this copy is recorded; type,
+                  edid, record flags, parent_key (the WRLD / CELL / DIAL it
+                  sits in), stored_formid, is_winner (the copy loaded last).
+  strings         plugin_no, kind (strings / dlstrings / ilstrings), id, text.
+  forms_v         view: forms with readable keys ("Skyrim.esm:012EB7"), the
+                  in-game load-order FormID, recorded_in, is_override,
+                  is_deleted.  winning_forms = forms_v of the winners.
+  spf_meta        build settings and versions; spf_modules = what is built.
+
+KEYS
+  form_key = owner plugin_no * 16777216 + object ID. It is the same in every
+  table, whichever plugin a reference was read from, so joins are plain
+  integer joins. Owner: form_key >> 24. Object ID: form_key & 0xFFFFFF.
+  In light plugins the object ID is 12-bit, as the game reads it.
+
+EXAMPLES
+  spf build-db --out skyrim.db --data "C:\Games\Skyrim Special Edition\Data"
+  spf build-db --out lo.db --data D:\Data --load-order "%LOCALAPPDATA%\Skyrim Special Edition\plugins.txt"
+
+  SELECT form, recorded_in FROM forms_v WHERE edid = 'IronSword';
+  SELECT recorded_in, count(*) FROM forms_v WHERE is_override GROUP BY 1;
+)HELP";
+
 int Usage() {
     fprintf(stderr,
             "usage:\n"
             "  spf info   <plugin>\n"
             "  spf fields <plugin> <TYPE>\n"
             "  spf export <plugin> [--type T,..] [--form ID,..] [--fields F,..] [--csv|--json] [--out file]\n"
+            "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..]\n"
             "  spf help [command]      (full explanation)\n");
     return 2;
 }
 
 int Help(const std::string& topic) {
     const char* text = topic == "info" ? kHelpInfo : topic == "fields" ? kHelpFields
-                     : topic == "export" ? kHelpExport : kHelp;
+                     : topic == "export" ? kHelpExport : topic == "build-db" ? kHelpBuildDb : kHelp;
     _setmode(_fileno(stdout), _O_BINARY);
     fwrite(text, 1, strlen(text), stdout);
     return 0;
@@ -312,6 +371,39 @@ void Shape(const Value& v, const std::string& prefix, std::set<std::string>* out
     }
 }
 
+int BuildDbCommand(int argc, wchar_t** argv) {
+    BuildOptions opt;
+    for (int i = 2; i < argc; ++i) {
+        std::string a = Utf8(argv[i]);
+        bool hasNext = i + 1 < argc;
+        if (a == "--out" && hasNext) opt.out = argv[++i];
+        else if (a == "--data" && hasNext) opt.data = argv[++i];
+        else if (a == "--load-order" && hasNext) opt.loadOrderFile = argv[++i];
+        else if (a == "--plugins" && hasNext) {
+            std::string list = Utf8(argv[++i]);
+            for (size_t p = 0; p <= list.size();) {
+                size_t c = std::min(list.find(',', p), list.size());
+                if (c > p) opt.plugins.push_back(list.substr(p, c - p));
+                p = c + 1;
+            }
+        } else if (a == "--language" && hasNext) opt.language = Utf8(argv[++i]);
+        else if (a == "--threads" && hasNext) opt.threads = _wtoi(argv[++i]);
+        else if (a == "--quiet") opt.quiet = true;
+        else {
+            fprintf(stderr, "build-db: unknown option %s (spf build-db --help)\n", a.c_str());
+            return 2;
+        }
+    }
+    if (opt.out.empty() || opt.data.empty()) {
+        fprintf(stderr, "build-db: --out and --data are required (spf build-db --help)\n");
+        return 2;
+    }
+    std::string err;
+    int rc = BuildDb(opt, &err);
+    if (rc) fprintf(stderr, "build-db: %s\n", err.c_str());
+    return rc;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -323,6 +415,7 @@ int wmain(int argc, wchar_t** argv) {
         std::string a = Utf8(argv[i]);
         if (a == "--help" || a == "-h") return Help(arg1);
     }
+    if (arg1 == "build-db") return BuildDbCommand(argc, argv);
     if (argc < 3) return argc == 1 ? Help("") : Usage();
     std::string cmd = Utf8(argv[1]);
     std::wstring pluginPath = argv[2];

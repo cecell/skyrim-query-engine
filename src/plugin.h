@@ -37,7 +37,8 @@ struct Field {
 class Plugin {
 public:
     // `catalog` must outlive the plugin.
-    static std::unique_ptr<Plugin> Open(const std::wstring& path, const PatternCatalog& catalog, std::string* error);
+    static std::unique_ptr<Plugin> Open(const std::wstring& path, const PatternCatalog& catalog, std::string* error,
+                                        const std::string& language = "english");
     ~Plugin();
 
     const std::string& name() const { return name_; }  // file name as given
@@ -55,6 +56,13 @@ public:
 
     // "Skyrim.esm:012EB7" for a FormID stored in this plugin.
     std::string FormKey(uint32_t formId) const;
+
+    // A record's subrecord bytes, inflated when compressed (into `scratch`).
+    bool Body(const Record& r, std::vector<uint8_t>* scratch, const uint8_t** body, size_t* size) const;
+
+    const StringTables& strings() const { return strings_; }
+    const uint8_t* bytes() const { return data_; }  // the whole file
+    size_t size() const { return size_; }
 
 private:
     Plugin() = default;

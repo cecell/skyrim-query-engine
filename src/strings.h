@@ -18,6 +18,8 @@ public:
     // The text for an ID, trying the field's own table first ("strings",
     // "dlstrings" or "ilstrings"; empty = strings).
     const std::string* Find(uint32_t id, const std::string& cls) const;
+    // One table: 0 strings, 1 dlstrings, 2 ilstrings.
+    const std::unordered_map<uint32_t, std::string>& table(int c) const { return tables_[c]; }
     bool empty() const { return tables_[0].empty() && tables_[1].empty() && tables_[2].empty(); }
 
 private:
