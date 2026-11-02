@@ -42,7 +42,8 @@ Plugin::~Plugin() {
     if (file_ && file_ != INVALID_HANDLE_VALUE) CloseHandle(file_);
 }
 
-std::unique_ptr<Plugin> Plugin::Open(const std::wstring& path, const PatternCatalog& catalog, std::string* error) {
+std::unique_ptr<Plugin> Plugin::Open(const std::wstring& path, const PatternCatalog& catalog, std::string* error,
+                                     const std::string& language) {
     std::unique_ptr<Plugin> p(new Plugin());
     p->catalog_ = &catalog;
     size_t slash = path.find_last_of(L"\\/");
@@ -121,7 +122,7 @@ std::unique_ptr<Plugin> Plugin::Open(const std::wstring& path, const PatternCata
 
     if (p->localized_) {
         std::string base = p->name_.substr(0, p->name_.find_last_of('.'));
-        p->strings_.Load(p->dir_, base);
+        p->strings_.Load(p->dir_, base, language);
     }
     return p;
 }
@@ -178,17 +179,24 @@ void Plugin::Resolve(const std::string& rt, const std::string& fs, Value* v) con
     }
 }
 
+bool Plugin::Body(const Record& r, std::vector<uint8_t>* scratch, const uint8_t** body, size_t* size) const {
+    const uint8_t* rec = data_ + r.offset;
+    *size = U32(rec + 4);
+    *body = rec + 24;
+    if (r.flags & 0x00040000) {
+        if (*size < 4 || !ZlibInflate(*body + 4, *size - 4, U32(*body), scratch)) return false;
+        *body = scratch->data();
+        *size = scratch->size();
+    }
+    return true;
+}
+
 std::vector<Field> Plugin::Fields(const Record& r) const {
     std::vector<Field> out;
-    const uint8_t* rec = data_ + r.offset;
-    size_t size = U32(rec + 4);
-    const uint8_t* body = rec + 24;
     std::vector<uint8_t> inflated;
-    if (r.flags & 0x00040000) {
-        if (size < 4 || !ZlibInflate(body + 4, size - 4, U32(body), &inflated)) return out;
-        body = inflated.data();
-        size = inflated.size();
-    }
+    const uint8_t* body;
+    size_t size;
+    if (!Body(r, &inflated, &body, &size)) return out;
     DecodeContext ctx;
     ctx.rt = r.type;
     ctx.formVersion = r.formVersion;
