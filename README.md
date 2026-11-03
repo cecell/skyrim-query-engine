@@ -129,8 +129,10 @@ first configure downloads bsa-reader from GitHub (pinned to a commit in
   ```
 
   Every input is tried as a plugin (every field of every record decoded), a
-  strings file and a zlib stream. Seed the corpus with small plugins; run it
-  from a vcvars prompt so the ASan runtime DLL is found.
+  strings file and a zlib stream. Seed the corpus with small plugins (or
+  `spf_tests --seeds <dir>` from a normal build); run it from a vcvars prompt
+  so the ASan runtime DLL is found. A fuzz build only builds `spf_fuzz`. CI
+  fuzzes for 5 minutes on every push.
 
 ## Layout
 
