@@ -205,7 +205,11 @@ LIMITS
     winning override in a load order.
   - Subrecords that belong together (LVLO + COED, CTDA + CIS1/CIS2, NPC tint
     layers) come out as separate lists in file order, not paired.
-  - Strings: English only.
+  - Strings: English only (build-db: --language).
+  - A damaged plugin is refused with the reason (exit code 1); a subrecord
+    whose bytes do not fit its pattern comes out as raw hex. Sizes and
+    counts from the file are checked before use, so a damaged or crafted
+    file cannot make spf read out of bounds or allocate gigabytes.
 
 EXIT CODES
   0 ok   1 the plugin could not be opened or is not a plugin   2 bad arguments
@@ -315,6 +319,8 @@ WHAT IS IN IT (schema version 3)
                   is_light, is_master, header facts, size, mtime, crc32.
                   Masters that are not in the load order get a row with
                   load_order NULL (file_exists says whether it is on disk).
+                  load_error: why a plugin could not be read; such a plugin
+                  is reported, has no rows, and the build carries on.
   plugin_masters  plugin_no, idx, master_no.
   forms           one row per OCCURRENCE of a form: the plugin that owns it
                   and every plugin that overrides it. form_key identifies

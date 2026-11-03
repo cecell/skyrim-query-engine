@@ -180,6 +180,10 @@ bool Dynamic(State& s) {
 bool ZlibInflate(const uint8_t* src, size_t srcLen, size_t expectedSize, std::vector<uint8_t>* out) {
     out->clear();
     if (srcLen < 2 || (src[0] & 0x0F) != 8 || ((src[0] << 8) | src[1]) % 31 != 0 || (src[1] & 0x20)) return false;
+    // The size comes from the file. Deflate cannot expand more than 1032:1,
+    // so a larger claim is a lie; refusing it keeps a damaged record from
+    // asking for gigabytes.
+    if (expectedSize > kMaxInflated || expectedSize > srcLen * 1032 + 64) return false;
     out->reserve(expectedSize);
     State s{src + 2, srcLen - 2};
     s.out = out;

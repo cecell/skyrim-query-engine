@@ -11,9 +11,15 @@ namespace spf {
 class StringTables {
 public:
     // Looks for <plugin>_<language>.<ext> in <dir>\Strings, then inside
-    // <plugin>.bsa, then "Skyrim - Interface.bsa" (where Bethesda's are).
-    // Missing tables are fine: lookups just fail.
+    // <plugin>.bsa, then "Skyrim - Interface.bsa" (where Bethesda's are;
+    // BSAs through bsa-reader, compressed ones too). Missing or damaged
+    // tables are fine: lookups just fail.
     void Load(const std::wstring& dir, const std::string& pluginBaseName, const std::string& language = "english");
+
+    // Parses one strings file already in memory into table `c` (0 strings,
+    // 1 dlstrings, 2 ilstrings). Entries pointing outside the file are
+    // skipped. Returns false when the file's own sizes do not fit.
+    bool Parse(int c, const uint8_t* data, size_t size);
 
     // The text for an ID, trying the field's own table first ("strings",
     // "dlstrings" or "ilstrings"; empty = strings).

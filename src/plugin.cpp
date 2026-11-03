@@ -37,7 +37,7 @@ bool ParseHex8(const std::string& s, size_t start, uint32_t* out) {
 }  // namespace
 
 Plugin::~Plugin() {
-    if (data_) UnmapViewOfFile(data_);
+    if (mapped_) UnmapViewOfFile(data_);
     if (mapping_) CloseHandle(mapping_);
     if (file_ && file_ != INVALID_HANDLE_VALUE) CloseHandle(file_);
 }
@@ -65,20 +65,49 @@ std::unique_ptr<Plugin> Plugin::Open(const std::wstring& path, const PatternCata
     }
     p->mapping_ = CreateFileMappingW(p->file_, nullptr, PAGE_READONLY, 0, 0, nullptr);
     if (p->mapping_) p->data_ = static_cast<const uint8_t*>(MapViewOfFile(p->mapping_, FILE_MAP_READ, 0, 0, 0));
-    if (!p->data_ || memcmp(p->data_, "TES4", 4) != 0) {
-        *error = "not a plugin";
+    if (!p->data_) {
+        *error = "cannot read the file";
         return nullptr;
+    }
+    p->mapped_ = true;
+    if (!p->Parse(error)) return nullptr;
+    if (p->localized_) {
+        std::string base = p->name_.substr(0, p->name_.find_last_of('.'));
+        p->strings_.Load(p->dir_, base, language);
+    }
+    return p;
+}
+
+std::unique_ptr<Plugin> Plugin::FromMemory(const uint8_t* bytes, size_t size, const std::string& name,
+                                           const PatternCatalog& catalog, std::string* error) {
+    std::unique_ptr<Plugin> p(new Plugin());
+    p->catalog_ = &catalog;
+    p->name_ = name;
+    p->owned_.assign(bytes, bytes + size);
+    p->data_ = p->owned_.data();
+    p->size_ = size;
+    if (!p->Parse(error)) return nullptr;
+    return p;
+}
+
+// Reads the header and indexes every record. Every size comes from the file
+// and is checked before it is used.
+bool Plugin::Parse(std::string* error) {
+    Plugin* p = this;
+    if (size_ < 24 || memcmp(data_, "TES4", 4) != 0) {
+        *error = "not a plugin";
+        return false;
     }
     const uint8_t* d = p->data_;
     p->localized_ = (U32(d + 8) & 0x80) != 0;
     size_t hdrSize = U32(d + 4);
     if (24 + hdrSize > p->size_) {
         *error = "truncated header";
-        return nullptr;
+        return false;
     }
     for (size_t q = 24; q + 6 <= 24 + hdrSize;) {
         size_t n = U16(d + q + 4);
-        if (memcmp(d + q, "MAST", 4) == 0 && q + 6 + n <= p->size_) {
+        if (memcmp(d + q, "MAST", 4) == 0 && q + 6 + n <= 24 + hdrSize) {
             const char* s = reinterpret_cast<const char*>(d + q + 6);
             p->masters_.emplace_back(s, strnlen(s, n));
         }
@@ -96,14 +125,24 @@ std::unique_ptr<Plugin> Plugin::Open(const std::wstring& path, const PatternCata
         while (!groups.empty() && q >= groups.back().end) groups.pop_back();
         const uint8_t* r = d + q;
         if (memcmp(r, "GRUP", 4) == 0) {
-            groups.push_back({q + U32(r + 4), U32(r + 12), U32(r + 8)});
+            // A group's size counts its own header and must stay inside its
+            // parent group and the file; otherwise records would be placed in
+            // the wrong WRLD / CELL / DIAL.
+            size_t gsize = U32(r + 4);
+            size_t limit = groups.empty() ? p->size_ : groups.back().end;
+            if (gsize < 24 || q + gsize > limit) {
+                *error = "damaged plugin: a group at offset " + std::to_string(q) + " has an impossible size";
+                return false;
+            }
+            groups.push_back({q + gsize, U32(r + 12), U32(r + 8)});
             q += 24;
             continue;
         }
         size_t len = U32(r + 4);
-        if (q + 24 + len > p->size_) {
-            *error = "a record runs past the end of the file";
-            return nullptr;
+        size_t limit = groups.empty() ? p->size_ : groups.back().end;
+        if (q + 24 + len > limit) {
+            *error = "damaged plugin: the record at offset " + std::to_string(q) + " runs past its group or the file";
+            return false;
         }
         uint32_t parent = 0;
         for (auto g = groups.rbegin(); g != groups.rend(); ++g) {
@@ -119,12 +158,7 @@ std::unique_ptr<Plugin> Plugin::Open(const std::wstring& path, const PatternCata
     for (size_t i = 1; i < p->records_.size(); ++i) p->byFormId_.emplace_back(p->records_[i].formId, i);
     std::stable_sort(p->byFormId_.begin(), p->byFormId_.end(),
                      [](const auto& a, const auto& b) { return a.first < b.first; });
-
-    if (p->localized_) {
-        std::string base = p->name_.substr(0, p->name_.find_last_of('.'));
-        p->strings_.Load(p->dir_, base, language);
-    }
-    return p;
+    return true;
 }
 
 const Record* Plugin::Find(uint32_t formId) const {
@@ -240,7 +274,7 @@ std::vector<Field> Plugin::Fields(const Record& r, const FormIdMap* formIds, con
                 std::string path = fs;
                 Resolve(r.type, fs, formIds, &f.value, &path);
                 f.decoded = true;
-            } catch (const PatternError&) {
+            } catch (const std::exception&) {  // bytes that do not fit the pattern (or a failed allocation)
             }
         }
         if (!f.decoded) {
