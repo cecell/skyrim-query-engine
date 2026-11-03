@@ -58,8 +58,10 @@ add_test(NAME unit COMMAND spf_tests ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.j
 # libFuzzer's main. Needs MSVC's clang_rt.asan_dynamic DLL on PATH (vcvars).
 option(SPF_FUZZ "Build the libFuzzer target spf_fuzz" OFF)
 if(SPF_FUZZ)
-    # Everything linked together must agree on ASan (container annotations).
-    foreach(t spf spf_tests spf_cli bsa_reader)
+    # Everything linked into spf_fuzz must agree on ASan (container
+    # annotations). Coverage-instrumented code needs libFuzzer's runtime, so
+    # in a fuzz build only spf_fuzz links: build that target alone.
+    foreach(t spf bsa_reader)
         target_compile_options(${t} PRIVATE /Zi /fsanitize=address /fsanitize-coverage=inline-8bit-counters
             /fsanitize-coverage=edge /fsanitize-coverage=trace-cmp)
     endforeach()
