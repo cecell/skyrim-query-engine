@@ -12,6 +12,7 @@ using K = Shape::Kind;
 // opt-in module (BACKLOG.md, modules).
 const char* ModuleOf(const std::string& rt, const std::string& fs) {
     if (rt == "NAVI" || (rt == "NAVM" && fs == "NVNM")) return "navmesh";
+    if (rt == "WRLD" && fs == "RNAM") return "wrld_large_refs";  // per-cell lists of large references
     if ((rt == "LAND" && (fs == "VHGT" || fs == "VNML" || fs == "VCLR" || fs == "ATXT" || fs == "VTXT" ||
                           fs == "BTXT")) ||
         (rt == "CELL" && (fs == "MHDT" || fs == "TVDT")) || (rt == "WRLD" && (fs == "MHDT" || fs == "OFST")))

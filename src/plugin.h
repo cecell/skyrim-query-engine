@@ -54,9 +54,11 @@ public:
     // Every field of a record, in file order (repeated subrecords appear
     // repeatedly). Values have FormIDs and localized strings resolved.
     // `formIds`, when given, replaces each FormID (stored, non-zero) instead
-    // of the "Owner.esm:XXXXXX" text.
+    // of the "Owner.esm:XXXXXX" text. It is called with the stored FormID and
+    // its path in the subrecord ("SNAM.Faction", "KWDA"; list positions left
+    // out).
     // `wanted`, when given, picks the subrecords to return (by signature).
-    using FormIdMap = std::function<Value(uint32_t)>;
+    using FormIdMap = std::function<Value(uint32_t, const std::string&)>;
     using SigFilter = std::function<bool(const std::string&)>;
     std::vector<Field> Fields(const Record& r, const FormIdMap* formIds = nullptr,
                               const SigFilter* wanted = nullptr) const;
@@ -73,7 +75,8 @@ public:
 
 private:
     Plugin() = default;
-    void Resolve(const std::string& rt, const std::string& fs, const FormIdMap* formIds, Value* v) const;
+    void Resolve(const std::string& rt, const std::string& fs, const FormIdMap* formIds, Value* v,
+                 std::string* path) const;
 
     std::string name_;
     std::wstring dir_;

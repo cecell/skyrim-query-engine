@@ -148,27 +148,32 @@ std::string Plugin::FormKey(uint32_t formId) const {
     return owner + buf;
 }
 
-void Plugin::Resolve(const std::string& rt, const std::string& fs, const FormIdMap* formIds, Value* v) const {
+void Plugin::Resolve(const std::string& rt, const std::string& fs, const FormIdMap* formIds, Value* v,
+                     std::string* path) const {
     switch (v->kind()) {
         case Value::Kind::String: {
             const std::string& s = v->AsString();
             uint32_t n;
             if (s.size() == 10 && s[0] == '[' && s[9] == ']' && ParseHex8(s, 1, &n)) {
-                *v = n == 0 ? Value() : formIds ? (*formIds)(n) : Value::Str(FormKey(n));  // [00000000] = no form
+                // [00000000] = no form
+                *v = n == 0 ? Value() : formIds ? (*formIds)(n, *path) : Value::Str(FormKey(n));
             } else if (s.size() == 20 && s.rfind("[LSTRING:0x", 0) == 0 && ParseHex8(s, 11, &n)) {
                 if (n == 0) *v = Value::Str("");
                 else if (const std::string* text = strings_.Find(n, catalog_->LstringClass(rt, fs))) *v = Value::Str(*text);
             }
             break;
         }
-        case Value::Kind::List:
-            for (auto& it : v->Items()) Resolve(rt, fs, formIds, &it);
+        case Value::Kind::List:  // list positions are not part of the path
+            for (auto& it : v->Items()) Resolve(rt, fs, formIds, &it, path);
             break;
         case Value::Kind::Map: {
             Value out = Value::Map();
+            const size_t len = path->size();
             for (const auto& m : v->Members()) {
                 Value child = m.second;
-                Resolve(rt, fs, formIds, &child);
+                if (formIds) path->append(".").append(m.first);
+                Resolve(rt, fs, formIds, &child, path);
+                path->resize(len);
                 out.Set(m.first, std::move(child));
             }
             *v = std::move(out);
@@ -232,7 +237,8 @@ std::vector<Field> Plugin::Fields(const Record& r, const FormIdMap* formIds, con
             ctx.fsig = fs;
             try {
                 f.value = DecodeSubrecord(*pat, data, len, ctx);
-                Resolve(r.type, fs, formIds, &f.value);
+                std::string path = fs;
+                Resolve(r.type, fs, formIds, &f.value, &path);
                 f.decoded = true;
             } catch (const PatternError&) {
             }

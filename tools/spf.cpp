@@ -291,7 +291,7 @@ const char kHelpBuildDb[] = R"HELP(spf build-db --out <file.db> --data <Data fol
 
 Builds one SQLite database of a whole load order, for any app or script to
 query with plain SQLite. Plugins are decoded in parallel: the Bethesda
-plugins take about 20 seconds, a 4,883-plugin load order about 75.
+plugins take about 20 seconds, a 4,883-plugin load order about 85.
 
 OPTIONS
   --out <file.db>          the database to write. It is built as
@@ -309,7 +309,7 @@ OPTIONS
   --threads <n>            decode threads (default: logical cores - 1).
   --quiet                  no progress output.
 
-WHAT IS IN IT (schema version 2)
+WHAT IS IN IT (schema version 3)
   plugins         one row per plugin: plugin_no (its number in this DB),
                   load_order, mod_index (light slot for light plugins),
                   is_light, is_master, header facts, size, mtime, crc32.
@@ -336,8 +336,18 @@ WHAT IS IN IT (schema version 2)
   *_ctda) and lists of FormIDs inside one (weap_kwda keywords).
   FormID columns hold form_key integers. Other lists, and anything nested
   below them, are JSON text. Bitfield flags are a JSON list of names.
-  Not built by default: navmesh geometry and landscape (terrain, height
-  maps, occlusion); spf_meta.modules_not_built lists them.
+  Not built by default: navmesh geometry, landscape (terrain, height maps,
+  occlusion) and worldspace large-reference lists; spf_meta.modules_not_built
+  lists them.
+  form_refs       the xref: one row per FormID inside a record, wherever it
+                  sits (form_key, plugin_no = the occurrence; ref_key = the
+                  form it points at; path_id -> ref_paths: record type and
+                  field path such as "SNAM.Faction" or "KWDA"). Indexed both
+                  ways: what references X, and what X references.
+                  form_refs_v readable; winning_refs = references made by
+                  the winning copies; dangling_refs = references to forms no
+                  plugin defines. "Sits in this cell" is forms.parent_key,
+                  not a reference.
   subrecord_overflow  extra occurrences of subrecords expected once.
   subrecord_raw       subrecords with no pattern or bytes that did not fit.
   st_tables, st_columns  the data dictionary: every table and column, with
@@ -361,6 +371,8 @@ EXAMPLES
     JOIN weap_kwda x USING (form_key, plugin_no)
     JOIN winning_forms k ON k.form_key = x.kwda;
   SELECT column_name, kind, path, description FROM st_columns WHERE table_name = 'npc';
+  SELECT form, type, path FROM winning_refs
+    WHERE ref_key = (SELECT form_key FROM winning_forms WHERE edid = 'IronSword');
 )HELP";
 
 int Usage() {
