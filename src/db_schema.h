@@ -36,6 +36,7 @@ struct ColumnDef {
 struct TableDef {
     std::string name;
     std::string rt, fs;  // fs empty = the record type's own table
+    std::string module;  // non-empty: filled only when that module is built
     std::string description;
     std::vector<ColumnDef> columns;  // after form_key, plugin_no (and idx)
 };
@@ -45,11 +46,14 @@ struct SubrecordDef {
     bool child = false;
     bool elementRows = false;  // child rows = the elements of the decoded list
     size_t firstColumn = 0, columnCount = 0;
-    std::string module;  // non-empty: kept out of the core (e.g. "navmesh")
+    std::string module;  // non-empty: an optional module ("navmesh"); its own table
 };
 
 class Schema {
 public:
+    // The optional modules, with what they hold.
+    static const std::vector<std::pair<std::string, std::string>>& Modules();
+
     // `isUsableName` says whether a column name works unquoted in SQL.
     void Build(const PatternCatalog& catalog, bool (*isUsableName)(const std::string&));
 

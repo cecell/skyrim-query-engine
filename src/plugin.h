@@ -29,6 +29,21 @@ struct Record {
     size_t offset = 0;       // in the file
 };
 
+// Facts from the TES4 header record.
+struct PluginHeader {
+    float version = 0;          // HEDR: 0.94, 1.7, 1.71
+    uint32_t numRecords = 0;    // HEDR: records + groups, as the CK counted them
+    uint32_t nextObjectId = 0;  // HEDR
+    uint32_t flags = 0;         // TES4 record flags
+    bool esm = false;           // flag 0x1
+    bool esl = false;           // flag 0x200
+    bool localized = false;     // flag 0x80
+    bool master = false;        // ESM flag or .esm/.esl extension (loads as a master)
+    bool light = false;         // ESL flag or .esl extension (loads in the FE slot)
+    std::string author;         // CNAM, UTF-8
+    std::string description;    // SNAM, UTF-8
+};
+
 struct Field {
     std::string sig;   // subrecord signature, e.g. "DATA"
     Value value;       // decoded; raw hex string ("#...") when no pattern fits
@@ -46,7 +61,9 @@ public:
     ~Plugin();
 
     const std::string& name() const { return name_; }  // file name as given
-    const std::vector<std::string>& masters() const { return masters_; }
+    const std::vector<std::string>& masters() const { return masters_; }  // raw bytes (Windows-1252)
+    std::vector<std::string> mastersUtf8() const;                         // the same names as UTF-8
+    const PluginHeader& info() const { return info_; }
     bool localized() const { return localized_; }
     const Record& header() const { return records_.front(); }  // TES4
     const std::vector<Record>& records() const { return records_; }
@@ -87,6 +104,7 @@ private:
     const PatternCatalog* catalog_ = nullptr;
     std::vector<std::string> masters_;
     bool localized_ = false;
+    PluginHeader info_;
     std::vector<Record> records_;
     std::vector<std::pair<uint32_t, size_t>> byFormId_;  // sorted, into records_
     StringTables strings_;

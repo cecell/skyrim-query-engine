@@ -18,6 +18,7 @@ struct BuildOptions {
     std::wstring loadOrderFile;        // plugins.txt; empty = see `plugins`
     std::vector<std::string> plugins;  // explicit load order; both empty = every plugin in `data`
     std::wstring patterns;             // the pattern catalog (patterns.json)
+    std::vector<std::string> modules;  // optional modules to build too (--with)
     std::string language = "english";
     int threads = 0;                   // 0 = one per logical core, minus the writer
     bool quiet = false;
@@ -25,5 +26,21 @@ struct BuildOptions {
 
 // Returns 0 on success; prints progress to stderr unless quiet.
 int BuildDb(const BuildOptions& opt, std::string* error);
+
+struct AddOptions {
+    std::wstring db;                   // a database build-db wrote
+    std::vector<std::string> modules;  // to add
+    std::wstring patterns;
+    int threads = 0;
+    bool quiet = false;
+};
+
+// spf db add: decodes only the modules' subrecords from the plugins the
+// database was built from and fills their tables, in one transaction.
+// Refuses when a plugin changed since the build (rebuild, or sync later).
+int AddModules(const AddOptions& opt, std::string* error);
+
+// The optional modules and what each holds.
+std::vector<std::pair<std::string, std::string>> AvailableModules();
 
 }  // namespace spf

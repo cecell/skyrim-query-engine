@@ -164,6 +164,7 @@ COMMANDS
   spf fields <plugin> <TYPE>      every field that record type has in this plugin
   spf export <plugin> [options]   the fields you choose, of the forms you choose
   spf build-db [options]          a SQLite database of a whole load order
+  spf db add <module> --db x.db   add an optional module (navmesh, landscape...) later
   spf help [command]              this text, or one command's details
                                   (also: spf <command> --help)
 
@@ -310,6 +311,7 @@ OPTIONS
                            masters, Skyrim.ccc order, then by name).
                            Either way masters (ESM flag) load first.
   --language <name>        strings language (default english).
+  --with m1,m2             build optional modules too (see MODULES).
   --threads <n>            decode threads (default: logical cores - 1).
   --quiet                  no progress output.
 
@@ -342,9 +344,15 @@ WHAT IS IN IT (schema version 3)
   *_ctda) and lists of FormIDs inside one (weap_kwda keywords).
   FormID columns hold form_key integers. Other lists, and anything nested
   below them, are JSON text. Bitfield flags are a JSON list of names.
-  Not built by default: navmesh geometry, landscape (terrain, height maps,
-  occlusion) and worldspace large-reference lists; spf_meta.modules_not_built
-  lists them.
+  MODULES (optional; their tables exist in every build, empty until built):
+    navmesh          NAVM geometry (vertices, triangles, edge and door
+                     links) and NAVI
+    landscape        LAND terrain (heights, normals, colours, texture
+                     layers), CELL / WRLD height maps, occlusion, LOD offsets
+    wrld_large_refs  WRLD.RNAM large-reference lists
+  Build them with --with, or add them later: spf db add <module> --db x.db.
+  spf_modules lists what is built; st_tables.module says which tables
+  belong to which module.
   form_refs       the xref: one row per FormID inside a record, wherever it
                   sits (form_key, plugin_no = the occurrence; ref_key = the
                   form it points at; path_id -> ref_paths: record type and
@@ -381,20 +389,43 @@ EXAMPLES
     WHERE ref_key = (SELECT form_key FROM winning_forms WHERE edid = 'IronSword');
 )HELP";
 
+const char kHelpDb[] = R"HELP(spf db add <module>[,<module>] --db <file.db> [--threads n] [--quiet]
+
+Adds optional modules to a database build-db made: re-reads only those
+modules' subrecords from the same plugins and fills their tables (plus xref
+rows for any FormIDs in them). Core tables are not touched.
+
+  navmesh          NAVM geometry (vertices, triangles, edge and door links)
+                   and NAVI
+  landscape        LAND terrain (heights, normals, colours, texture layers),
+                   CELL / WRLD height maps, occlusion, LOD offsets
+  wrld_large_refs  WRLD.RNAM large-reference lists
+
+It runs in one transaction: if anything fails, nothing is added. It refuses
+when a plugin changed (size or date) since the build, because the new rows
+would not match the core ones; rebuild then. A module already built is
+refused too. spf_modules lists what is built.
+
+  spf db add navmesh --db skyrim.db
+  spf db add landscape,wrld_large_refs --db skyrim.db
+)HELP";
+
 int Usage() {
     fprintf(stderr,
             "usage:\n"
             "  spf info   <plugin>\n"
             "  spf fields <plugin> <TYPE>\n"
             "  spf export <plugin> [--type T,..] [--form ID,..] [--fields F,..] [--csv|--json] [--out file]\n"
-            "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..]\n"
+            "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..]\n"
+            "  spf db add <module>[,..] --db <db>\n"
             "  spf help [command]      (full explanation)\n");
     return 2;
 }
 
 int Help(const std::string& topic) {
     const char* text = topic == "info" ? kHelpInfo : topic == "fields" ? kHelpFields
-                     : topic == "export" ? kHelpExport : topic == "build-db" ? kHelpBuildDb : kHelp;
+                     : topic == "export" ? kHelpExport : topic == "build-db" ? kHelpBuildDb
+                     : topic == "db" ? kHelpDb : kHelp;
     _setmode(_fileno(stdout), _O_BINARY);
     fwrite(text, 1, strlen(text), stdout);
     return 0;
@@ -409,6 +440,46 @@ void CollectPaths(const Value& v, const std::string& prefix, std::set<std::strin
         for (const auto& it : v.Items())
             if (it.kind() == Value::Kind::Map) CollectPaths(it, prefix, out);
     }
+}
+
+std::wstring PatternsNextToExe() {
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring p = exe;
+    return p.substr(0, p.find_last_of(L"\\/") + 1) + L"patterns.json";
+}
+
+// spf db add <module>[,<module>...] --db <file.db>
+int DbCommand(int argc, wchar_t** argv) {
+    std::string sub = argc > 2 ? Utf8(argv[2]) : "";
+    if (sub != "add") {
+        fprintf(stderr, "usage: spf db add <module>[,<module>] --db <file.db> (spf db --help)\n");
+        return 2;
+    }
+    AddOptions opt;
+    for (int i = 3; i < argc; ++i) {
+        std::string a = Utf8(argv[i]);
+        bool hasNext = i + 1 < argc;
+        if (a == "--db" && hasNext) opt.db = argv[++i];
+        else if (a == "--threads" && hasNext) opt.threads = _wtoi(argv[++i]);
+        else if (a == "--quiet") opt.quiet = true;
+        else if (a == "--patterns" && hasNext) opt.patterns = argv[++i];
+        else if (!a.empty() && a[0] != '-') {
+            for (const auto& m : SplitList(a)) opt.modules.push_back(m);
+        } else {
+            fprintf(stderr, "db add: unknown option %s (spf db --help)\n", a.c_str());
+            return 2;
+        }
+    }
+    if (opt.db.empty() || opt.modules.empty()) {
+        fprintf(stderr, "db add: a module and --db are required (spf db --help)\n");
+        return 2;
+    }
+    if (opt.patterns.empty()) opt.patterns = PatternsNextToExe();
+    std::string err;
+    int rc = AddModules(opt, &err);
+    if (rc) fprintf(stderr, "db add: %s\n", err.c_str());
+    return rc;
 }
 
 int BuildDbCommand(int argc, wchar_t** argv) {
@@ -430,7 +501,9 @@ int BuildDbCommand(int argc, wchar_t** argv) {
         else if (a == "--threads" && hasNext) opt.threads = _wtoi(argv[++i]);
         else if (a == "--quiet") opt.quiet = true;
         else if (a == "--patterns" && hasNext) opt.patterns = argv[++i];
-        else {
+        else if (a == "--with" && hasNext) {
+            for (const auto& m : SplitList(Utf8(argv[++i]))) opt.modules.push_back(m);
+        } else {
             fprintf(stderr, "build-db: unknown option %s (spf build-db --help)\n", a.c_str());
             return 2;
         }
@@ -463,6 +536,7 @@ int wmain(int argc, wchar_t** argv) {
         if (a == "--help" || a == "-h") return Help(arg1);
     }
     if (arg1 == "build-db") return BuildDbCommand(argc, argv);
+    if (arg1 == "db") return DbCommand(argc, argv);
     if (argc < 3) return argc == 1 ? Help("") : Usage();
     std::string cmd = Utf8(argv[1]);
     std::wstring pluginPath = argv[2];
