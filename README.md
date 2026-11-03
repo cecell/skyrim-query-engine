@@ -48,8 +48,9 @@ spf build-db --out skyrim.db --data "<Skyrim>\Data" [--load-order plugins.txt | 
 ```
 
 Plugins are decoded in parallel and one thread writes. The Bethesda plugins
-build in about 20 seconds (565 MB); a 4,883-plugin load order (5.6 million
-forms, 19 million field rows) in about 75 seconds (3 GB).
+build in about 20 seconds (640 MB); a 4,883-plugin load order (5.6 million
+forms, 19 million field rows, 13 million references) in about 85 seconds
+(3.6 GB).
 
 - `plugins`: load order, light slot, header facts, size, mtime, CRC32.
   Masters missing from the load order still get a row, and so does
@@ -64,6 +65,10 @@ forms, 19 million field rows) in about 75 seconds (3 GB).
   `lvli_lvlo`, `weap_kwda`). Generated from the pattern catalog, so every
   record type has the same tables in every build. `winning_<type>` views.
 - `strings`: every localized string of every plugin.
+- `form_refs`: the xref, one row per FormID inside a record wherever it sits
+  (columns, child tables, nested JSON), indexed both ways: what references a
+  form, and what a form references. Views `winning_refs` (references the load
+  order ends up with) and `dangling_refs` (references to forms nobody defines).
 - `st_tables` / `st_columns`: the data dictionary (what each column is,
   which subrecord and path it comes from, what a key refers to).
 - `subrecord_overflow` / `subrecord_raw`: whatever did not fit, so nothing
@@ -71,8 +76,9 @@ forms, 19 million field rows) in about 75 seconds (3 GB).
 - Views `forms_v` (readable `Skyrim.esm:012EB7` keys, in-game FormIDs) and
   `winning_forms`.
 
-Navmesh geometry and landscape data (terrain, height maps, occlusion) are
-left out for now; they will be optional modules.
+Navmesh geometry, landscape data (terrain, height maps, occlusion) and
+worldspace large-reference lists are left out for now; they will be optional
+modules.
 
 The tables were checked cell for cell against `spf export` on 21 record
 types of Skyrim.esm and Dawnguard.esm (12.8 million values, 0 mismatches).

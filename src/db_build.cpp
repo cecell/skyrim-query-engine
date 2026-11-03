@@ -25,7 +25,7 @@
 namespace spf {
 namespace {
 
-constexpr int kSchemaVersion = 2;
+constexpr int kSchemaVersion = 3;
 constexpr size_t kBatchRows = 50000;
 constexpr int64_t kKeyShift = 1 << 24;
 
@@ -296,7 +296,7 @@ struct Cell {
 };
 
 // Table ids besides the schema's (which are >= 0).
-constexpr int kOverflowTable = -1, kRawTable = -2;
+constexpr int kOverflowTable = -1, kRawTable = -2, kRefsTable = -3;
 
 struct TableRow {
     int table;
@@ -419,8 +419,15 @@ void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
         return ownerBase[i] + (stored & objMask[i]);
     };
 
-    const Plugin::FormIdMap formIds = [&](uint32_t stored) { return Value::Int(keyOf(stored)); };
-    std::string rt;  // the record being decoded, for the filter
+    std::string rt;      // the record being decoded
+    int64_t curKey = 0;  // and its form_key
+    // Every FormID becomes a key, and a form_refs row (the xref).
+    const Plugin::FormIdMap formIds = [&](uint32_t stored, const std::string& path) {
+        const int64_t ref = keyOf(stored);
+        batch.rows.push_back(
+            {kRefsTable, {Cell::Int(curKey), Cell::Int(info.no), Cell::Int(ref), Cell::Text(rt), Cell::Text(path)}});
+        return Value::Int(ref);
+    };
     const Plugin::SigFilter wanted = [&](const std::string& fs) {
         const SubrecordDef* d = schema.Find(rt, fs);
         return !d || d->module.empty();
@@ -457,6 +464,7 @@ void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
             }
         }
         const int64_t key = row.key;
+        curKey = key;
         batch.forms.push_back(std::move(row));
 
         // The record's fields -> its type table row, child rows, and rows
@@ -677,6 +685,23 @@ CREATE TABLE subrecord_raw(
   reason    TEXT NOT NULL
 );
 
+-- The xref: one row per FormID inside a record, "this occurrence of
+-- form_key references ref_key", wherever the FormID sits (columns, child
+-- tables, JSON). path_id says which field (ref_paths).
+CREATE TABLE ref_paths(
+  path_id INTEGER PRIMARY KEY,
+  type    TEXT NOT NULL,
+  path    TEXT NOT NULL,
+  UNIQUE(type, path)
+);
+
+CREATE TABLE form_refs(
+  form_key  INTEGER NOT NULL,
+  plugin_no INTEGER NOT NULL REFERENCES plugins,
+  ref_key   INTEGER NOT NULL,
+  path_id   INTEGER NOT NULL REFERENCES ref_paths
+);
+
 -- The data dictionary: every table and column of this database.
 CREATE TABLE st_tables(
   table_name  TEXT PRIMARY KEY,
@@ -707,6 +732,8 @@ const char* kCoreTables[][2] = {
     {"strings", "Every localized string of every plugin."},
     {"subrecord_overflow", "Extra occurrences of subrecords the catalog says occur once per record."},
     {"subrecord_raw", "Subrecords with no pattern, or whose bytes did not fit it."},
+    {"form_refs", "The xref: one row per FormID inside a record (this occurrence of form_key references ref_key). Index on ref_key: what references a form."},
+    {"ref_paths", "The field a form_refs row comes from: record type and path in the subrecord (\"SNAM.Faction\", \"KWDA\")."},
     {"spf_meta", "Build settings and versions."},
     {"spf_modules", "What is built: core and the optional modules."},
     {"st_tables", "The data dictionary: tables."},
@@ -799,6 +826,30 @@ JOIN plugins o ON o.plugin_no = f.form_key >> 24
 JOIN plugins r ON r.plugin_no = f.plugin_no;
 
 CREATE VIEW winning_forms AS SELECT * FROM forms_v WHERE is_winner;
+
+-- The xref, readable: who references what, from which field.
+CREATE VIEW form_refs_v AS
+SELECT s.name || ':' || printf('%06X', r.form_key & 16777215) AS form,
+       c.name AS recorded_in,
+       p.type, p.path,
+       t.name || ':' || printf('%06X', r.ref_key & 16777215) AS ref,
+       r.form_key, r.plugin_no, r.ref_key
+FROM form_refs r
+JOIN ref_paths p USING (path_id)
+JOIN plugins s ON s.plugin_no = r.form_key >> 24
+JOIN plugins t ON t.plugin_no = r.ref_key >> 24
+JOIN plugins c ON c.plugin_no = r.plugin_no;
+
+-- References made by the winning copy of each form: the load order's result.
+CREATE VIEW winning_refs AS
+SELECT v.* FROM form_refs_v v
+JOIN forms f ON f.form_key = v.form_key AND f.plugin_no = v.plugin_no
+WHERE f.is_winner;
+
+-- References to forms that exist in no plugin of this database.
+CREATE VIEW dangling_refs AS
+SELECT v.* FROM form_refs_v v
+WHERE NOT EXISTS (SELECT 1 FROM forms f WHERE f.form_key = v.ref_key);
 )SQL";
 
 std::string NowIso() {
@@ -926,7 +977,11 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         }
         Stmt insOverflow{db.Prepare("INSERT INTO subrecord_overflow VALUES(?,?,?,?,?)", error)};
         Stmt insRaw{db.Prepare("INSERT INTO subrecord_raw VALUES(?,?,?,?,?,?,?)", error)};
-        if (!insOverflow.st || !insRaw.st) return 1;
+        Stmt insRef{db.Prepare("INSERT INTO form_refs VALUES(?,?,?,?)", error)};
+        Stmt insPath{db.Prepare("INSERT INTO ref_paths VALUES(?,?,?)", error)};
+        if (!insOverflow.st || !insRaw.st || !insRef.st || !insPath.st) return 1;
+        std::unordered_map<std::string, int64_t> pathIds;  // "TYPE PATH" -> path_id
+        int64_t refs = 0;
 
         Stmt insPlugin{db.Prepare("INSERT INTO plugins VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)", error)};
         Stmt insMaster{db.Prepare("INSERT INTO plugin_masters VALUES(?,?,?)", error)};
@@ -1014,12 +1069,24 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             for (const auto& s : b.strings)
                 insString.Int(1, b.pluginNo).Text(2, kKinds[s.kind]).Int(3, s.id).Text(4, s.text).Run();
             for (const auto& r : b.rows) {
+                if (r.table == kRefsTable) {  // form_key, plugin_no, ref_key, type, path
+                    std::string pathKey = r.cells[3].s + ' ' + r.cells[4].s;
+                    auto it = pathIds.find(pathKey);
+                    if (it == pathIds.end()) {
+                        it = pathIds.emplace(std::move(pathKey), static_cast<int64_t>(pathIds.size()) + 1).first;
+                        insPath.Int(1, it->second).Text(2, r.cells[3].s).Text(3, r.cells[4].s).Run();
+                    }
+                    insRef.Int(1, r.cells[0].i).Int(2, r.cells[1].i).Int(3, r.cells[2].i).Int(4, it->second);
+                    if (!insRef.Run() && firstError.empty()) firstError = db.Message();
+                    ++refs;
+                    continue;
+                }
                 sqlite3_stmt* st = r.table == kOverflowTable ? insOverflow.st
                                  : r.table == kRawTable      ? insRaw.st
                                                              : insTable[r.table].st;
                 if (!BindRun(st, r.cells) && firstError.empty()) firstError = db.Message();
+                ++rows;
             }
-            rows += static_cast<int64_t>(b.rows.size());
             forms += static_cast<int64_t>(b.forms.size());
             strings += static_cast<int64_t>(b.strings.size());
             if (b.last) {
@@ -1033,12 +1100,15 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             *error = firstError;
             return 1;
         }
-        say("wrote %lld forms, %lld field rows, %lld strings from %zu plugins", static_cast<long long>(forms),
-            static_cast<long long>(rows), static_cast<long long>(strings), done);
+        say("wrote %lld forms, %lld field rows, %lld references, %lld strings from %zu plugins",
+            static_cast<long long>(forms), static_cast<long long>(rows), static_cast<long long>(refs),
+            static_cast<long long>(strings), done);
 
         std::string sql = kIndexes;
         sql += "CREATE INDEX subrecord_overflow_key ON subrecord_overflow(form_key, plugin_no);\n"
-               "CREATE INDEX subrecord_raw_key ON subrecord_raw(form_key, plugin_no);\n";
+               "CREATE INDEX subrecord_raw_key ON subrecord_raw(form_key, plugin_no);\n"
+               "CREATE INDEX form_refs_ref ON form_refs(ref_key);\n"
+               "CREATE INDEX form_refs_key ON form_refs(form_key, plugin_no);\n";
         for (const auto& t : schema.tables())
             sql += "CREATE INDEX " + Quote(t.name + "_key") + " ON " + Quote(t.name) + "(form_key, plugin_no);\n";
         if (!db.Exec(sql, error)) return 1;
