@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <sstream>
@@ -289,7 +290,8 @@ void TestStrings() {
 // plugins): plain, compressed and nested-group plugins, a strings file and a
 // zlib stream.
 int WriteSeeds(const std::wstring& dir) {
-    CreateDirectoryW(dir.c_str(), nullptr);
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);  // parents too
     Bytes plain = Header({"Skyrim.esm"});
     plain.add(Group("WEAP", 0, Weapon(0x01000800, "TestSword", 7).add(Weapon(0x00012EB7, "IronSword", 9))));
     Bytes inner = Sub("EDID", Zstring("Packed")).add(Sub("DATA", Bytes().u32(25).f32(9.0f).u16(7)));
@@ -311,7 +313,10 @@ int WriteSeeds(const std::wstring& dir) {
     for (const auto& s : seeds) {
         std::ofstream out(dir + L"\\" + s.first, std::ios::binary);
         out.write(reinterpret_cast<const char*>(s.second->b.data()), static_cast<std::streamsize>(s.second->size()));
-        if (!out) return 1;
+        if (!out) {
+            fprintf(stderr, "cannot write seed %ls\n", (dir + L"\\" + s.first).c_str());
+            return 1;
+        }
     }
     printf("%zu seeds written\n", std::size(seeds));
     return 0;

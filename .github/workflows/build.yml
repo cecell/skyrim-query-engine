@@ -59,6 +59,7 @@ jobs:
           rem Seeds come from a normal build of the unit tests.
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
           cmake --build build --target spf_tests || exit /b 1
+          mkdir build-fuzz\corpus
           build\spf_tests.exe --seeds build-fuzz\corpus || exit /b 1
           cmake -S . -B build-fuzz -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPF_FUZZ=ON || exit /b 1
           cmake --build build-fuzz --target spf_fuzz || exit /b 1
