@@ -42,10 +42,13 @@ target_link_libraries(spf PUBLIC sqlite3 PRIVATE bsa::reader)
 add_executable(spf_cli tools/spf.cpp)
 set_target_properties(spf_cli PROPERTIES OUTPUT_NAME spf)
 target_link_libraries(spf_cli PRIVATE spf)
-# spf.exe looks for patterns.json next to itself.
-add_custom_command(TARGET spf_cli POST_BUILD
+# spf.exe looks for patterns.json next to itself. Copied whenever the catalog
+# changes, not only when spf.exe relinks.
+add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/patterns.json
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json
-            $<TARGET_FILE_DIR:spf_cli>/patterns.json)
+            ${CMAKE_CURRENT_BINARY_DIR}/patterns.json
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json)
+add_custom_target(spf_patterns ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/patterns.json)
 
 # Unit tests: hand-built valid and damaged plugins / strings files.
 enable_testing()

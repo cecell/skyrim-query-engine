@@ -6,6 +6,8 @@
             decodes one occurrence.
   _display  "RT.FS" -> xEdit's name for the subrecord ("Game Data"), used
             as the column description in the st_ data dictionary.
+  _names    names for unlabeled tuple items (OBND x1..z2, CNTO item/count),
+            from xEdit's definitions; build-db names its columns with them.
 
 Usage: python -I tools/export_catalog_meta.py <reference.db> [data/patterns.json]
 """
@@ -37,12 +39,53 @@ for key in cat:
         multi.add(key)
 multi |= {"LENS.DNAM", "LENS.LFSD"}
 multi = sorted(multi)
+
+# Names for unlabeled tuple items, from xEdit's definitions
+# (Core/wbDefinitionsTES5.pas, wbDefinitionsCommon.pas, xEdit 4.1.5q).
+# Key "RT.FS" or "*.FS" (every record type); inner key = where the tuple sits
+# in the decoded value ("" the subrecord itself, "[]" each list element).
+# An empty name puts that item's own fields directly under the parent.
+ALT_TEXTURE = {"[]": ["shape_name", "texture", "shape_index"]}  # xEdit: 3D Name, New Texture, 3D Index
+NAMES = {
+    "*.OBND": {"": ["x1", "y1", "z1", "x2", "y2", "z2"]},
+    "*.MODS": ALT_TEXTURE, "*.MO2S": ALT_TEXTURE, "*.MO3S": ALT_TEXTURE,
+    "*.MO4S": ALT_TEXTURE, "*.MO5S": ALT_TEXTURE, "*.DMDS": ALT_TEXTURE,
+    "*.CNTO": {"": ["item", "count"]},
+    "*.LVLO": {"": ["level", "unused1", "reference", "count", "unused2"]},
+    "*.EFIT": {"": ["magnitude", "area", "duration"]},
+    "*.VMAD": {"": ["version", "object_format", "script_count", "scripts", "fragments"]},
+    "*.XWCN": {"": ["velocity_count"]},
+    "*.XIS2": {"": ["present"]},
+    "*.XPPA": {"": ["present"]},
+    "*.XRGD": {"": ["bones"]},
+    "*.XWCU": {"": ["velocities"]},
+    "REFR.XLOC": {"": ["level", "unused1", "key", "flags", "unused2", "unused3"]},
+    "SHOU.SNAM": {"": ["word", "spell", "recovery_time"]},
+    "IPDS.PNAM": {"": ["material", "impact"]},
+    "CPTH.ANAM": {"": ["parent", "previous"]},
+    "CPTH.CTDA": {"": ["type_flags", "comp_value", "func_idx", "param1", "param2", "run_on", "reference", "param3"]},
+    "CELL.DATA": {"": [""]},
+    "RACE.DATA": {"": [""]},
+    "DEBR.DATA": {"": ["percentage", "model", "flags"]},
+    "ECZN.DATA": {"": ["owner", "location", ""]},
+    "IMGS.HNAM": {"": ["eye_adapt_speed", "bloom_blur_radius", "bloom_threshold", "bloom_scale",
+                       "receive_bloom_threshold", "white", "sunlight_scale", "sky_scale", "eye_adapt_strength"]},
+    "IMGS.CNAM": {"": ["saturation", "brightness", "contrast"]},
+    "IMGS.TNAM": {"": ["amount", "red", "green", "blue"]},
+    "IMGS.ENAM": {"": ["hdr_eye_adapt_speed", "hdr_bloom_blur_radius", "hdr_bloom_threshold", "hdr_bloom_scale",
+                       "hdr_receive_bloom_threshold", "hdr_sunlight_scale", "hdr_sky_scale",
+                       "cinematic_saturation", "cinematic_brightness", "cinematic_contrast",
+                       "tint_amount", "tint_red", "tint_green", "tint_blue"]},
+    "RACE.MPAV": {"": ["flags"] + [f"unknown{i}" for i in range(1, 8)]},
+    "LGTM.DALC": {"": ["x_pos", "x_neg", "y_pos", "y_neg", "z_pos", "z_neg", "specular", "scale"]},
+}
 display = {}
 for rt, fs, _, d in rows:
     if d and " - " in d:
         display[f"{rt}.{fs}"] = d.split(" - ", 1)[1]
 cat["_multi"] = multi
 cat["_display"] = dict(sorted(display.items()))
+cat["_names"] = NAMES
 with open(path, "wb") as f:
     f.write(json.dumps(cat, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-print(f"{len(multi)} multi, {len(display)} display names")
+print(f"{len(multi)} multi, {len(display)} display names, {len(NAMES)} name lists")

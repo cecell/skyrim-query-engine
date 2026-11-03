@@ -25,7 +25,7 @@
 namespace spf {
 namespace {
 
-constexpr int kSchemaVersion = 4;
+constexpr int kSchemaVersion = 5;
 constexpr size_t kBatchRows = 50000;
 constexpr int64_t kKeyShift = 1 << 24;
 

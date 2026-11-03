@@ -90,11 +90,16 @@ public:
     bool IsMulti(const std::string& rt, const std::string& fs) const;
     // From the optional "_display" object: xEdit's name for it, or empty.
     std::string Display(const std::string& rt, const std::string& fs) const;
+    // From the optional "_names" object: names for the items of an unlabeled
+    // tuple at `where` in the subrecord's value ("" the value itself, "[]"
+    // each list element), for "RT.FS" or else "*.FS". nullptr = none.
+    const std::vector<std::string>* Names(const std::string& rt, const std::string& fs, const std::string& where) const;
 
 private:
     std::unordered_map<std::string, std::shared_ptr<const Pattern>> byKey_;
     std::unordered_map<std::string, std::string> lstringClass_;
     std::unordered_map<std::string, std::string> display_;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::string>>> names_;
     std::set<std::string> multi_;
 };
 

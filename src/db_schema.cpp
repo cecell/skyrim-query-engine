@@ -43,6 +43,12 @@ std::string Clean(const std::string& s) {
     return out;
 }
 
+// Names for an unlabeled tuple's items, from the catalog (_names).
+void NameTuple(Shape* s, const std::vector<std::string>* names) {
+    if (!names || s->kind != K::Tuple) return;
+    for (size_t i = 0; i < s->fields.size() && i < names->size(); ++i) s->fields[i].first = (*names)[i];
+}
+
 bool HasFormId(const Shape& s) {
     if (s.kind == K::FormId || s.kind == K::Unknown) return s.kind == K::FormId;
     for (const auto& f : s.fields)
@@ -79,9 +85,13 @@ struct Columns {
                     step.key = s.fields[i].first;
                     step.pos = i;
                     steps.push_back(step);
+                    // An item named "" (catalog _names) puts its fields
+                    // directly under the parent; an unnamed one ("_3") gets
+                    // its position.
+                    const bool inlined = s.fields[i].first.empty();
                     std::string part = Clean(s.fields[i].first);
-                    if (part.empty()) part = std::to_string(i);
-                    Flatten(s.fields[i].second, name.empty() ? part : name + "_" + part,
+                    if (part.empty() && !inlined) part = std::to_string(i);
+                    Flatten(s.fields[i].second, inlined ? name : name.empty() ? part : name + "_" + part,
                             s.kind == K::Tuple ? path + "[" + std::to_string(i) + "]" : path + "." + s.fields[i].first,
                             steps);
                     steps.pop_back();
@@ -155,6 +165,8 @@ void Schema::Build(const PatternCatalog& catalog, bool (*isUsableName)(const std
             used.emplace_back();
         }
         Shape shape = ShapeOf(*pat);
+        NameTuple(&shape, catalog.Names(rt, fs, ""));
+        if (shape.kind == K::List && !shape.elem.empty()) NameTuple(&shape.elem[0], catalog.Names(rt, fs, "[]"));
         bool multi = catalog.IsMulti(rt, fs);
         bool topList = shape.kind == K::List;
         def.child = module || multi || (topList && HasFormId(shape.elem[0]));

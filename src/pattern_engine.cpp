@@ -638,11 +638,23 @@ bool PatternCatalog::Load(const std::string& jsonText, std::string* error) {
     byKey_.clear();
     lstringClass_.clear();
     display_.clear();
+    names_.clear();
     multi_.clear();
     for (const auto& [key, val] : root.Members()) {
         if (key == "_multi" && val.kind() == Value::Kind::List) {
             for (const auto& m : val.Items())
                 if (m.IsString()) multi_.insert(m.AsString());
+            continue;
+        }
+        if (key == "_names" && val.kind() == Value::Kind::Map) {
+            for (const auto& entry : val.Members()) {
+                if (entry.second.kind() != Value::Kind::Map) continue;
+                for (const auto& where : entry.second.Members()) {
+                    if (where.second.kind() != Value::Kind::List) continue;
+                    auto& list = names_[entry.first][where.first];
+                    for (const auto& n : where.second.Items()) list.push_back(n.IsString() ? n.AsString() : "");
+                }
+            }
             continue;
         }
         if (key == "_display" && val.kind() == Value::Kind::Map) {
@@ -696,6 +708,17 @@ std::vector<std::string> PatternCatalog::Keys() const {
 
 bool PatternCatalog::IsMulti(const std::string& rt, const std::string& fs) const {
     return multi_.count(rt + "." + fs) != 0;
+}
+
+const std::vector<std::string>* PatternCatalog::Names(const std::string& rt, const std::string& fs,
+                                                      const std::string& where) const {
+    for (const std::string& key : {rt + "." + fs, "*." + fs}) {
+        auto it = names_.find(key);
+        if (it == names_.end()) continue;
+        auto w = it->second.find(where);
+        if (w != it->second.end()) return &w->second;
+    }
+    return nullptr;
 }
 
 std::string PatternCatalog::Display(const std::string& rt, const std::string& fs) const {

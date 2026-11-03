@@ -77,8 +77,10 @@ for rt in types:
     out = subprocess.run([spf, "export", f"{data}/{plugin}", "--type", rt, "--fields", "*"],
                          capture_output=True, check=True).stdout
     records = json.loads(out)
+    # Tables of modules this database did not build are empty by design.
     tables = {t: (fs, kind) for t, fs, kind in db.execute(
-        "select table_name, subrecord, kind from st_tables where record_type=? and kind<>'core'", (rt,))}
+        "select table_name, subrecord, kind from st_tables where record_type=? and kind<>'core' "
+        "and (module is null or module in (select name from spf_modules))", (rt,))}
     cols = {}
     for t in tables:
         cols[t] = db.execute("select column_name, kind, subrecord, path from st_columns where table_name=? "
