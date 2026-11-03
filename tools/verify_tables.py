@@ -83,14 +83,18 @@ for rt in types:
     for t in tables:
         cols[t] = db.execute("select column_name, kind, subrecord, path from st_columns where table_name=? "
                              "and kind<>'key' order by position", (t,)).fetchall()
-    type_table = next(t for t, (fs, k) in tables.items() if k == "type")
+    # A type whose subrecords all belong to a module (NAVI) has no type table.
+    type_table = next((t for t, (fs, k) in tables.items() if k == "type"), None)
     for rec in records:
         key = key_of(rec["form"])
         fields = keys(rec["fields"])
-        row = db.execute(f'select * from "{type_table}" where form_key=? and plugin_no=?', (key, pno)).fetchone()
-        names = [d[0] for d in db.execute(f'select * from "{type_table}" limit 0').description]
-        row = dict(zip(names, row))
-        for name, kind, fs, path in cols[type_table]:
+        row, type_cols = {}, []
+        if type_table:
+            row = db.execute(f'select * from "{type_table}" where form_key=? and plugin_no=?', (key, pno)).fetchone()
+            names = [d[0] for d in db.execute(f'select * from "{type_table}" limit 0').description]
+            row = dict(zip(names, row))
+            type_cols = cols[type_table]
+        for name, kind, fs, path in type_cols:
             checked += 1
             if fs not in fields:
                 ok = row[name] is None

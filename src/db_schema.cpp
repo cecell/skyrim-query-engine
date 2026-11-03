@@ -20,6 +20,19 @@ const char* ModuleOf(const std::string& rt, const std::string& fs) {
     return nullptr;
 }
 
+}  // namespace
+
+const std::vector<std::pair<std::string, std::string>>& Schema::Modules() {
+    static const std::vector<std::pair<std::string, std::string>> kModules = {
+        {"navmesh", "navmesh geometry: NAVM.NVNM (vertices, triangles, edge and door links) and NAVI"},
+        {"landscape", "terrain and height data: LAND VHGT/VNML/VCLR/ATXT/VTXT/BTXT, CELL MHDT/TVDT, WRLD MHDT/OFST"},
+        {"wrld_large_refs", "worldspace large-reference lists: WRLD.RNAM"},
+    };
+    return kModules;
+}
+
+namespace {
+
 std::string Clean(const std::string& s) {
     std::string out;
     for (unsigned char c : s) {
@@ -127,13 +140,12 @@ void Schema::Build(const PatternCatalog& catalog, bool (*isUsableName)(const std
         if (fs == "Record Header") continue;
         const Pattern* pat = catalog.Find(rt, fs);
         SubrecordDef def;
-        if (const char* m = ModuleOf(rt, fs)) {
-            def.module = m;
-            subs_[key] = def;
-            continue;
-        }
+        // A module's subrecords always get tables of their own, so building a
+        // module later only fills its tables and never alters core ones.
+        const char* module = ModuleOf(rt, fs);
+        if (module) def.module = module;
         auto tt = typeTables_.find(rt);
-        if (tt == typeTables_.end()) {
+        if (!module && tt == typeTables_.end()) {
             TableDef t;
             t.name = uniqueTable(SigName(rt));
             t.rt = rt;
@@ -145,16 +157,18 @@ void Schema::Build(const PatternCatalog& catalog, bool (*isUsableName)(const std
         Shape shape = ShapeOf(*pat);
         bool multi = catalog.IsMulti(rt, fs);
         bool topList = shape.kind == K::List;
-        def.child = multi || (topList && HasFormId(shape.elem[0]));
-        def.elementRows = def.child && topList;
+        def.child = module || multi || (topList && HasFormId(shape.elem[0]));
+        def.elementRows = topList && (multi || HasFormId(shape.elem[0]));
         if (def.child) {
             TableDef t;
             t.name = uniqueTable(SigName(rt) + "_" + SigName(fs));
             t.rt = rt;
             t.fs = fs;
+            if (module) t.module = module;
             std::string display = catalog.Display(rt, fs);
             t.description = rt + "." + fs + (display.empty() ? "" : " (" + display + ")") +
-                            (def.elementRows ? ": one row per list element." : ": one row per occurrence.");
+                            (def.elementRows ? ": one row per list element." : ": one row per occurrence.") +
+                            (module ? std::string(" Module ") + module + ": empty until that module is built." : "");
             def.table = static_cast<int>(tables_.size());
             tables_.push_back(std::move(t));
             used.emplace_back(std::set<std::string>{"form_key", "plugin_no", "idx"});

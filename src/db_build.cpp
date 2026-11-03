@@ -25,7 +25,7 @@
 namespace spf {
 namespace {
 
-constexpr int kSchemaVersion = 3;
+constexpr int kSchemaVersion = 4;
 constexpr size_t kBatchRows = 50000;
 constexpr int64_t kKeyShift = 1 << 24;
 
@@ -393,9 +393,12 @@ void FillColumns(const Value& value, const std::vector<ColumnDef>& cols, size_t 
 
 // One plugin: every record -> a form row and its type / child table rows;
 // its strings tables -> string rows.
+// `modules`: the optional modules to decode too. `core` false = only those
+// modules (spf db add): no forms rows, type table rows, header or strings.
 void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
                   const std::unordered_map<std::string, int>& noByName, const std::string& language,
-                  const PatternCatalog& catalog, const Schema& schema, BatchQueue* queue) {
+                  const PatternCatalog& catalog, const Schema& schema, const std::set<std::string>& modules,
+                  bool core, BatchQueue* queue) {
     Batch batch;
     batch.pluginNo = info.no;
     std::string err;
@@ -424,16 +427,20 @@ void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
 
     std::string rt;      // the record being decoded
     int64_t curKey = 0;  // and its form_key
+    bool refsOn = true;  // off for the TES4 header
     // Every FormID becomes a key, and a form_refs row (the xref).
     const Plugin::FormIdMap formIds = [&](uint32_t stored, const std::string& path) {
         const int64_t ref = keyOf(stored);
-        batch.rows.push_back(
-            {kRefsTable, {Cell::Int(curKey), Cell::Int(info.no), Cell::Int(ref), Cell::Text(rt), Cell::Text(path)}});
+        if (refsOn) {
+            batch.rows.push_back(
+                {kRefsTable, {Cell::Int(curKey), Cell::Int(info.no), Cell::Int(ref), Cell::Text(rt), Cell::Text(path)}});
+        }
         return Value::Int(ref);
     };
     const Plugin::SigFilter wanted = [&](const std::string& fs) {
         const SubrecordDef* d = schema.Find(rt, fs);
-        return !d || d->module.empty();
+        if (!d || d->module.empty()) return core;
+        return modules.count(d->module) != 0;
     };
     auto flush = [&] {
         if (batch.forms.size() + batch.rows.size() < kBatchRows) return;
@@ -448,33 +455,14 @@ void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
     std::unordered_map<int, int64_t> childIdx;
     const auto& tables = schema.tables();
     const auto& recs = plugin->records();
-    for (size_t i = 1; i < recs.size(); ++i) {
-        const Record& r = recs[i];
-        FormRow row;
-        row.key = keyOf(r.formId);
-        row.storedId = r.formId;
-        row.flags = r.flags;
-        row.formVersion = r.formVersion;
-        memcpy(row.type, r.type.data(), 4);
-        row.parent = r.parent ? keyOf(r.parent) : -1;
-        const uint8_t* body;
-        size_t size;
-        if (plugin->Body(r, &scratch, &body, &size)) {
-            // EDID, when present, is the first subrecord.
-            if (size >= 6 && memcmp(body, "EDID", 4) == 0) {
-                size_t n = std::min<size_t>(U16(body + 4), size - 6);
-                row.edid = Utf8Lossy(body + 6, strnlen(reinterpret_cast<const char*>(body + 6), n));
-            }
-        }
-        const int64_t key = row.key;
-        curKey = key;
-        batch.forms.push_back(std::move(row));
 
-        // The record's fields -> its type table row, child rows, and rows
-        // for what does not fit (overflow, raw).
+    // A record's fields -> its type table row, child rows, and rows for what
+    // does not fit (overflow, raw).
+    auto decodeFields = [&](const Record& r, int64_t key) {
         rt = r.type;
+        curKey = key;
         std::vector<Field> fields = plugin->Fields(r, &formIds, &wanted);
-        int tt = schema.TypeTable(rt);
+        int tt = core ? schema.TypeTable(rt) : -1;
         TableRow main;
         if (tt >= 0) {
             main.table = tt;
@@ -520,9 +508,47 @@ void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
             }
         }
         if (tt >= 0) batch.rows.push_back(std::move(main));
+    };
+
+    // The TES4 header: one tes4 row per plugin (form_key 0), with its masters
+    // and overridden-forms list (ONAM) in tes4_mast / tes4_onam. It is not a
+    // form, so no forms row and no xref rows.
+    if (core) {
+        refsOn = false;
+        decodeFields(recs.front(), 0);
+        refsOn = true;
+    }
+
+    for (size_t i = 1; i < recs.size(); ++i) {
+        const Record& r = recs[i];
+        if (!core) {  // module subrecords only
+            if (r.flags & 0x20) continue;  // deleted: no fields
+            decodeFields(r, keyOf(r.formId));
+            flush();
+            continue;
+        }
+        FormRow row;
+        row.key = keyOf(r.formId);
+        row.storedId = r.formId;
+        row.flags = r.flags;
+        row.formVersion = r.formVersion;
+        memcpy(row.type, r.type.data(), 4);
+        row.parent = r.parent ? keyOf(r.parent) : -1;
+        const uint8_t* body;
+        size_t size;
+        if (plugin->Body(r, &scratch, &body, &size)) {
+            // EDID, when present, is the first subrecord.
+            if (size >= 6 && memcmp(body, "EDID", 4) == 0) {
+                size_t n = std::min<size_t>(U16(body + 4), size - 6);
+                row.edid = Utf8Lossy(body + 6, strnlen(reinterpret_cast<const char*>(body + 6), n));
+            }
+        }
+        const int64_t key = row.key;
+        batch.forms.push_back(std::move(row));
+        decodeFields(r, key);
         flush();
     }
-    for (int c = 0; c < 3; ++c) {
+    for (int c = 0; core && c < 3; ++c) {
         for (const auto& s : plugin->strings().table(c)) {
             batch.strings.push_back({c, s.first, s.second});
             if (batch.strings.size() >= kBatchRows) {
@@ -712,6 +738,7 @@ CREATE TABLE st_tables(
   kind        TEXT NOT NULL,
   record_type TEXT,
   subrecord   TEXT,
+  module      TEXT,
   description TEXT
 ) WITHOUT ROWID;
 
@@ -856,6 +883,89 @@ SELECT v.* FROM form_refs_v v
 WHERE NOT EXISTS (SELECT 1 FROM forms f WHERE f.form_key = v.ref_key);
 )SQL";
 
+// Inserts the table rows decode workers produce: type / child / module
+// tables, overflow, raw, and xref rows (interning their paths). Shared by
+// build-db and db add.
+struct RowSink {
+    std::vector<Stmt> insTable;
+    Stmt insOverflow, insRaw, insRef, insPath;
+    std::unordered_map<std::string, int64_t> pathIds;  // "TYPE PATH" -> path_id
+    int64_t nextPathId = 1;
+    int64_t rows = 0, refs = 0;
+
+    bool Prepare(Db& db, const Schema& schema, std::string* error) {
+        insTable.resize(schema.tables().size());
+        for (size_t t = 0; t < schema.tables().size(); ++t) {
+            const TableDef& td = schema.tables()[t];
+            insTable[t].st = db.Prepare(InsertSql(td.name, (td.fs.empty() ? 2 : 3) + td.columns.size()).c_str(), error);
+            if (!insTable[t].st) return false;
+        }
+        insOverflow.st = db.Prepare("INSERT INTO subrecord_overflow VALUES(?,?,?,?,?)", error);
+        insRaw.st = db.Prepare("INSERT INTO subrecord_raw VALUES(?,?,?,?,?,?,?)", error);
+        insRef.st = db.Prepare("INSERT INTO form_refs VALUES(?,?,?,?)", error);
+        insPath.st = db.Prepare("INSERT INTO ref_paths VALUES(?,?,?)", error);
+        return insOverflow.st && insRaw.st && insRef.st && insPath.st;
+    }
+
+    // Continues the path ids of an existing database (db add).
+    bool LoadPaths(Db& db, std::string* error) {
+        Stmt q{db.Prepare("SELECT path_id, type, path FROM ref_paths", error)};
+        if (!q.st) return false;
+        while (sqlite3_step(q.st) == SQLITE_ROW) {
+            std::string key = reinterpret_cast<const char*>(sqlite3_column_text(q.st, 1));
+            key += ' ';
+            key += reinterpret_cast<const char*>(sqlite3_column_text(q.st, 2));
+            pathIds[key] = sqlite3_column_int64(q.st, 0);
+            nextPathId = std::max(nextPathId, sqlite3_column_int64(q.st, 0) + 1);
+        }
+        return true;
+    }
+
+    int64_t PathId(const std::string& type, const std::string& path) {
+        std::string key = type + ' ' + path;
+        auto it = pathIds.find(key);
+        if (it == pathIds.end()) {
+            int64_t id = nextPathId++;
+            it = pathIds.emplace(std::move(key), id).first;
+            insPath.Int(1, id).Text(2, type).Text(3, path).Run();
+        }
+        return it->second;
+    }
+
+    void Write(Db& db, const std::vector<TableRow>& batchRows, std::string* firstError) {
+        for (const auto& r : batchRows) {
+            if (r.table == kRefsTable) {  // form_key, plugin_no, ref_key, type, path
+                insRef.Int(1, r.cells[0].i).Int(2, r.cells[1].i).Int(3, r.cells[2].i)
+                    .Int(4, PathId(r.cells[3].s, r.cells[4].s));
+                if (!insRef.Run() && firstError->empty()) *firstError = db.Message();
+                ++refs;
+                continue;
+            }
+            sqlite3_stmt* st = r.table == kOverflowTable ? insOverflow.st
+                             : r.table == kRawTable      ? insRaw.st
+                                                         : insTable[r.table].st;
+            if (!BindRun(st, r.cells) && firstError->empty()) *firstError = db.Message();
+            ++rows;
+        }
+    }
+};
+
+bool LoadCatalog(const std::wstring& path, PatternCatalog* catalog, std::string* error) {
+    FILE* fp = nullptr;
+    std::string text;
+    if (_wfopen_s(&fp, path.c_str(), L"rb") == 0 && fp) {
+        char buf[65536];
+        for (size_t n; (n = fread(buf, 1, sizeof(buf), fp)) > 0;) text.append(buf, n);
+        fclose(fp);
+    }
+    std::string perr;
+    if (text.empty() || !catalog->Load(text, &perr)) {
+        *error = "patterns: " + (perr.empty() ? "cannot read " + Utf8(path) : perr);
+        return false;
+    }
+    return true;
+}
+
 std::string NowIso() {
     SYSTEMTIME t;
     GetSystemTime(&t);
@@ -884,22 +994,19 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
 
     // The pattern catalog decodes the fields; the schema is generated from it.
     PatternCatalog catalog;
-    {
-        FILE* fp = nullptr;
-        std::string text;
-        if (_wfopen_s(&fp, opt.patterns.c_str(), L"rb") == 0 && fp) {
-            char buf[65536];
-            for (size_t n; (n = fread(buf, 1, sizeof(buf), fp)) > 0;) text.append(buf, n);
-            fclose(fp);
-        }
-        std::string perr;
-        if (text.empty() || !catalog.Load(text, &perr)) {
-            *error = "patterns: " + (perr.empty() ? "cannot read " + Utf8(opt.patterns) : perr);
-            return 2;
-        }
-    }
+    if (!LoadCatalog(opt.patterns, &catalog, error)) return 2;
     Schema schema;
     schema.Build(catalog, UsableName);
+    std::set<std::string> modules;  // optional modules built too (--with)
+    for (const auto& m : opt.modules) {
+        bool known = false;
+        for (const auto& km : Schema::Modules()) known = known || km.first == m;
+        if (!known) {
+            *error = "unknown module '" + m + "' (spf build-db --help lists them)";
+            return 2;
+        }
+        modules.insert(m);
+    }
 
     // Phase 1: load order and headers.
     std::vector<std::string> order = ResolveLoadOrder(opt, data, error);
@@ -974,20 +1081,10 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
                      error) ||
             !db.Exec(kSchema, error) || !db.Exec("BEGIN", error))
             return 1;
-        std::vector<Stmt> insTable(schema.tables().size());
-        for (size_t t = 0; t < schema.tables().size(); ++t) {
-            const TableDef& td = schema.tables()[t];
+        for (const auto& td : schema.tables())
             if (!db.Exec(TableDdl(td), error)) return 1;
-            insTable[t].st = db.Prepare(InsertSql(td.name, (td.fs.empty() ? 2 : 3) + td.columns.size()).c_str(), error);
-            if (!insTable[t].st) return 1;
-        }
-        Stmt insOverflow{db.Prepare("INSERT INTO subrecord_overflow VALUES(?,?,?,?,?)", error)};
-        Stmt insRaw{db.Prepare("INSERT INTO subrecord_raw VALUES(?,?,?,?,?,?,?)", error)};
-        Stmt insRef{db.Prepare("INSERT INTO form_refs VALUES(?,?,?,?)", error)};
-        Stmt insPath{db.Prepare("INSERT INTO ref_paths VALUES(?,?,?)", error)};
-        if (!insOverflow.st || !insRaw.st || !insRef.st || !insPath.st) return 1;
-        std::unordered_map<std::string, int64_t> pathIds;  // "TYPE PATH" -> path_id
-        int64_t refs = 0;
+        RowSink sink;
+        if (!sink.Prepare(db, schema, error)) return 1;
 
         Stmt insPlugin{db.Prepare("INSERT INTO plugins VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL)", error)};
         Stmt insMaster{db.Prepare("INSERT INTO plugin_masters VALUES(?,?,?)", error)};
@@ -1035,6 +1132,26 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
                 }
             }
             setFacts.Null(1).Int(2, static_cast<int64_t>(std::size(kEngineForms))).Int(3, engineNo).Run();
+            // Their type table rows: the EDID, and PlayerRef's link to the
+            // Player NPC_ (Skyrim.esm 000007), also as an xref row.
+            for (const auto& e : kEngineForms) {
+                int tt = schema.TypeTable(e.type);
+                if (tt < 0) continue;
+                const TableDef& t = schema.tables()[tt];
+                std::vector<Cell> cells(2 + t.columns.size());
+                cells[0] = Cell::Int(base + e.objectId);
+                cells[1] = Cell::Int(engineNo);
+                for (size_t c = 0; c < t.columns.size(); ++c) {
+                    if (t.columns[c].name == "edid") cells[2 + c] = Cell::Text(e.edid);
+                    if (t.columns[c].name == "plyr" && std::string(e.type) == "PLYR") cells[2 + c] = Cell::Int(base + 7);
+                }
+                if (!BindRun(sink.insTable[tt].st, cells)) {
+                    *error = db.Message();
+                    return 1;
+                }
+            }
+            sink.insRef.Int(1, base + 0x14).Int(2, engineNo).Int(3, base + 7).Int(4, sink.PathId("PLYR", "PLYR")).Run();
+            ++sink.refs;
         }
 
         // Phase 2: decode workers (biggest plugin first) -> this thread writes.
@@ -1056,7 +1173,8 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
                     // it never takes the build (or the process) down.
                     std::string failure;
                     try {
-                        DecodePlugin(all[work[w]], all, noByName, opt.language, catalog, schema, &queue);
+                        DecodePlugin(all[work[w]], all, noByName, opt.language, catalog, schema, modules, true,
+                                     &queue);
                     } catch (const std::exception& e) {
                         failure = e.what();
                     } catch (...) {
@@ -1075,7 +1193,7 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         }
         say("decoding with %d threads", threads);
         static const char* kKinds[3] = {"strings", "dlstrings", "ilstrings"};
-        int64_t forms = 0, strings = 0, rows = 0;
+        int64_t forms = 0, strings = 0;
         size_t done = 0;
         std::vector<int> failed;  // plugin_no of plugins that could not be read
         std::string firstError;
@@ -1093,25 +1211,7 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             }
             for (const auto& s : b.strings)
                 insString.Int(1, b.pluginNo).Text(2, kKinds[s.kind]).Int(3, s.id).Text(4, s.text).Run();
-            for (const auto& r : b.rows) {
-                if (r.table == kRefsTable) {  // form_key, plugin_no, ref_key, type, path
-                    std::string pathKey = r.cells[3].s + ' ' + r.cells[4].s;
-                    auto it = pathIds.find(pathKey);
-                    if (it == pathIds.end()) {
-                        it = pathIds.emplace(std::move(pathKey), static_cast<int64_t>(pathIds.size()) + 1).first;
-                        insPath.Int(1, it->second).Text(2, r.cells[3].s).Text(3, r.cells[4].s).Run();
-                    }
-                    insRef.Int(1, r.cells[0].i).Int(2, r.cells[1].i).Int(3, r.cells[2].i).Int(4, it->second);
-                    if (!insRef.Run() && firstError.empty()) firstError = db.Message();
-                    ++refs;
-                    continue;
-                }
-                sqlite3_stmt* st = r.table == kOverflowTable ? insOverflow.st
-                                 : r.table == kRawTable      ? insRaw.st
-                                                             : insTable[r.table].st;
-                if (!BindRun(st, r.cells) && firstError.empty()) firstError = db.Message();
-                ++rows;
-            }
+            sink.Write(db, b.rows, &firstError);
             forms += static_cast<int64_t>(b.forms.size());
             strings += static_cast<int64_t>(b.strings.size());
             if (b.last) {
@@ -1143,7 +1243,7 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             if (!db.Exec(del, error)) return 1;
         }
         say("wrote %lld forms, %lld field rows, %lld references, %lld strings from %zu plugins",
-            static_cast<long long>(forms), static_cast<long long>(rows), static_cast<long long>(refs),
+            static_cast<long long>(forms), static_cast<long long>(sink.rows), static_cast<long long>(sink.refs),
             static_cast<long long>(strings), done);
 
         std::string sql = kIndexes;
@@ -1166,10 +1266,11 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         if (!db.Exec(sql, error)) return 1;
 
         // The data dictionary.
-        Stmt insT{db.Prepare("INSERT INTO st_tables VALUES(?,?,?,?,?)", error)};
+        Stmt insT{db.Prepare("INSERT INTO st_tables VALUES(?,?,?,?,?,?)", error)};
         Stmt insC{db.Prepare("INSERT INTO st_columns VALUES(?,?,?,?,?,?,?,?,?)", error)};
         if (!insT.st || !insC.st) return 1;
-        for (const auto& ct : kCoreTables) insT.Text(1, ct[0]).Text(2, "core").Null(3).Null(4).Text(5, ct[1]).Run();
+        for (const auto& ct : kCoreTables)
+            insT.Text(1, ct[0]).Text(2, "core").Null(3).Null(4).Null(5).Text(6, ct[1]).Run();
         if (!db.Exec("INSERT INTO st_columns SELECT m.table_name, p.name, p.cid, p.type, NULL, NULL, NULL, NULL, NULL "
                      "FROM st_tables m, pragma_table_info(m.table_name) p",
                      error))
@@ -1178,7 +1279,9 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             insT.Text(1, t.name).Text(2, t.fs.empty() ? "type" : "child").Text(3, t.rt);
             if (t.fs.empty()) insT.Null(4);
             else insT.Text(4, t.fs);
-            insT.Text(5, t.description).Run();
+            if (t.module.empty()) insT.Null(5);
+            else insT.Text(5, t.module);
+            insT.Text(6, t.description).Run();
             int pos = 0;
             auto key = [&](const char* name, const char* refers, const char* desc) {
                 insC.Text(1, t.name).Text(2, name).Int(3, pos++).Text(4, "INTEGER").Text(5, "key").Null(6).Null(7);
@@ -1203,13 +1306,6 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
                 insC.Run();
             }
         }
-        // Subrecords kept for optional modules are not in this build.
-        std::set<std::string> modules;
-        for (const auto& key : catalog.Keys()) {
-            size_t dot = key.find('.');
-            if (const SubrecordDef* d = schema.Find(key.substr(0, dot), key.substr(dot + 1)); d && !d->module.empty())
-                modules.insert(d->module);
-        }
 
         Stmt meta{db.Prepare("INSERT INTO spf_meta VALUES(?,?)", error)};
         auto putMeta = [&](const char* k, const std::string& v) { meta.Text(1, k).Text(2, v).Run(); };
@@ -1224,11 +1320,13 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         putMeta("language", opt.language);
         putMeta("key_scheme", "form_key = owner plugin_no * 16777216 + object id (12-bit when the owner is light)");
         std::string skipped;
-        for (const auto& m : modules) skipped += (skipped.empty() ? "" : ",") + m;
+        for (const auto& m : Schema::Modules())
+            if (!modules.count(m.first)) skipped += (skipped.empty() ? "" : ",") + m.first;
         putMeta("modules_not_built", skipped);
         putMeta("plugins_failed", std::to_string(failed.size()));
-        Stmt mod{db.Prepare("INSERT INTO spf_modules VALUES('core', ?, NULL)", error)};
-        mod.Text(1, NowIso()).Run();
+        Stmt mod{db.Prepare("INSERT INTO spf_modules VALUES(?, ?, NULL)", error)};
+        mod.Text(1, "core").Text(2, NowIso()).Run();
+        for (const auto& m : modules) mod.Text(1, m).Text(2, NowIso()).Run();
         if (!db.Exec("COMMIT; ANALYZE;", error)) return 1;
         say("committed");
     }
@@ -1237,6 +1335,188 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         return 1;
     }
     say("done: %s", Utf8(opt.out).c_str());
+    return 0;
+}
+
+std::vector<std::pair<std::string, std::string>> AvailableModules() { return Schema::Modules(); }
+
+int AddModules(const AddOptions& opt, std::string* error) {
+    using Clock = std::chrono::steady_clock;
+    auto t0 = Clock::now();
+    auto say = [&](const char* fmt, ...) {
+        if (opt.quiet) return;
+        double s = std::chrono::duration<double>(Clock::now() - t0).count();
+        fprintf(stderr, "[%6.2fs] ", s);
+        va_list ap;
+        va_start(ap, fmt);
+        vfprintf(stderr, fmt, ap);
+        va_end(ap);
+        fputc('\n', stderr);
+    };
+
+    if (GetFileAttributesW(opt.db.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        *error = "no database at " + Utf8(opt.db);
+        return 1;
+    }
+    Db db;
+    if (!db.Open(opt.db, error)) return 1;
+    auto metaValue = [&](const char* key) {
+        std::string v;
+        std::string e;
+        Stmt q{db.Prepare("SELECT value FROM spf_meta WHERE key=?", &e)};
+        if (!q.st) return v;
+        q.Text(1, key);
+        if (sqlite3_step(q.st) == SQLITE_ROW && sqlite3_column_text(q.st, 0))
+            v = reinterpret_cast<const char*>(sqlite3_column_text(q.st, 0));
+        return v;
+    };
+    std::string version = metaValue("schema_version");
+    if (version != std::to_string(kSchemaVersion)) {
+        *error = "the database has schema version " + (version.empty() ? std::string("?") : version) +
+                 ", this spf writes " + std::to_string(kSchemaVersion) + ": rebuild it with build-db";
+        return 1;
+    }
+
+    PatternCatalog catalog;
+    if (!LoadCatalog(opt.patterns, &catalog, error)) return 2;
+    Schema schema;
+    schema.Build(catalog, UsableName);
+
+    // The modules asked for: known, and not built yet.
+    std::set<std::string> modules;
+    for (const auto& m : opt.modules) {
+        bool known = false;
+        for (const auto& km : Schema::Modules()) known = known || km.first == m;
+        if (!known) {
+            *error = "unknown module '" + m + "' (spf db add --help lists them)";
+            return 2;
+        }
+        Stmt q{db.Prepare("SELECT 1 FROM spf_modules WHERE name=?", error)};
+        if (!q.st) return 1;
+        q.Text(1, m);
+        if (sqlite3_step(q.st) == SQLITE_ROW) {
+            *error = "module " + m + " is already built";
+            return 1;
+        }
+        modules.insert(m);
+    }
+    if (modules.empty()) {
+        *error = "no module given";
+        return 2;
+    }
+
+    // The plugins as the build recorded them; any that changed since refuse
+    // the add (their core rows would no longer match the new module rows).
+    std::vector<PluginInfo> all;
+    std::unordered_map<std::string, int> noByName;
+    std::vector<int> work;
+    std::vector<std::string> changed;
+    {
+        Stmt q{db.Prepare("SELECT plugin_no, name, load_order, is_light, file_exists, path, size, mtime, load_error "
+                          "FROM plugins ORDER BY plugin_no",
+                          error)};
+        if (!q.st) return 1;
+        while (sqlite3_step(q.st) == SQLITE_ROW) {
+            PluginInfo p;
+            p.no = sqlite3_column_int(q.st, 0);
+            p.name = reinterpret_cast<const char*>(sqlite3_column_text(q.st, 1));
+            p.inLoadOrder = sqlite3_column_type(q.st, 2) != SQLITE_NULL && sqlite3_column_int(q.st, 2) >= 0;
+            p.light = sqlite3_column_int(q.st, 3) != 0;
+            p.exists = sqlite3_column_int(q.st, 4) != 0;
+            if (sqlite3_column_text(q.st, 5)) p.path = Widen(reinterpret_cast<const char*>(sqlite3_column_text(q.st, 5)));
+            p.size = sqlite3_column_int64(q.st, 6);
+            p.mtime = sqlite3_column_int64(q.st, 7);
+            bool failed = sqlite3_column_type(q.st, 8) != SQLITE_NULL;
+            if (p.no != static_cast<int>(all.size())) {
+                *error = "the plugins table is not numbered 0..n-1";
+                return 1;
+            }
+            noByName[Lower(p.name)] = p.no;
+            if (p.inLoadOrder && p.exists && !failed) {
+                PluginInfo now = p;
+                ReadHeader(&now);
+                if (now.size != p.size || now.mtime != p.mtime) changed.push_back(p.name);
+                work.push_back(p.no);
+            }
+            all.push_back(std::move(p));
+        }
+    }
+    if (!changed.empty()) {
+        *error = std::to_string(changed.size()) + " plugin(s) changed since the build (first: " + changed[0] +
+                 "); rebuild the database";
+        return 1;
+    }
+    std::sort(work.begin(), work.end(), [&](int a, int b) { return all[a].size > all[b].size; });
+    const std::string language = metaValue("language").empty() ? "english" : metaValue("language");
+
+    // One transaction: a failure leaves the database as it was.
+    if (!db.Exec("PRAGMA cache_size=-262144; PRAGMA temp_store=MEMORY; BEGIN", error)) return 1;
+    RowSink sink;
+    if (!sink.Prepare(db, schema, error) || !sink.LoadPaths(db, error)) return 1;
+
+    int threads = opt.threads > 0 ? opt.threads : std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 1);
+    threads = std::min<int>(threads, static_cast<int>(work.size()));
+    BatchQueue queue;
+    queue.SetProducers(threads);
+    std::atomic<size_t> nextWork{0};
+    std::vector<std::thread> pool;
+    for (int t = 0; t < threads; ++t) {
+        pool.emplace_back([&] {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            for (size_t w; (w = nextWork++) < work.size();) {
+                std::string failure;
+                try {
+                    DecodePlugin(all[work[w]], all, noByName, language, catalog, schema, modules, false, &queue);
+                } catch (const std::exception& e) {
+                    failure = e.what();
+                } catch (...) {
+                    failure = "unexpected error";
+                }
+                if (!failure.empty()) {
+                    Batch fail;
+                    fail.pluginNo = all[work[w]].no;
+                    fail.last = true;
+                    fail.error = "failed while decoding: " + failure;
+                    queue.Push(std::move(fail));
+                }
+            }
+            queue.ProducerDone();
+        });
+    }
+    std::string list;
+    for (const auto& m : modules) list += (list.empty() ? "" : ",") + m;
+    say("adding %s from %zu plugins with %d threads", list.c_str(), work.size(), threads);
+    std::string firstError;
+    Batch b;
+    while (queue.Pop(&b)) {
+        sink.Write(db, b.rows, &firstError);
+        if (b.last && !b.error.empty() && firstError.empty()) firstError = all[b.pluginNo].name + ": " + b.error;
+    }
+    for (auto& t : pool) t.join();
+    if (!firstError.empty()) {
+        db.Exec("ROLLBACK", error);
+        *error = firstError + " (nothing was added)";
+        return 1;
+    }
+    say("wrote %lld rows, %lld references", static_cast<long long>(sink.rows), static_cast<long long>(sink.refs));
+
+    Stmt mod{db.Prepare("INSERT INTO spf_modules VALUES(?, ?, NULL)", error)};
+    if (!mod.st) return 1;
+    for (const auto& m : modules) mod.Text(1, m).Text(2, NowIso()).Run();
+    std::string notBuilt;
+    {
+        Stmt q{db.Prepare("SELECT name FROM spf_modules", error)};
+        if (!q.st) return 1;
+        std::set<std::string> built;
+        while (sqlite3_step(q.st) == SQLITE_ROW) built.insert(reinterpret_cast<const char*>(sqlite3_column_text(q.st, 0)));
+        for (const auto& m : Schema::Modules())
+            if (!built.count(m.first)) notBuilt += (notBuilt.empty() ? "" : ",") + m.first;
+    }
+    Stmt meta{db.Prepare("UPDATE spf_meta SET value=? WHERE key='modules_not_built'", error)};
+    if (!meta.st) return 1;
+    meta.Text(1, notBuilt).Run();
+    if (!db.Exec("COMMIT; ANALYZE;", error)) return 1;
+    say("done: %s", Utf8(opt.db).c_str());
     return 0;
 }
 

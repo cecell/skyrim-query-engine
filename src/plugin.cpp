@@ -14,6 +14,21 @@ namespace {
 uint32_t U32(const uint8_t* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<uint32_t>(p[3]) << 24); }
 uint16_t U16(const uint8_t* p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
 
+// Header text and file names: UTF-8 when the bytes already are, otherwise
+// Windows-1252 (what the CK writes) converted to UTF-8.
+std::string ToUtf8(const std::string& bytes) {
+    if (bytes.empty()) return bytes;
+    int n = static_cast<int>(bytes.size());
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), n, nullptr, 0) > 0) return bytes;
+    int wn = MultiByteToWideChar(1252, 0, bytes.data(), n, nullptr, 0);
+    std::wstring w(wn, L'\0');
+    MultiByteToWideChar(1252, 0, bytes.data(), n, w.data(), wn);
+    int un = WideCharToMultiByte(CP_UTF8, 0, w.data(), wn, nullptr, 0, nullptr, nullptr);
+    std::string out(un, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), wn, out.data(), un, nullptr, nullptr);
+    return out;
+}
+
 std::string Narrow1252(const std::wstring& w) {
     int n = WideCharToMultiByte(1252, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
     std::string s(n, '\0');
@@ -105,11 +120,29 @@ bool Plugin::Parse(std::string* error) {
         *error = "truncated header";
         return false;
     }
+    PluginHeader& info = p->info_;
+    info.flags = U32(d + 8);
+    info.esm = (info.flags & 0x1) != 0;
+    info.esl = (info.flags & 0x200) != 0;
+    info.localized = p->localized_;
+    std::string ext = p->name_.size() >= 4 ? p->name_.substr(p->name_.size() - 4) : "";
+    for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    info.master = info.esm || ext == ".esm" || ext == ".esl";
+    info.light = info.esl || ext == ".esl";
     for (size_t q = 24; q + 6 <= 24 + hdrSize;) {
         size_t n = U16(d + q + 4);
-        if (memcmp(d + q, "MAST", 4) == 0 && q + 6 + n <= 24 + hdrSize) {
-            const char* s = reinterpret_cast<const char*>(d + q + 6);
+        if (q + 6 + n > 24 + hdrSize) break;  // runs past the header
+        const char* s = reinterpret_cast<const char*>(d + q + 6);
+        if (memcmp(d + q, "MAST", 4) == 0) {
             p->masters_.emplace_back(s, strnlen(s, n));
+        } else if (memcmp(d + q, "HEDR", 4) == 0 && n >= 12) {
+            memcpy(&info.version, s, 4);
+            info.numRecords = U32(d + q + 10);
+            info.nextObjectId = U32(d + q + 14);
+        } else if (memcmp(d + q, "CNAM", 4) == 0) {
+            info.author = ToUtf8(std::string(s, strnlen(s, n)));
+        } else if (memcmp(d + q, "SNAM", 4) == 0) {
+            info.description = ToUtf8(std::string(s, strnlen(s, n)));
         }
         q += 6 + n;
     }
@@ -171,6 +204,12 @@ std::vector<const Record*> Plugin::OfType(const std::string& type) const {
     std::vector<const Record*> out;
     for (const auto& r : records_)
         if (r.type == type) out.push_back(&r);
+    return out;
+}
+
+std::vector<std::string> Plugin::mastersUtf8() const {
+    std::vector<std::string> out;
+    for (const auto& m : masters_) out.push_back(ToUtf8(m));
     return out;
 }
 

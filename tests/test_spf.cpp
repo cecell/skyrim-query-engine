@@ -137,6 +137,18 @@ void TestValidPlugin(const PatternCatalog& cat) {
     }
     CHECK(plugin->FormKey(0x00012EB7) == "Skyrim.esm:012EB7");
     CHECK(plugin->FormKey(0x01000800) == "Test.esp:000800");
+
+    // Header facts.
+    const PluginHeader& h = plugin->info();
+    CHECK(h.version > 1.70f && h.version < 1.72f);
+    CHECK(h.numRecords == 1 && h.nextObjectId == 0x801);
+    CHECK(!h.esm && !h.esl && !h.localized && !h.master && !h.light);
+
+    // A Windows-1252 master name comes out as UTF-8 too.
+    Bytes accented = Header({"Caf\xE9.esm"});
+    accented.add(Group("WEAP", 0, Weapon(0x01000800, "A", 1)));
+    auto pa = Load(accented, cat, &err);
+    CHECK(pa && pa->masters()[0] == "Caf\xE9.esm" && pa->mastersUtf8()[0] == "Caf\xC3\xA9.esm");
 }
 
 void TestDamagedStructure(const PatternCatalog& cat) {

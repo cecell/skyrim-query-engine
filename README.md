@@ -76,9 +76,26 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
 - Views `forms_v` (readable `Skyrim.esm:012EB7` keys, in-game FormIDs) and
   `winning_forms`.
 
-Navmesh geometry, landscape data (terrain, height maps, occlusion) and
-worldspace large-reference lists are left out for now; they will be optional
-modules.
+- `tes4`, `tes4_mast`, `tes4_onam`: each plugin's header record (HEDR,
+  author, masters, the overridden-forms list ONAM).
+
+Optional modules hold the bulky geometry. Their tables exist in every build
+and stay empty until the module is built:
+
+| Module | What | Bethesda plugins |
+|---|---|---|
+| `navmesh` | NAVM geometry (vertices, triangles, edge and door links), NAVI | ~0.5 GB |
+| `landscape` | LAND terrain (heights, normals, colours, texture layers), CELL/WRLD height maps, occlusion, LOD offsets | ~1.5 GB |
+| `wrld_large_refs` | WRLD.RNAM large-reference lists | small |
+
+```
+spf build-db ... --with navmesh,landscape       build them with the core
+spf db add navmesh --db skyrim.db               or add one later
+```
+
+`db add` re-reads only that module's subrecords, fills only its tables (plus
+xref rows), runs in one transaction, and refuses if a plugin changed since the
+build. Building with `--with` and adding later give identical databases.
 
 The tables were checked cell for cell against `spf export` on 21 record
 types of Skyrim.esm and Dawnguard.esm (12.8 million values, 0 mismatches).
