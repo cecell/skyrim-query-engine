@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -46,6 +47,27 @@ std::shared_ptr<const Pattern> CompilePattern(const Value& json);
 // fit the pattern.
 Value DecodeSubrecord(const Pattern& pattern, const uint8_t* data, size_t size, const DecodeContext& ctx);
 
+// The shape of what a pattern decodes to, worked out from the pattern alone
+// (the decoder's output rules applied statically). build-db generates its
+// tables from it.
+struct Shape {
+    enum class Kind {
+        Unknown,  // a union whose arms disagree: any value
+        Int, Real, Text, Bool,
+        FormId,   // "[XXXXXXXX]"
+        LString,  // "[LSTRING:0x...]", or text when not localized
+        Marker,   // empty_marker: present or not
+        Flags,    // bitfield: list of set flag names
+        List,     // repeat: elem[0] is the element shape
+        Map,      // labeled seq: fields by name
+        Tuple,    // unlabeled seq / colour: a list, fields by position
+    };
+    Kind kind = Kind::Unknown;
+    std::vector<std::pair<std::string, Shape>> fields;
+    std::vector<Shape> elem;
+};
+Shape ShapeOf(const Pattern& pattern);
+
 // The pattern catalog: "<RT>.<SUBRECORD>" -> compiled pattern, plus the
 // "<RT>.Record Header" pseudo-keys.
 class PatternCatalog {
@@ -61,10 +83,19 @@ public:
     // "strings", "dlstrings" or "ilstrings" for a localized field (from the
     // optional "_lstrings" object), or empty.
     std::string LstringClass(const std::string& rt, const std::string& fs) const;
+    // Every "<RT>.<SUBRECORD>" key, sorted.
+    std::vector<std::string> Keys() const;
+    // From the optional "_multi" list: the subrecord can occur more than once
+    // in one record.
+    bool IsMulti(const std::string& rt, const std::string& fs) const;
+    // From the optional "_display" object: xEdit's name for it, or empty.
+    std::string Display(const std::string& rt, const std::string& fs) const;
 
 private:
     std::unordered_map<std::string, std::shared_ptr<const Pattern>> byKey_;
     std::unordered_map<std::string, std::string> lstringClass_;
+    std::unordered_map<std::string, std::string> display_;
+    std::set<std::string> multi_;
 };
 
 }  // namespace spf

@@ -47,19 +47,35 @@ Skyrim.esm:012EB7,WEAP,,IronSword,Iron Sword,7
 spf build-db --out skyrim.db --data "<Skyrim>\Data" [--load-order plugins.txt | --plugins a.esm,b.esp]
 ```
 
-Plugins are decoded in parallel and one thread writes. The 80 Bethesda
-plugins build in about 15 seconds; a 4,883-plugin load order (5.6 million
-forms) in about 25. The core tables:
+Plugins are decoded in parallel and one thread writes. The Bethesda plugins
+build in about 20 seconds (565 MB); a 4,883-plugin load order (5.6 million
+forms, 19 million field rows) in about 75 seconds (3 GB).
 
 - `plugins`: load order, light slot, header facts, size, mtime, CRC32.
-  Masters missing from the load order still get a row.
+  Masters missing from the load order still get a row, and so does
+  `SkyrimSE.exe` for the forms the engine defines itself (PlayerRef...).
 - `plugin_masters`
 - `forms`: one row per occurrence of every form (the owner and each
   override), with type, EDID, flags, the WRLD / CELL / DIAL it sits in, and
   `is_winner`.
+- One table per record type (`weap`, `npc`, `refr`, ...) with a column per
+  field (`weap.data_damage`, `npc.acbs_level`, `weap.full` as text), and
+  child tables for repeating subrecords and FormID lists (`npc_snam`,
+  `lvli_lvlo`, `weap_kwda`). Generated from the pattern catalog, so every
+  record type has the same tables in every build. `winning_<type>` views.
 - `strings`: every localized string of every plugin.
+- `st_tables` / `st_columns`: the data dictionary (what each column is,
+  which subrecord and path it comes from, what a key refers to).
+- `subrecord_overflow` / `subrecord_raw`: whatever did not fit, so nothing
+  is lost silently.
 - Views `forms_v` (readable `Skyrim.esm:012EB7` keys, in-game FormIDs) and
   `winning_forms`.
+
+Navmesh geometry and landscape data (terrain, height maps, occlusion) are
+left out for now; they will be optional modules.
+
+The tables were checked cell for cell against `spf export` on 21 record
+types of Skyrim.esm and Dawnguard.esm (12.8 million values, 0 mismatches).
 
 Every form has one integer key, `form_key = owner plugin_no * 16777216 +
 object ID`, computed from the bytes. It is the same whichever plugin a
@@ -78,6 +94,10 @@ Visual Studio 2026 with the MSVC 14.44 toolset, CMake and Ninja: run
 - `src/inflate.*`: zlib for compressed records
 - `src/strings.*`: localized strings, from loose files or BSAs
 - `src/db_build.*`: `spf build-db`
+- `src/db_schema.*`: build-db's per-record-type tables, generated from the catalog
+- `tools/export_catalog_meta.py`: adds `_multi` (repeating subrecords) and
+  `_display` (xEdit names) to the catalog
+- `tools/verify_tables.py`: checks a built database against `spf export`
 - `third_party/sqlite`: the SQLite amalgamation (3.54.1, public domain)
 - `tools/spf.cpp`: the command-line tool
 - `data/patterns.json`: the pattern catalog, with the strings file each localized field uses

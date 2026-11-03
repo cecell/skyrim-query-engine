@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -52,7 +53,13 @@ public:
 
     // Every field of a record, in file order (repeated subrecords appear
     // repeatedly). Values have FormIDs and localized strings resolved.
-    std::vector<Field> Fields(const Record& r) const;
+    // `formIds`, when given, replaces each FormID (stored, non-zero) instead
+    // of the "Owner.esm:XXXXXX" text.
+    // `wanted`, when given, picks the subrecords to return (by signature).
+    using FormIdMap = std::function<Value(uint32_t)>;
+    using SigFilter = std::function<bool(const std::string&)>;
+    std::vector<Field> Fields(const Record& r, const FormIdMap* formIds = nullptr,
+                              const SigFilter* wanted = nullptr) const;
 
     // "Skyrim.esm:012EB7" for a FormID stored in this plugin.
     std::string FormKey(uint32_t formId) const;
@@ -66,7 +73,7 @@ public:
 
 private:
     Plugin() = default;
-    void Resolve(const std::string& rt, const std::string& fs, Value* v) const;
+    void Resolve(const std::string& rt, const std::string& fs, const FormIdMap* formIds, Value* v) const;
 
     std::string name_;
     std::wstring dir_;

@@ -148,13 +148,13 @@ std::string Plugin::FormKey(uint32_t formId) const {
     return owner + buf;
 }
 
-void Plugin::Resolve(const std::string& rt, const std::string& fs, Value* v) const {
+void Plugin::Resolve(const std::string& rt, const std::string& fs, const FormIdMap* formIds, Value* v) const {
     switch (v->kind()) {
         case Value::Kind::String: {
             const std::string& s = v->AsString();
             uint32_t n;
             if (s.size() == 10 && s[0] == '[' && s[9] == ']' && ParseHex8(s, 1, &n)) {
-                *v = n == 0 ? Value() : Value::Str(FormKey(n));  // [00000000] = no form
+                *v = n == 0 ? Value() : formIds ? (*formIds)(n) : Value::Str(FormKey(n));  // [00000000] = no form
             } else if (s.size() == 20 && s.rfind("[LSTRING:0x", 0) == 0 && ParseHex8(s, 11, &n)) {
                 if (n == 0) *v = Value::Str("");
                 else if (const std::string* text = strings_.Find(n, catalog_->LstringClass(rt, fs))) *v = Value::Str(*text);
@@ -162,13 +162,13 @@ void Plugin::Resolve(const std::string& rt, const std::string& fs, Value* v) con
             break;
         }
         case Value::Kind::List:
-            for (auto& it : v->Items()) Resolve(rt, fs, &it);
+            for (auto& it : v->Items()) Resolve(rt, fs, formIds, &it);
             break;
         case Value::Kind::Map: {
             Value out = Value::Map();
             for (const auto& m : v->Members()) {
                 Value child = m.second;
-                Resolve(rt, fs, &child);
+                Resolve(rt, fs, formIds, &child);
                 out.Set(m.first, std::move(child));
             }
             *v = std::move(out);
@@ -191,7 +191,7 @@ bool Plugin::Body(const Record& r, std::vector<uint8_t>* scratch, const uint8_t*
     return true;
 }
 
-std::vector<Field> Plugin::Fields(const Record& r) const {
+std::vector<Field> Plugin::Fields(const Record& r, const FormIdMap* formIds, const SigFilter* wanted) const {
     std::vector<Field> out;
     std::vector<uint8_t> inflated;
     const uint8_t* body;
@@ -225,13 +225,14 @@ std::vector<Field> Plugin::Fields(const Record& r) const {
             else if (fs == "EPFT" && len) lastEpft = data[0];
             ctx.epft = lastEpft;
         }
+        if (wanted && !(*wanted)(fs)) continue;
         Field f;
         f.sig = fs;
         if (const Pattern* pat = catalog_->Find(r.type, fs)) {
             ctx.fsig = fs;
             try {
                 f.value = DecodeSubrecord(*pat, data, len, ctx);
-                Resolve(r.type, fs, &f.value);
+                Resolve(r.type, fs, formIds, &f.value);
                 f.decoded = true;
             } catch (const PatternError&) {
             }
