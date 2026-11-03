@@ -1,5 +1,6 @@
 #include "pattern_engine.h"
 
+#include <algorithm>
 #include <bitset>
 #include <cmath>
 #include <cstring>
@@ -630,7 +631,19 @@ bool PatternCatalog::Load(const std::string& jsonText, std::string* error) {
     }
     byKey_.clear();
     lstringClass_.clear();
+    display_.clear();
+    multi_.clear();
     for (const auto& [key, val] : root.Members()) {
+        if (key == "_multi" && val.kind() == Value::Kind::List) {
+            for (const auto& m : val.Items())
+                if (m.IsString()) multi_.insert(m.AsString());
+            continue;
+        }
+        if (key == "_display" && val.kind() == Value::Kind::Map) {
+            for (const auto& m : val.Members())
+                if (m.second.IsString()) display_[m.first] = m.second.AsString();
+            continue;
+        }
         if (key == "_lstrings" && val.kind() == Value::Kind::Map) {
             for (const auto& m : val.Members()) {
                 if (m.second.IsString()) lstringClass_[m.first] = m.second.AsString();
@@ -666,6 +679,142 @@ const Pattern* PatternCatalog::Find(const std::string& rt, const std::string& fs
 std::string PatternCatalog::LstringClass(const std::string& rt, const std::string& fs) const {
     auto it = lstringClass_.find(rt + "." + fs);
     return it == lstringClass_.end() ? std::string() : it->second;
+}
+
+std::vector<std::string> PatternCatalog::Keys() const {
+    std::vector<std::string> keys;
+    for (const auto& k : byKey_) keys.push_back(k.first);
+    std::sort(keys.begin(), keys.end());
+    return keys;
+}
+
+bool PatternCatalog::IsMulti(const std::string& rt, const std::string& fs) const {
+    return multi_.count(rt + "." + fs) != 0;
+}
+
+std::string PatternCatalog::Display(const std::string& rt, const std::string& fs) const {
+    auto it = display_.find(rt + "." + fs);
+    return it == display_.end() ? std::string() : it->second;
+}
+
+// ---- shapes -----------------------------------------------------------------
+
+namespace {
+
+using K = Shape::Kind;
+
+Shape Leaf(K k) {
+    Shape s;
+    s.kind = k;
+    return s;
+}
+
+// One shape that holds what either does (union arms).
+Shape Merge(const Shape& a, const Shape& b) {
+    if (a.kind == b.kind) {
+        Shape m = a;
+        if (a.kind == K::Map) {
+            for (const auto& f : b.fields) {
+                auto it = std::find_if(m.fields.begin(), m.fields.end(),
+                                       [&](const auto& x) { return x.first == f.first; });
+                if (it == m.fields.end()) m.fields.push_back(f);
+                else it->second = Merge(it->second, f.second);
+            }
+        } else if (a.kind == K::Tuple) {
+            for (size_t i = 0; i < b.fields.size(); ++i) {
+                if (i < m.fields.size()) m.fields[i].second = Merge(m.fields[i].second, b.fields[i].second);
+                else m.fields.push_back(b.fields[i]);
+            }
+        } else if (a.kind == K::List) {
+            m.elem = {Merge(a.elem[0], b.elem[0])};
+        }
+        return m;
+    }
+    if ((a.kind == K::Int && b.kind == K::Real) || (a.kind == K::Real && b.kind == K::Int)) return Leaf(K::Real);
+    return Leaf(K::Unknown);
+}
+
+// nullopt = a skip, which an enclosing seq drops (as Exec does).
+std::optional<Shape> Walk(const Pattern& p) {
+    switch (p.type) {
+        case PType::Prim:
+            switch (p.prim) {
+                case Prim::U8: case Prim::U16: case Prim::U32: case Prim::I8: case Prim::I16: case Prim::I32:
+                case Prim::FloatColor255:
+                    return Leaf(K::Int);
+                case Prim::F32: case Prim::FloatRad2Deg: case Prim::FloatDefault: case Prim::FloatDefaultRad2Deg:
+                case Prim::I32Div100: case Prim::I16Div100: case Prim::U16Div65535: case Prim::U8Div100:
+                case Prim::F32Div100: case Prim::U32Div100: case Prim::Scaled:
+                    return Leaf(K::Real);
+                case Prim::Bool: return Leaf(K::Bool);
+                case Prim::HexU8: case Prim::Zstring: case Prim::Str8: case Prim::Str16: case Prim::Str32:
+                    return Leaf(K::Text);
+                case Prim::EmptyMarker: return Leaf(K::Marker);
+                case Prim::Lstring: return Leaf(K::LString);
+                case Prim::Formid: return Leaf(K::FormId);
+                case Prim::ValueRef: return Leaf(p.refAsFormid ? K::FormId : K::Int);
+                case Prim::ColorRgb:
+                case Prim::ColorRgba: {
+                    Shape t = Leaf(K::Tuple);
+                    const char* names[4] = {"r", "g", "b", "a"};
+                    for (int i = 0; i < (p.prim == Prim::ColorRgb ? 3 : 4); ++i) t.fields.emplace_back(names[i], Leaf(K::Int));
+                    return t;
+                }
+                case Prim::EnumU8: case Prim::EnumU16: case Prim::EnumU32:
+                    return Leaf(p.enumMap ? K::Text : K::Int);
+            }
+            return Leaf(K::Unknown);
+        case PType::Seq: {
+            std::vector<std::pair<Shape, const std::optional<std::string>*>> items;
+            bool labeled = false;
+            for (const auto& item : p.items) {
+                std::optional<Shape> s = Walk(*item.first);
+                if (!s) continue;
+                items.emplace_back(std::move(*s), &item.second);
+                if (item.second) labeled = true;
+            }
+            if (!labeled && p.unwrap && items.size() == 1) return items[0].first;
+            Shape s = Leaf(labeled ? K::Map : K::Tuple);
+            for (size_t i = 0; i < items.size(); ++i)
+                s.fields.emplace_back(*items[i].second ? **items[i].second : "_" + std::to_string(i), items[i].first);
+            return s;
+        }
+        case PType::Repeat: {
+            Shape s = Leaf(K::List);
+            std::optional<Shape> e = Walk(*p.body);
+            s.elem = {e ? *e : Leaf(K::Unknown)};
+            return s;
+        }
+        case PType::Union: {
+            std::optional<Shape> m;
+            bool anySkip = false;
+            auto add = [&](const Pattern& c) {
+                std::optional<Shape> s = Walk(c);
+                if (!s) anySkip = true;
+                else m = m ? Merge(*m, *s) : *s;
+            };
+            for (const auto& c : p.cases) add(*c.second);
+            if (p.deflt) add(*p.deflt);
+            if (!m && anySkip) return std::nullopt;
+            return m ? *m : Leaf(K::Unknown);
+        }
+        case PType::Opt:
+        case PType::Window: {
+            std::optional<Shape> s = Walk(*p.body);
+            return s ? *s : Leaf(K::Unknown);
+        }
+        case PType::Skip: return std::nullopt;
+        case PType::Bytes: return Leaf(K::Text);
+        case PType::Bitfield: return Leaf(K::Flags);
+    }
+    return Leaf(K::Unknown);
+}
+
+}  // namespace
+
+Shape ShapeOf(const Pattern& pattern) {
+    std::optional<Shape> s = Walk(pattern);
+    return s ? *s : Leaf(K::Unknown);
 }
 
 }  // namespace spf

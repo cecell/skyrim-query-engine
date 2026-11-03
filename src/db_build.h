@@ -17,6 +17,7 @@ struct BuildOptions {
     std::wstring data;                 // the Data folder
     std::wstring loadOrderFile;        // plugins.txt; empty = see `plugins`
     std::vector<std::string> plugins;  // explicit load order; both empty = every plugin in `data`
+    std::wstring patterns;             // the pattern catalog (patterns.json)
     std::string language = "english";
     int threads = 0;                   // 0 = one per logical core, minus the writer
     bool quiet = false;

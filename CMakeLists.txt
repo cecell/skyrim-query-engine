@@ -23,6 +23,7 @@ add_library(spf STATIC
     src/inflate.cpp
     src/strings.cpp
     src/plugin.cpp
+    src/db_schema.cpp
     src/db_build.cpp)
 target_include_directories(spf PUBLIC src)
 target_link_libraries(spf PUBLIC sqlite3)

@@ -290,8 +290,8 @@ Examples
 const char kHelpBuildDb[] = R"HELP(spf build-db --out <file.db> --data <Data folder> [options]
 
 Builds one SQLite database of a whole load order, for any app or script to
-query with plain SQLite. Plugins are read in parallel; Skyrim.esm and the
-Bethesda plugins take seconds.
+query with plain SQLite. Plugins are decoded in parallel: the Bethesda
+plugins take about 20 seconds, a 4,883-plugin load order about 75.
 
 OPTIONS
   --out <file.db>          the database to write. It is built as
@@ -309,7 +309,7 @@ OPTIONS
   --threads <n>            decode threads (default: logical cores - 1).
   --quiet                  no progress output.
 
-WHAT IS IN IT (schema version 1: the core)
+WHAT IS IN IT (schema version 2)
   plugins         one row per plugin: plugin_no (its number in this DB),
                   load_order, mod_index (light slot for light plugins),
                   is_light, is_master, header facts, size, mtime, crc32.
@@ -327,6 +327,23 @@ WHAT IS IN IT (schema version 1: the core)
                   is_deleted.  winning_forms = forms_v of the winners.
   spf_meta        build settings and versions; spf_modules = what is built.
 
+  One table per record type (weap, npc, cell, refr, ...): one row per
+  occurrence (form_key, plugin_no), one column per field of each subrecord
+  that occurs once, named subrecord_field: weap.data_damage, npc.acbs_level,
+  weap.full (the name, as text). winning_<type> views hold the winners.
+  Child tables <type>_<subrecord> (form_key, plugin_no, idx): subrecords
+  that repeat in a record (npc_snam factions, lvli_lvlo entries, conditions
+  *_ctda) and lists of FormIDs inside one (weap_kwda keywords).
+  FormID columns hold form_key integers. Other lists, and anything nested
+  below them, are JSON text. Bitfield flags are a JSON list of names.
+  Not built by default: navmesh geometry and landscape (terrain, height
+  maps, occlusion); spf_meta.modules_not_built lists them.
+  subrecord_overflow  extra occurrences of subrecords expected once.
+  subrecord_raw       subrecords with no pattern or bytes that did not fit.
+  st_tables, st_columns  the data dictionary: every table and column, with
+                  its subrecord, its spf export path, what a key column
+                  refers to, and xEdit's name for the subrecord.
+
 KEYS
   form_key = owner plugin_no * 16777216 + object ID. It is the same in every
   table, whichever plugin a reference was read from, so joins are plain
@@ -339,6 +356,11 @@ EXAMPLES
 
   SELECT form, recorded_in FROM forms_v WHERE edid = 'IronSword';
   SELECT recorded_in, count(*) FROM forms_v WHERE is_override GROUP BY 1;
+  SELECT edid, full, data_damage FROM winning_weap ORDER BY data_damage DESC;
+  SELECT w.edid, k.edid AS keyword FROM winning_weap w
+    JOIN weap_kwda x USING (form_key, plugin_no)
+    JOIN winning_forms k ON k.form_key = x.kwda;
+  SELECT column_name, kind, path, description FROM st_columns WHERE table_name = 'npc';
 )HELP";
 
 int Usage() {
@@ -361,13 +383,13 @@ int Help(const std::string& topic) {
 }
 
 // Collects the shape of a value: "DATA", "DATA.damage", "DATA.flags[]"...
-void Shape(const Value& v, const std::string& prefix, std::set<std::string>* out) {
+void CollectPaths(const Value& v, const std::string& prefix, std::set<std::string>* out) {
     out->insert(prefix);
     if (v.kind() == Value::Kind::Map) {
-        for (const auto& m : v.Members()) Shape(m.second, prefix + "." + m.first, out);
+        for (const auto& m : v.Members()) CollectPaths(m.second, prefix + "." + m.first, out);
     } else if (v.kind() == Value::Kind::List) {
         for (const auto& it : v.Items())
-            if (it.kind() == Value::Kind::Map) Shape(it, prefix, out);
+            if (it.kind() == Value::Kind::Map) CollectPaths(it, prefix, out);
     }
 }
 
@@ -389,6 +411,7 @@ int BuildDbCommand(int argc, wchar_t** argv) {
         } else if (a == "--language" && hasNext) opt.language = Utf8(argv[++i]);
         else if (a == "--threads" && hasNext) opt.threads = _wtoi(argv[++i]);
         else if (a == "--quiet") opt.quiet = true;
+        else if (a == "--patterns" && hasNext) opt.patterns = argv[++i];
         else {
             fprintf(stderr, "build-db: unknown option %s (spf build-db --help)\n", a.c_str());
             return 2;
@@ -397,6 +420,12 @@ int BuildDbCommand(int argc, wchar_t** argv) {
     if (opt.out.empty() || opt.data.empty()) {
         fprintf(stderr, "build-db: --out and --data are required (spf build-db --help)\n");
         return 2;
+    }
+    if (opt.patterns.empty()) {
+        wchar_t exe[MAX_PATH];
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        opt.patterns = exe;
+        opt.patterns = opt.patterns.substr(0, opt.patterns.find_last_of(L"\\/") + 1) + L"patterns.json";
     }
     std::string err;
     int rc = BuildDb(opt, &err);
@@ -478,7 +507,7 @@ int wmain(int argc, wchar_t** argv) {
         for (const Record* r : recs) {
             std::set<std::string> inThis;
             for (const auto& f : plugin->Fields(*r)) {
-                Shape(f.value, f.sig, &seen[f.sig].second);
+                CollectPaths(f.value, f.sig, &seen[f.sig].second);
                 if (inThis.insert(f.sig).second) ++seen[f.sig].first;
             }
         }

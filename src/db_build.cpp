@@ -5,23 +5,27 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <unordered_map>
 
 #include "pattern_value.h"
+#include "db_schema.h"
 #include "plugin.h"
 #include "sqlite3.h"
 
 namespace spf {
 namespace {
 
-constexpr int kSchemaVersion = 1;
+constexpr int kSchemaVersion = 2;
 constexpr size_t kBatchRows = 50000;
 constexpr int64_t kKeyShift = 1 << 24;
 
@@ -212,6 +216,42 @@ std::vector<std::string> ResolveLoadOrder(const BuildOptions& opt, const std::ws
     return order;
 }
 
+// Forms the game engine defines itself (no plugin has them), owned by
+// Skyrim.esm: references to them, PlayerRef above all, would dangle without
+// rows. From an xEdit dump of SkyrimSE.exe (plugin_sql_bundle.zip,
+// dml/skyrimse_exe_records.sql).
+struct EngineForm {
+    uint32_t objectId;
+    const char* type;
+    const char* edid;
+};
+const EngineForm kEngineForms[] = {
+    {0x000014, "PLYR", "PlayerRef"},
+    {0x00001A, "EYES", "eyeReanimate"},
+    {0x00001C, "BPTD", "PlayerBodyPartData"},
+    {0x000028, "TXST", "NullTextureSet"},
+    {0x000063, "GLOB", "PlayCredits"},
+    {0x000164, "IMAD", "ImageSpaceConcussion"},
+    {0x000166, "IMAD", "ExplosionInFace"},
+    {0x000276, "IPDS", "DefaultImpactDataSet"},
+    {0x0003F5, "AVIF", "AVVoicePoints"},
+    {0x0005E0, "AVIF", "AVWaterBreathing"},
+    {0x0005E1, "AVIF", "AVWaterWalking"},
+    {0x0005E6, "AVIF", "AVWardPower"},
+    {0x0005EA, "AVIF", "AVWardDeflection"},
+    {0x0005EE, "AVIF", "AVVariable04"},
+    {0x0005EF, "AVIF", "AVVariable05"},
+    {0x0005FC, "AVIF", "AVWeaponSpeedMult"},
+    {0x00060B, "AVIF", "AVSmithingMod"},
+    {0x00062F, "AVIF", "AVTwoHandedPowerMod"},
+    {0x00063C, "AVIF", "AVDestructionPowerMod"},
+    {0x000644, "AVIF", "AVStaminaRateMult"},
+    {0x000647, "AVIF", "AVGrabActorOffset"},
+    {0x000648, "AVIF", "AVGrabbed"},
+    {0x000649, "AVIF", "AVDEPRECATED05"},
+};
+constexpr char kEngineName[] = "SkyrimSE.exe";
+
 // ---- Rows flowing from the decode workers to the writer ----
 
 struct FormRow {
@@ -229,10 +269,45 @@ struct StringRow {
     std::string text;
 };
 
+// One SQL value.
+struct Cell {
+    enum class T : uint8_t { Null, Int, Real, Text } t = T::Null;
+    int64_t i = 0;
+    double d = 0;
+    std::string s;
+    static Cell Int(int64_t v) {
+        Cell c;
+        c.t = T::Int;
+        c.i = v;
+        return c;
+    }
+    static Cell Real(double v) {
+        Cell c;
+        c.t = T::Real;
+        c.d = v;
+        return c;
+    }
+    static Cell Text(std::string v) {
+        Cell c;
+        c.t = T::Text;
+        c.s = std::move(v);
+        return c;
+    }
+};
+
+// Table ids besides the schema's (which are >= 0).
+constexpr int kOverflowTable = -1, kRawTable = -2;
+
+struct TableRow {
+    int table;
+    std::vector<Cell> cells;  // every column, keys first
+};
+
 struct Batch {
     int pluginNo = 0;
     std::vector<FormRow> forms;
     std::vector<StringRow> strings;
+    std::vector<TableRow> rows;
     bool last = false;  // the plugin is done: facts below are set
     uint32_t crc = 0;
     int64_t formCount = 0;
@@ -270,15 +345,58 @@ private:
     int producers_ = 0;
 };
 
-// One plugin: every record -> a form row; its strings tables -> string rows.
+// A decoded value as the cell of a column of that kind.
+Cell ToCell(const Value& v, const ColumnDef& col) {
+    switch (v.kind()) {
+        case Value::Kind::Null: return Cell();
+        case Value::Kind::Bool: return Cell::Int(v.AsBool());
+        case Value::Kind::Int: return Cell::Int(v.AsInt());
+        case Value::Kind::Float: return std::isfinite(v.AsFloat()) ? Cell::Real(v.AsFloat()) : Cell();
+        case Value::Kind::String: return Cell::Text(v.AsString());
+        default: break;
+    }
+    (void)col;
+    std::string json;  // a list or object: JSON text
+    WriteJson(v, &json);
+    return Cell::Text(std::move(json));
+}
+
+const Value* Walk(const Value* v, const std::vector<PathStep>& steps) {
+    for (const auto& s : steps) {
+        if (s.index) {
+            if (v->kind() != Value::Kind::List || s.pos >= v->Items().size()) return nullptr;
+            v = &v->Items()[s.pos];
+        } else {
+            if (v->kind() != Value::Kind::Map) return nullptr;
+            v = v->Find(s.key);
+            if (!v) return nullptr;
+        }
+    }
+    return v;
+}
+
+// Fills `cells[first..]` with the columns of one subrecord value.
+void FillColumns(const Value& value, const std::vector<ColumnDef>& cols, size_t firstCol, size_t count,
+                 std::vector<Cell>* cells, size_t firstCell) {
+    for (size_t k = 0; k < count; ++k) {
+        const ColumnDef& c = cols[firstCol + k];
+        if (c.kind == "marker") {
+            (*cells)[firstCell + k] = Cell::Int(1);
+            continue;
+        }
+        if (const Value* v = Walk(&value, c.steps)) (*cells)[firstCell + k] = ToCell(*v, c);
+    }
+}
+
+// One plugin: every record -> a form row and its type / child table rows;
+// its strings tables -> string rows.
 void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
                   const std::unordered_map<std::string, int>& noByName, const std::string& language,
-                  BatchQueue* queue) {
-    static const PatternCatalog kNoPatterns;
+                  const PatternCatalog& catalog, const Schema& schema, BatchQueue* queue) {
     Batch batch;
     batch.pluginNo = info.no;
     std::string err;
-    auto plugin = Plugin::Open(info.path, kNoPatterns, &err, language);
+    auto plugin = Plugin::Open(info.path, catalog, &err, language);
     if (!plugin) {
         batch.last = true;
         batch.error = err;
@@ -301,7 +419,24 @@ void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
         return ownerBase[i] + (stored & objMask[i]);
     };
 
+    const Plugin::FormIdMap formIds = [&](uint32_t stored) { return Value::Int(keyOf(stored)); };
+    std::string rt;  // the record being decoded, for the filter
+    const Plugin::SigFilter wanted = [&](const std::string& fs) {
+        const SubrecordDef* d = schema.Find(rt, fs);
+        return !d || d->module.empty();
+    };
+    auto flush = [&] {
+        if (batch.forms.size() + batch.rows.size() < kBatchRows) return;
+        Batch next;
+        next.pluginNo = info.no;
+        std::swap(next, batch);
+        queue->Push(std::move(next));
+    };
+
     std::vector<uint8_t> scratch;
+    std::vector<const SubrecordDef*> seen;
+    std::unordered_map<int, int64_t> childIdx;
+    const auto& tables = schema.tables();
     const auto& recs = plugin->records();
     for (size_t i = 1; i < recs.size(); ++i) {
         const Record& r = recs[i];
@@ -321,13 +456,60 @@ void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
                 row.edid = Utf8Lossy(body + 6, strnlen(reinterpret_cast<const char*>(body + 6), n));
             }
         }
+        const int64_t key = row.key;
         batch.forms.push_back(std::move(row));
-        if (batch.forms.size() >= kBatchRows) {
-            Batch next;
-            next.pluginNo = info.no;
-            std::swap(next, batch);
-            queue->Push(std::move(next));
+
+        // The record's fields -> its type table row, child rows, and rows
+        // for what does not fit (overflow, raw).
+        rt = r.type;
+        std::vector<Field> fields = plugin->Fields(r, &formIds, &wanted);
+        int tt = schema.TypeTable(rt);
+        TableRow main;
+        if (tt >= 0) {
+            main.table = tt;
+            main.cells.resize(2 + tables[tt].columns.size());
+            main.cells[0] = Cell::Int(key);
+            main.cells[1] = Cell::Int(info.no);
         }
+        seen.clear();
+        childIdx.clear();
+        for (size_t k = 0; k < fields.size(); ++k) {
+            const Field& f = fields[k];
+            const SubrecordDef* def = schema.Find(rt, f.sig);
+            if (!def || !f.decoded) {
+                batch.rows.push_back({kRawTable,
+                                      {Cell::Int(key), Cell::Int(info.no), Cell::Text(rt), Cell::Text(f.sig),
+                                       Cell::Int(static_cast<int64_t>(k)), Cell::Text(f.value.AsString().substr(1)),
+                                       Cell::Text(def ? "did not decode" : "no pattern")}});
+                continue;
+            }
+            const TableDef& t = tables[def->table];
+            if (def->child) {
+                const bool list = def->elementRows && f.value.kind() == Value::Kind::List;
+                const size_t n = list ? f.value.Items().size() : 1;
+                for (size_t e = 0; e < n; ++e) {
+                    TableRow child;
+                    child.table = def->table;
+                    child.cells.resize(3 + t.columns.size());
+                    child.cells[0] = Cell::Int(key);
+                    child.cells[1] = Cell::Int(info.no);
+                    child.cells[2] = Cell::Int(childIdx[def->table]++);
+                    FillColumns(list ? f.value.Items()[e] : f.value, t.columns, 0, t.columns.size(), &child.cells, 3);
+                    batch.rows.push_back(std::move(child));
+                }
+            } else if (std::find(seen.begin(), seen.end(), def) != seen.end()) {
+                std::string json;
+                WriteJson(f.value, &json);
+                batch.rows.push_back({kOverflowTable,
+                                      {Cell::Int(key), Cell::Int(info.no), Cell::Text(rt), Cell::Text(f.sig),
+                                       Cell::Text(std::move(json))}});
+            } else {
+                seen.push_back(def);
+                FillColumns(f.value, t.columns, def->firstColumn, def->columnCount, &main.cells, 2 + def->firstColumn);
+            }
+        }
+        if (tt >= 0) batch.rows.push_back(std::move(main));
+        flush();
     }
     for (int c = 0; c < 3; ++c) {
         for (const auto& s : plugin->strings().table(c)) {
@@ -473,7 +655,108 @@ CREATE TABLE strings(
   text      TEXT NOT NULL,
   PRIMARY KEY(plugin_no, kind, id)
 ) WITHOUT ROWID;
+
+-- A subrecord the catalog says occurs once per record, occurring again: the
+-- extra occurrences (the first is in the type table), as JSON.
+CREATE TABLE subrecord_overflow(
+  form_key  INTEGER NOT NULL,
+  plugin_no INTEGER NOT NULL,
+  type      TEXT NOT NULL,
+  sig       TEXT NOT NULL,
+  value     TEXT
+);
+
+-- Subrecords with no pattern, or whose bytes did not fit it: the raw bytes.
+CREATE TABLE subrecord_raw(
+  form_key  INTEGER NOT NULL,
+  plugin_no INTEGER NOT NULL,
+  type      TEXT NOT NULL,
+  sig       TEXT NOT NULL,
+  idx       INTEGER NOT NULL,
+  bytes_hex TEXT NOT NULL,
+  reason    TEXT NOT NULL
+);
+
+-- The data dictionary: every table and column of this database.
+CREATE TABLE st_tables(
+  table_name  TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL,
+  record_type TEXT,
+  subrecord   TEXT,
+  description TEXT
+) WITHOUT ROWID;
+
+CREATE TABLE st_columns(
+  table_name  TEXT NOT NULL REFERENCES st_tables,
+  column_name TEXT NOT NULL,
+  position    INTEGER NOT NULL,
+  sql_type    TEXT,
+  kind        TEXT,
+  subrecord   TEXT,
+  path        TEXT,
+  refers_to   TEXT,
+  description TEXT,
+  PRIMARY KEY(table_name, column_name)
+) WITHOUT ROWID;
 )SQL";
+
+const char* kCoreTables[][2] = {
+    {"plugins", "Every plugin in the load order, plus masters it lacks (load_order NULL) and SkyrimSE.exe (load_order -1, the engine's own forms)."},
+    {"plugin_masters", "Each plugin's masters, in order."},
+    {"forms", "One row per occurrence of a form: the plugin that owns it and every plugin that overrides it."},
+    {"strings", "Every localized string of every plugin."},
+    {"subrecord_overflow", "Extra occurrences of subrecords the catalog says occur once per record."},
+    {"subrecord_raw", "Subrecords with no pattern, or whose bytes did not fit it."},
+    {"spf_meta", "Build settings and versions."},
+    {"spf_modules", "What is built: core and the optional modules."},
+    {"st_tables", "The data dictionary: tables."},
+    {"st_columns", "The data dictionary: columns."},
+};
+
+std::string Quote(const std::string& name) { return "\"" + name + "\""; }
+
+// Whether a name works unquoted as a column (keywords like "order" do not).
+bool UsableName(const std::string& name) {
+    static sqlite3* mem = [] {
+        sqlite3* d = nullptr;
+        sqlite3_open(":memory:", &d);
+        return d;
+    }();
+    std::string sql = "SELECT " + name + " FROM (SELECT 1 AS " + Quote(name) + ")";
+    sqlite3_stmt* st = nullptr;
+    bool ok = sqlite3_prepare_v2(mem, sql.c_str(), -1, &st, nullptr) == SQLITE_OK;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+std::string TableDdl(const TableDef& t) {
+    std::string sql = "CREATE TABLE " + Quote(t.name) + "(\n  form_key INTEGER NOT NULL,\n  plugin_no INTEGER NOT NULL";
+    if (!t.fs.empty()) sql += ",\n  idx INTEGER NOT NULL";
+    for (const auto& c : t.columns) sql += ",\n  " + Quote(c.name) + (c.sqlType.empty() ? "" : " " + c.sqlType);
+    return sql + "\n);\n";
+}
+
+std::string InsertSql(const std::string& table, size_t columns) {
+    std::string sql = "INSERT INTO " + Quote(table) + " VALUES(";
+    for (size_t i = 0; i < columns; ++i) sql += i ? ",?" : "?";
+    return sql + ")";
+}
+
+bool BindRun(sqlite3_stmt* st, const std::vector<Cell>& cells) {
+    for (size_t i = 0; i < cells.size(); ++i) {
+        const Cell& c = cells[i];
+        int k = static_cast<int>(i) + 1;
+        switch (c.t) {
+            case Cell::T::Null: sqlite3_bind_null(st, k); break;
+            case Cell::T::Int: sqlite3_bind_int64(st, k, c.i); break;
+            case Cell::T::Real: sqlite3_bind_double(st, k, c.d); break;
+            case Cell::T::Text: sqlite3_bind_text(st, k, c.s.data(), static_cast<int>(c.s.size()), SQLITE_STATIC); break;
+        }
+    }
+    int rc = sqlite3_step(st);
+    sqlite3_reset(st);
+    return rc == SQLITE_DONE;
+}
 
 const char kIndexes[] = R"SQL(
 CREATE INDEX forms_key    ON forms(form_key, plugin_no);
@@ -508,7 +791,7 @@ SELECT f.form_key,
        r.name AS recorded_in,
        f.type, f.edid, f.flags,
        f.flags & 32 <> 0 AS is_deleted,
-       f.plugin_no <> o.plugin_no AS is_override,
+       f.plugin_no <> o.plugin_no AND r.load_order >= 0 AS is_override,
        f.is_winner, f.parent_key, f.form_version, f.plugin_no,
        o.plugin_no AS owner_no
 FROM forms f
@@ -543,6 +826,25 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         fputc('\n', stderr);
     };
     const std::wstring data = WithSlash(opt.data);
+
+    // The pattern catalog decodes the fields; the schema is generated from it.
+    PatternCatalog catalog;
+    {
+        FILE* fp = nullptr;
+        std::string text;
+        if (_wfopen_s(&fp, opt.patterns.c_str(), L"rb") == 0 && fp) {
+            char buf[65536];
+            for (size_t n; (n = fread(buf, 1, sizeof(buf), fp)) > 0;) text.append(buf, n);
+            fclose(fp);
+        }
+        std::string perr;
+        if (text.empty() || !catalog.Load(text, &perr)) {
+            *error = "patterns: " + (perr.empty() ? "cannot read " + Utf8(opt.patterns) : perr);
+            return 2;
+        }
+    }
+    Schema schema;
+    schema.Build(catalog, UsableName);
 
     // Phase 1: load order and headers.
     std::vector<std::string> order = ResolveLoadOrder(opt, data, error);
@@ -588,6 +890,21 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         for (const auto& m : all[i].masters)
             if (!noByName.count(Lower(m))) addPlugin(m, false);
     say("load order: %zu plugins (%d full, %d light), %zu missing masters", loaded, full, light, all.size() - loaded);
+    // The engine's own forms: a pseudo plugin loaded before Skyrim.esm, so a
+    // plugin that does define one of them wins.
+    int engineNo = -1;
+    auto skyrim = noByName.find("skyrim.esm");
+    if (skyrim != noByName.end() && all[skyrim->second].inLoadOrder) {
+        PluginInfo e;
+        e.no = engineNo = static_cast<int>(all.size());
+        e.name = kEngineName;
+        e.inLoadOrder = true;
+        e.loadOrder = -1;
+        e.master = true;
+        e.description = "forms defined by the game engine";
+        noByName[Lower(e.name)] = e.no;
+        all.push_back(std::move(e));
+    }
 
     // The database, written beside the target and moved over it at the end.
     std::wstring tmp = opt.out + L".building";
@@ -600,6 +917,16 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
                      error) ||
             !db.Exec(kSchema, error) || !db.Exec("BEGIN", error))
             return 1;
+        std::vector<Stmt> insTable(schema.tables().size());
+        for (size_t t = 0; t < schema.tables().size(); ++t) {
+            const TableDef& td = schema.tables()[t];
+            if (!db.Exec(TableDdl(td), error)) return 1;
+            insTable[t].st = db.Prepare(InsertSql(td.name, (td.fs.empty() ? 2 : 3) + td.columns.size()).c_str(), error);
+            if (!insTable[t].st) return 1;
+        }
+        Stmt insOverflow{db.Prepare("INSERT INTO subrecord_overflow VALUES(?,?,?,?,?)", error)};
+        Stmt insRaw{db.Prepare("INSERT INTO subrecord_raw VALUES(?,?,?,?,?,?,?)", error)};
+        if (!insOverflow.st || !insRaw.st) return 1;
 
         Stmt insPlugin{db.Prepare("INSERT INTO plugins VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)", error)};
         Stmt insMaster{db.Prepare("INSERT INTO plugin_masters VALUES(?,?,?)", error)};
@@ -609,16 +936,22 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         if (!insPlugin.st || !insMaster.st || !insForm.st || !insString.st || !setFacts.st) return 1;
         for (const auto& p : all) {
             insPlugin.Int(1, p.no).Text(2, p.name);
-            if (p.inLoadOrder) insPlugin.Int(3, p.loadOrder).Int(4, p.modIndex);
-            else insPlugin.Null(3).Null(4);
+            if (p.inLoadOrder) insPlugin.Int(3, p.loadOrder);
+            else insPlugin.Null(3);
+            if (p.modIndex >= 0) insPlugin.Int(4, p.modIndex);
+            else insPlugin.Null(4);
             insPlugin.Int(5, p.light).Int(6, p.master).Int(7, p.localized);
             if (p.exists) {
                 insPlugin.Int(8, p.flags).Real(9, p.hedrVersion).Int(10, p.numRecords).Int(11, p.nextObjectId)
-                    .Text(12, p.author).Text(13, p.description);
+                    .Text(12, p.author);
             } else {
-                for (int c = 8; c <= 13; ++c) insPlugin.Null(c);
+                for (int c = 8; c <= 12; ++c) insPlugin.Null(c);
             }
-            insPlugin.Int(14, p.exists).Text(15, Utf8(p.path));
+            if (p.exists || !p.description.empty()) insPlugin.Text(13, p.description);
+            else insPlugin.Null(13);
+            insPlugin.Int(14, p.exists);
+            if (p.path.empty()) insPlugin.Null(15);
+            else insPlugin.Text(15, Utf8(p.path));
             if (p.exists) insPlugin.Int(16, p.size).Int(17, p.mtime);
             else insPlugin.Null(16).Null(17);
             if (!insPlugin.Run()) {
@@ -627,6 +960,19 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             }
             for (size_t k = 0; k < p.masters.size(); ++k)
                 insMaster.Int(1, p.no).Int(2, static_cast<int64_t>(k)).Int(3, noByName.at(Lower(p.masters[k]))).Run();
+        }
+
+        if (engineNo >= 0) {
+            const int64_t base = noByName.at("skyrim.esm") * kKeyShift;
+            for (const auto& e : kEngineForms) {
+                insForm.Int(1, base + e.objectId).Int(2, engineNo).Text(3, e.type).Text(4, e.edid).Int(5, 0)
+                    .Null(6).Null(7).Int(8, e.objectId);
+                if (!insForm.Run()) {
+                    *error = db.Message();
+                    return 1;
+                }
+            }
+            setFacts.Null(1).Int(2, static_cast<int64_t>(std::size(kEngineForms))).Int(3, engineNo).Run();
         }
 
         // Phase 2: decode workers (biggest plugin first) -> this thread writes.
@@ -644,13 +990,13 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             pool.emplace_back([&] {
                 SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
                 for (size_t w; (w = nextWork++) < work.size();)
-                    DecodePlugin(all[work[w]], all, noByName, opt.language, &queue);
+                    DecodePlugin(all[work[w]], all, noByName, opt.language, catalog, schema, &queue);
                 queue.ProducerDone();
             });
         }
         say("decoding with %d threads", threads);
         static const char* kKinds[3] = {"strings", "dlstrings", "ilstrings"};
-        int64_t forms = 0, strings = 0;
+        int64_t forms = 0, strings = 0, rows = 0;
         size_t done = 0;
         std::string firstError;
         Batch b;
@@ -667,6 +1013,13 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             }
             for (const auto& s : b.strings)
                 insString.Int(1, b.pluginNo).Text(2, kKinds[s.kind]).Int(3, s.id).Text(4, s.text).Run();
+            for (const auto& r : b.rows) {
+                sqlite3_stmt* st = r.table == kOverflowTable ? insOverflow.st
+                                 : r.table == kRawTable      ? insRaw.st
+                                                             : insTable[r.table].st;
+                if (!BindRun(st, r.cells) && firstError.empty()) firstError = db.Message();
+            }
+            rows += static_cast<int64_t>(b.rows.size());
             forms += static_cast<int64_t>(b.forms.size());
             strings += static_cast<int64_t>(b.strings.size());
             if (b.last) {
@@ -680,14 +1033,71 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             *error = firstError;
             return 1;
         }
-        say("wrote %lld forms, %lld strings from %zu plugins", static_cast<long long>(forms),
-            static_cast<long long>(strings), done);
+        say("wrote %lld forms, %lld field rows, %lld strings from %zu plugins", static_cast<long long>(forms),
+            static_cast<long long>(rows), static_cast<long long>(strings), done);
 
-        if (!db.Exec(kIndexes, error)) return 1;
+        std::string sql = kIndexes;
+        sql += "CREATE INDEX subrecord_overflow_key ON subrecord_overflow(form_key, plugin_no);\n"
+               "CREATE INDEX subrecord_raw_key ON subrecord_raw(form_key, plugin_no);\n";
+        for (const auto& t : schema.tables())
+            sql += "CREATE INDEX " + Quote(t.name + "_key") + " ON " + Quote(t.name) + "(form_key, plugin_no);\n";
+        if (!db.Exec(sql, error)) return 1;
         say("indexes");
         if (!db.Exec(kWinners, error)) return 1;
         say("winners");
-        if (!db.Exec(kViews, error)) return 1;
+        sql = kViews;
+        for (const auto& t : schema.tables()) {
+            if (!t.fs.empty()) continue;
+            sql += "CREATE VIEW " + Quote("winning_" + t.name) + " AS SELECT t.* FROM " + Quote(t.name) +
+                   " t JOIN forms f ON f.form_key = t.form_key AND f.plugin_no = t.plugin_no WHERE f.is_winner;\n";
+        }
+        if (!db.Exec(sql, error)) return 1;
+
+        // The data dictionary.
+        Stmt insT{db.Prepare("INSERT INTO st_tables VALUES(?,?,?,?,?)", error)};
+        Stmt insC{db.Prepare("INSERT INTO st_columns VALUES(?,?,?,?,?,?,?,?,?)", error)};
+        if (!insT.st || !insC.st) return 1;
+        for (const auto& ct : kCoreTables) insT.Text(1, ct[0]).Text(2, "core").Null(3).Null(4).Text(5, ct[1]).Run();
+        if (!db.Exec("INSERT INTO st_columns SELECT m.table_name, p.name, p.cid, p.type, NULL, NULL, NULL, NULL, NULL "
+                     "FROM st_tables m, pragma_table_info(m.table_name) p",
+                     error))
+            return 1;
+        for (const auto& t : schema.tables()) {
+            insT.Text(1, t.name).Text(2, t.fs.empty() ? "type" : "child").Text(3, t.rt);
+            if (t.fs.empty()) insT.Null(4);
+            else insT.Text(4, t.fs);
+            insT.Text(5, t.description).Run();
+            int pos = 0;
+            auto key = [&](const char* name, const char* refers, const char* desc) {
+                insC.Text(1, t.name).Text(2, name).Int(3, pos++).Text(4, "INTEGER").Text(5, "key").Null(6).Null(7);
+                if (refers) insC.Text(8, refers);
+                else insC.Null(8);
+                insC.Text(9, desc).Run();
+            };
+            key("form_key", "forms.form_key", "the form (owner plugin_no * 16777216 + object ID)");
+            key("plugin_no", "plugins.plugin_no", "the plugin this occurrence is recorded in");
+            if (!t.fs.empty()) key("idx", nullptr, "position within the record");
+            for (const auto& c : t.columns) {
+                std::string fs = c.path.substr(0, c.path.find_first_of(".["));
+                std::string display = catalog.Display(t.rt, fs);
+                insC.Text(1, t.name).Text(2, c.name).Int(3, pos++);
+                if (c.sqlType.empty()) insC.Null(4);
+                else insC.Text(4, c.sqlType);
+                insC.Text(5, c.kind).Text(6, fs).Text(7, c.path);
+                if (c.kind == "formid") insC.Text(8, "forms.form_key");
+                else insC.Null(8);
+                if (display.empty()) insC.Null(9);
+                else insC.Text(9, display);
+                insC.Run();
+            }
+        }
+        // Subrecords kept for optional modules are not in this build.
+        std::set<std::string> modules;
+        for (const auto& key : catalog.Keys()) {
+            size_t dot = key.find('.');
+            if (const SubrecordDef* d = schema.Find(key.substr(0, dot), key.substr(dot + 1)); d && !d->module.empty())
+                modules.insert(d->module);
+        }
 
         Stmt meta{db.Prepare("INSERT INTO spf_meta VALUES(?,?)", error)};
         auto putMeta = [&](const char* k, const std::string& v) { meta.Text(1, k).Text(2, v).Run(); };
@@ -701,6 +1111,9 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
                                                                   : "every plugin in data_dir");
         putMeta("language", opt.language);
         putMeta("key_scheme", "form_key = owner plugin_no * 16777216 + object id (12-bit when the owner is light)");
+        std::string skipped;
+        for (const auto& m : modules) skipped += (skipped.empty() ? "" : ",") + m;
+        putMeta("modules_not_built", skipped);
         Stmt mod{db.Prepare("INSERT INTO spf_modules VALUES('core', ?, NULL)", error)};
         mod.Text(1, NowIso()).Run();
         if (!db.Exec("COMMIT; ANALYZE;", error)) return 1;
