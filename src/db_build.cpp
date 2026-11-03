@@ -112,6 +112,7 @@ bool ReadHeader(PluginInfo* p) {
     HANDLE h = CreateFileW(p->path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
+    p->exists = true;  // on disk; whether its header reads is the return value
     BY_HANDLE_FILE_INFORMATION fi{};
     GetFileInformationByHandle(h, &fi);
     p->size = (static_cast<int64_t>(fi.nFileSizeHigh) << 32) | fi.nFileSizeLow;
@@ -121,13 +122,15 @@ bool ReadHeader(PluginInfo* p) {
     DWORD got = 0;
     bool ok = ReadFile(h, hdr, 24, &got, nullptr) && got == 24 && memcmp(hdr, "TES4", 4) == 0;
     std::vector<uint8_t> body;
+    // The header's size comes from the file: no larger than the file itself,
+    // and far below 64 MB (big override lists make it a few hundred KB).
+    ok = ok && U32(hdr + 4) <= std::min<int64_t>(p->size - 24, int64_t{64} << 20);
     if (ok) {
         body.resize(U32(hdr + 4));
         ok = body.empty() || (ReadFile(h, body.data(), static_cast<DWORD>(body.size()), &got, nullptr) && got == body.size());
     }
     CloseHandle(h);
     if (!ok) return false;
-    p->exists = true;
     p->flags = U32(hdr + 8);
     p->master = (p->flags & 1) || HasExt(p->name, ".esm") || HasExt(p->name, ".esl");
     p->light = (p->flags & 0x200) || HasExt(p->name, ".esl");
@@ -632,7 +635,8 @@ CREATE TABLE plugins(
   size           INTEGER,
   mtime          INTEGER,
   crc32          INTEGER,
-  form_count     INTEGER
+  form_count     INTEGER,
+  load_error     TEXT
 );
 
 CREATE TABLE plugin_masters(
@@ -726,7 +730,7 @@ CREATE TABLE st_columns(
 )SQL";
 
 const char* kCoreTables[][2] = {
-    {"plugins", "Every plugin in the load order, plus masters it lacks (load_order NULL) and SkyrimSE.exe (load_order -1, the engine's own forms)."},
+    {"plugins", "Every plugin in the load order, plus masters it lacks (load_order NULL) and SkyrimSE.exe (load_order -1, the engine's own forms). load_error: why a plugin could not be read (it then has no rows)."},
     {"plugin_masters", "Each plugin's masters, in order."},
     {"forms", "One row per occurrence of a form: the plugin that owns it and every plugin that overrides it."},
     {"strings", "Every localized string of every plugin."},
@@ -918,10 +922,9 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
     for (const auto& n : order) {
         if (noByName.count(Lower(n))) continue;
         addPlugin(n, true);
-        if (!all.back().exists) {
-            *error = n + ": missing or not a plugin";
-            return 1;
-        }
+        // A plugin whose header does not read stays in the load order and is
+        // reported (plugins.load_error) when its decode fails.
+        if (!all.back().exists) say("warning: %s is listed but not in the Data folder", n.c_str());
     }
     // The game loads masters (ESM flag) before everything else.
     std::stable_partition(all.begin(), all.end(), [](const PluginInfo& p) { return p.master; });
@@ -959,7 +962,10 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
 
     // The database, written beside the target and moved over it at the end.
     std::wstring tmp = opt.out + L".building";
-    DeleteFileW(tmp.c_str());
+    if (!DeleteFileW(tmp.c_str()) && GetLastError() == ERROR_SHARING_VIOLATION) {
+        *error = Utf8(tmp) + " is in use: another build-db is writing this database";
+        return 1;
+    }
     {
         Db db;
         if (!db.Open(tmp, error)) return 1;
@@ -983,12 +989,13 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         std::unordered_map<std::string, int64_t> pathIds;  // "TYPE PATH" -> path_id
         int64_t refs = 0;
 
-        Stmt insPlugin{db.Prepare("INSERT INTO plugins VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)", error)};
+        Stmt insPlugin{db.Prepare("INSERT INTO plugins VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL)", error)};
         Stmt insMaster{db.Prepare("INSERT INTO plugin_masters VALUES(?,?,?)", error)};
         Stmt insForm{db.Prepare("INSERT INTO forms VALUES(?,?,?,?,?,?,?,?,0)", error)};
         Stmt insString{db.Prepare("INSERT OR REPLACE INTO strings VALUES(?,?,?,?)", error)};
         Stmt setFacts{db.Prepare("UPDATE plugins SET crc32=?, form_count=? WHERE plugin_no=?", error)};
-        if (!insPlugin.st || !insMaster.st || !insForm.st || !insString.st || !setFacts.st) return 1;
+        Stmt setError{db.Prepare("UPDATE plugins SET load_error=? WHERE plugin_no=?", error)};
+        if (!insPlugin.st || !insMaster.st || !insForm.st || !insString.st || !setFacts.st || !setError.st) return 1;
         for (const auto& p : all) {
             insPlugin.Int(1, p.no).Text(2, p.name);
             if (p.inLoadOrder) insPlugin.Int(3, p.loadOrder);
@@ -1044,8 +1051,25 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         for (int t = 0; t < threads; ++t) {
             pool.emplace_back([&] {
                 SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-                for (size_t w; (w = nextWork++) < work.size();)
-                    DecodePlugin(all[work[w]], all, noByName, opt.language, catalog, schema, &queue);
+                for (size_t w; (w = nextWork++) < work.size();) {
+                    // A plugin that cannot be read is reported and skipped;
+                    // it never takes the build (or the process) down.
+                    std::string failure;
+                    try {
+                        DecodePlugin(all[work[w]], all, noByName, opt.language, catalog, schema, &queue);
+                    } catch (const std::exception& e) {
+                        failure = e.what();
+                    } catch (...) {
+                        failure = "unexpected error";
+                    }
+                    if (!failure.empty()) {
+                        Batch fail;
+                        fail.pluginNo = all[work[w]].no;
+                        fail.last = true;
+                        fail.error = "failed while decoding: " + failure;
+                        queue.Push(std::move(fail));
+                    }
+                }
                 queue.ProducerDone();
             });
         }
@@ -1053,6 +1077,7 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         static const char* kKinds[3] = {"strings", "dlstrings", "ilstrings"};
         int64_t forms = 0, strings = 0, rows = 0;
         size_t done = 0;
+        std::vector<int> failed;  // plugin_no of plugins that could not be read
         std::string firstError;
         Batch b;
         while (queue.Pop(&b)) {
@@ -1091,14 +1116,31 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             strings += static_cast<int64_t>(b.strings.size());
             if (b.last) {
                 ++done;
-                if (!b.error.empty() && firstError.empty()) firstError = all[b.pluginNo].name + ": " + b.error;
-                setFacts.Int(1, b.crc).Int(2, b.formCount).Int(3, b.pluginNo).Run();
+                if (!b.error.empty()) {
+                    failed.push_back(b.pluginNo);
+                    setError.Text(1, b.error).Int(2, b.pluginNo).Run();
+                    say("warning: %s skipped: %s", all[b.pluginNo].name.c_str(), b.error.c_str());
+                } else {
+                    setFacts.Int(1, b.crc).Int(2, b.formCount).Int(3, b.pluginNo).Run();
+                }
             }
         }
         for (auto& t : pool) t.join();
-        if (!firstError.empty()) {
+        if (!firstError.empty()) {  // the database itself failed
             *error = firstError;
             return 1;
+        }
+        // A plugin that failed part-way may have rows already: remove them, so
+        // the database holds each plugin completely or not at all.
+        for (int no : failed) {
+            std::string del = "DELETE FROM forms WHERE plugin_no=" + std::to_string(no) + ";" +
+                              "DELETE FROM strings WHERE plugin_no=" + std::to_string(no) + ";" +
+                              "DELETE FROM form_refs WHERE plugin_no=" + std::to_string(no) + ";" +
+                              "DELETE FROM subrecord_overflow WHERE plugin_no=" + std::to_string(no) + ";" +
+                              "DELETE FROM subrecord_raw WHERE plugin_no=" + std::to_string(no) + ";";
+            for (const auto& t : schema.tables())
+                del += "DELETE FROM " + Quote(t.name) + " WHERE plugin_no=" + std::to_string(no) + ";";
+            if (!db.Exec(del, error)) return 1;
         }
         say("wrote %lld forms, %lld field rows, %lld references, %lld strings from %zu plugins",
             static_cast<long long>(forms), static_cast<long long>(rows), static_cast<long long>(refs),
@@ -1184,6 +1226,7 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         std::string skipped;
         for (const auto& m : modules) skipped += (skipped.empty() ? "" : ",") + m;
         putMeta("modules_not_built", skipped);
+        putMeta("plugins_failed", std::to_string(failed.size()));
         Stmt mod{db.Prepare("INSERT INTO spf_modules VALUES('core', ?, NULL)", error)};
         mod.Text(1, NowIso()).Run();
         if (!db.Exec("COMMIT; ANALYZE;", error)) return 1;

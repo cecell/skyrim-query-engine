@@ -88,10 +88,49 @@ object ID`, computed from the bytes. It is the same whichever plugin a
 reference is read from, so joins are plain integer joins. `spf build-db
 --help` has the details.
 
+## Damaged and hostile files
+
+Every size and count spf reads from a file is checked before it is used:
+group and record sizes against their parent group and the file, a
+compressed record's claimed size against what deflate can produce (and 256
+MB), list counts against the bytes left, strings files and plugin headers
+against sane limits. BSAs are read with
+[bsa-reader](https://github.com/cecell/bsa-reader), which validates every
+table.
+
+- A plugin that cannot be read is refused with a reason ("damaged plugin: a
+  group at offset 1234 has an impossible size"). `build-db` reports it,
+  records the reason in `plugins.load_error`, leaves its rows out entirely,
+  and builds the rest.
+- A subrecord whose bytes do not fit its pattern is kept as raw hex
+  (`subrecord_raw` in the database, `"#0A1B..."` in exports); the rest of the
+  record still decodes.
+
 ## Building
 
 Visual Studio 2026 with the MSVC 14.44 toolset, CMake and Ninja: run
-`build.cmd`. Output: `build\spf.exe` with `patterns.json` next to it.
+`build.cmd`. Output: `build\spf.exe` with `patterns.json` next to it. The
+first configure downloads bsa-reader from GitHub (pinned to a commit in
+`CMakeLists.txt`).
+
+## Testing
+
+- `ctest --test-dir build` (or `build\spf_tests.exe`): unit tests with
+  hand-built valid and damaged plugins, strings files and zlib streams. CI
+  runs them on every push.
+- `tools/verify_tables.py <db> build/spf.exe <data dir> <plugin> <TYPE>...`:
+  checks a database cell for cell against `spf export`.
+- Fuzzing, with MSVC's libFuzzer and AddressSanitizer:
+
+  ```
+  cmake -S . -B build-fuzz -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPF_FUZZ=ON
+  cmake --build build-fuzz --target spf_fuzz
+  build-fuzz\spf_fuzz.exe <corpus dir> -max_total_time=600 -max_len=262144
+  ```
+
+  Every input is tried as a plugin (every field of every record decoded), a
+  strings file and a zlib stream. Seed the corpus with small plugins; run it
+  from a vcvars prompt so the ASan runtime DLL is found.
 
 ## Layout
 
@@ -104,6 +143,7 @@ Visual Studio 2026 with the MSVC 14.44 toolset, CMake and Ninja: run
 - `tools/export_catalog_meta.py`: adds `_multi` (repeating subrecords) and
   `_display` (xEdit names) to the catalog
 - `tools/verify_tables.py`: checks a built database against `spf export`
+- `tests/test_spf.cpp`: unit tests; `tests/fuzz_plugin.cpp`: the libFuzzer target
 - `third_party/sqlite`: the SQLite amalgamation (3.54.1, public domain)
 - `tools/spf.cpp`: the command-line tool
 - `data/patterns.json`: the pattern catalog, with the strings file each localized field uses

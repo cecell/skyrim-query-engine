@@ -4,6 +4,17 @@ project(SkyrimPluginFormat VERSION 0.1 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# bsa-reader (GPL-3.0, github.com/cecell/bsa-reader): strings packed in BSAs,
+# compressed ones too. Pinned to the commit of tag v0.1.0; library changes go
+# to that repo, then bump this pin. Fetched before the project-wide flags so
+# it builds with its own.
+include(FetchContent)
+FetchContent_Declare(bsa_reader
+    GIT_REPOSITORY https://github.com/cecell/bsa-reader.git
+    GIT_TAG 6af53fbd3667a94d06c4b14e52fb7a44e63a2c22)  # v0.1.0
+FetchContent_MakeAvailable(bsa_reader)
+
 add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 add_compile_options(/utf-8 "$<$<COMPILE_LANGUAGE:CXX>:/W4;/permissive-;/EHsc>")
 
@@ -26,7 +37,7 @@ add_library(spf STATIC
     src/db_schema.cpp
     src/db_build.cpp)
 target_include_directories(spf PUBLIC src)
-target_link_libraries(spf PUBLIC sqlite3)
+target_link_libraries(spf PUBLIC sqlite3 PRIVATE bsa::reader)
 
 add_executable(spf_cli tools/spf.cpp)
 set_target_properties(spf_cli PROPERTIES OUTPUT_NAME spf)
@@ -35,3 +46,28 @@ target_link_libraries(spf_cli PRIVATE spf)
 add_custom_command(TARGET spf_cli POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json
             $<TARGET_FILE_DIR:spf_cli>/patterns.json)
+
+# Unit tests: hand-built valid and damaged plugins / strings files.
+enable_testing()
+add_executable(spf_tests tests/test_spf.cpp)
+target_link_libraries(spf_tests PRIVATE spf)
+add_test(NAME unit COMMAND spf_tests ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json)
+
+# Fuzzing (separate build dir): cmake -B build-fuzz -DSPF_FUZZ=ON ...
+# The library gets coverage + AddressSanitizer instrumentation; spf_fuzz links
+# libFuzzer's main. Needs MSVC's clang_rt.asan_dynamic DLL on PATH (vcvars).
+option(SPF_FUZZ "Build the libFuzzer target spf_fuzz" OFF)
+if(SPF_FUZZ)
+    # Everything linked together must agree on ASan (container annotations).
+    foreach(t spf spf_tests spf_cli bsa_reader)
+        target_compile_options(${t} PRIVATE /Zi /fsanitize=address /fsanitize-coverage=inline-8bit-counters
+            /fsanitize-coverage=edge /fsanitize-coverage=trace-cmp)
+    endforeach()
+    add_executable(spf_fuzz tests/fuzz_plugin.cpp)
+    target_compile_options(spf_fuzz PRIVATE /Zi /fsanitize=address /fsanitize=fuzzer)
+    target_link_libraries(spf_fuzz PRIVATE spf)
+    target_link_options(spf_fuzz PRIVATE /INCREMENTAL:NO /DEBUG)
+    add_custom_command(TARGET spf_fuzz POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json
+                $<TARGET_FILE_DIR:spf_fuzz>/patterns.json)
+endif()

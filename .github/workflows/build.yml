@@ -1,0 +1,41 @@
+# Builds spf.exe and runs the unit tests (valid and damaged plugins, strings
+# files, zlib streams) on a clean runner, with the same MSVC toolset as local
+# builds. The decoder's reference checks need the Bethesda corpus and run
+# locally (tools/verify_tables.py).
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    env:
+      MSVC_TOOLSET: "14.44"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build and test
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSPATH=%%i
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=%MSVC_TOOLSET% || exit /b 1
+          cl 2>&1 | findstr /C:"Version"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
+          cmake --build build || exit /b 1
+          ctest --test-dir build --output-on-failure || exit /b 1
+          build\spf.exe --help > nul || exit /b 1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spf
+          path: |
+            build/spf.exe
+            build/patterns.json

@@ -40,6 +40,9 @@ public:
     // `catalog` must outlive the plugin.
     static std::unique_ptr<Plugin> Open(const std::wstring& path, const PatternCatalog& catalog, std::string* error,
                                         const std::string& language = "english");
+    // A plugin already in memory (copied; no strings tables are loaded).
+    static std::unique_ptr<Plugin> FromMemory(const uint8_t* bytes, size_t size, const std::string& name,
+                                              const PatternCatalog& catalog, std::string* error);
     ~Plugin();
 
     const std::string& name() const { return name_; }  // file name as given
@@ -75,6 +78,7 @@ public:
 
 private:
     Plugin() = default;
+    bool Parse(std::string* error);
     void Resolve(const std::string& rt, const std::string& fs, const FormIdMap* formIds, Value* v,
                  std::string* path) const;
 
@@ -91,6 +95,8 @@ private:
     void* mapping_ = nullptr;
     const uint8_t* data_ = nullptr;
     size_t size_ = 0;
+    bool mapped_ = false;          // data_ is a view of file_
+    std::vector<uint8_t> owned_;   // FromMemory: the bytes
 };
 
 // Walks a decoded value by a dotted path: "damage", "scripts.name",

@@ -517,6 +517,12 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
             else if (p.n) count = ResolveCount(*p.n, scope, cur, "repeat");
             std::vector<Value> items;
             if (count) {
+                // The count comes from the data. Far more items than bytes
+                // left means damaged data (an element that reads nothing would
+                // otherwise repeat billions of times).
+                if (*count > static_cast<int64_t>(cur.Remaining()) + 1024) {
+                    throw PatternError(false, "repeat: count " + std::to_string(*count) + " exceeds the data");
+                }
                 for (int64_t k = 0; k < *count; ++k) {
                     scope.Push();
                     std::optional<Value> v;
