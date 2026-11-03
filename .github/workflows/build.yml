@@ -39,3 +39,31 @@ jobs:
           path: |
             build/spf.exe
             build/patterns.json
+
+  # libFuzzer + AddressSanitizer for 5 minutes on GitHub's runner (local
+  # antivirus holds instrumented executables). Seeds are the unit tests'
+  # hand-built inputs; a crash or out-of-bounds access fails the job and
+  # uploads the input that caused it.
+  fuzz:
+    runs-on: windows-2025
+    env:
+      MSVC_TOOLSET: "14.44"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build and fuzz
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSPATH=%%i
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=%MSVC_TOOLSET% || exit /b 1
+          cmake -S . -B build-fuzz -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPF_FUZZ=ON || exit /b 1
+          cmake --build build-fuzz --target spf_fuzz spf_tests || exit /b 1
+          build-fuzz\spf_tests.exe --seeds build-fuzz\corpus || exit /b 1
+          mkdir build-fuzz\crashes
+          build-fuzz\spf_fuzz.exe build-fuzz\corpus -max_total_time=300 -timeout=10 -rss_limit_mb=2048 -max_len=262144 -artifact_prefix=build-fuzz\crashes\ -print_final_stats=1
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: build-fuzz/crashes/
