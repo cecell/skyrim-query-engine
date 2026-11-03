@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -284,7 +285,40 @@ void TestStrings() {
 
 }  // namespace
 
+// Writes valid hand-built inputs as fuzzing seeds (CI cannot ship real
+// plugins): plain, compressed and nested-group plugins, a strings file and a
+// zlib stream.
+int WriteSeeds(const std::wstring& dir) {
+    CreateDirectoryW(dir.c_str(), nullptr);
+    Bytes plain = Header({"Skyrim.esm"});
+    plain.add(Group("WEAP", 0, Weapon(0x01000800, "TestSword", 7).add(Weapon(0x00012EB7, "IronSword", 9))));
+    Bytes inner = Sub("EDID", Zstring("Packed")).add(Sub("DATA", Bytes().u32(25).f32(9.0f).u16(7)));
+    Bytes packed;
+    packed.u32(static_cast<uint32_t>(inner.size())).add(StoredZlib(inner));
+    Bytes compressed = Header({}).add(Group("WEAP", 0, Rec("WEAP", 0x800, packed, 0x00040000)));
+    Bytes refr = Rec("REFR", 0x801, Sub("NAME", Bytes().u32(0x800)).add(Sub("DATA", Bytes().f32(1).f32(2).f32(3).f32(0).f32(0).f32(0))));
+    Bytes cell = Rec("CELL", 0x802, Sub("EDID", Zstring("TestCell")));
+    Bytes cellKids = Group("\x02\x08\x00\x00", 6, Group("\x02\x08\x00\x00", 9, refr));
+    Bytes nested = Header({}).add(Group("CELL", 0, Group("\x00\x00\x00\x00", 2, Group("\x00\x00\x00\x00", 3, cell.add(cellKids)))));
+    Bytes armo = Header({}).add(Group("ARMO", 0, Rec("ARMO", 0x800, Sub("MO2S", Bytes().u32(1).u32(4).raw("Name", 4).u32(0x800).u32(0)))));
+    Bytes strings;
+    strings.u32(2).u32(12).u32(1).u32(0).u32(2).u32(6).raw("Hello", 6).raw("World", 6);
+    Bytes zlib = Bytes().u32(17).add(StoredZlib(Bytes().raw("hello hello hello", 17)));
+    const std::pair<const wchar_t*, const Bytes*> seeds[] = {
+        {L"plain.esp", &plain}, {L"compressed.esp", &compressed}, {L"nested.esp", &nested},
+        {L"armo.esp", &armo},   {L"strings.bin", &strings},       {L"zlib.bin", &zlib},
+    };
+    for (const auto& s : seeds) {
+        std::ofstream out(dir + L"\\" + s.first, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(s.second->b.data()), static_cast<std::streamsize>(s.second->size()));
+        if (!out) return 1;
+    }
+    printf("%zu seeds written\n", std::size(seeds));
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
+    if (argc > 2 && std::wstring(argv[1]) == L"--seeds") return WriteSeeds(argv[2]);
     std::wstring patterns;
     if (argc > 1) {
         patterns = argv[1];
