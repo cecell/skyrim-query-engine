@@ -514,8 +514,10 @@ WHAT IS IN IT (schema version 1)
              loaded_by (ini | plugin | NULL), plugin, load_rank.
   dds tga nif audio pex hkx tri tri_morphs
              header facts by type, keyed by files.file_id, for loose and
-             packed files alike. nif.game: le | se | both | unknown, from the
-             block types, never the BS version.
+             packed files alike. nif.game: se (BSTriShape family), le (strips,
+             in shapes or skin partitions: SE cannot use them), both
+             (NiTriShape without strips, or no geometry), unknown; Cathedral
+             Assets Optimizer's rule, never the BS version.
   voice      Sound\Voice\<plugin>\<voicetype>\<x>_<formid>_<n>.<ext>: plugin,
              voice_type, object_id (the INFO), response.
   facegen    FaceGenData\FaceGeom|FaceTint\<plugin>\<formid>: kind, plugin,

@@ -277,12 +277,12 @@ Cell OptInt(bool has, int64_t v) { return has ? Cell::Int(v) : Cell(); }
 Cell OptText(const std::string& s) { return s.empty() ? Cell() : Cell::Text(s); }
 
 // How many bytes of a file its reader needs (0 = no reader for that type).
-size_t BytesNeeded(const std::string& ext, bool textures) {
+size_t BytesNeeded(const std::string& ext) {
     if (ext == "dds") return asset::kDdsProbeBytes;
     if (ext == "tga") return asset::kTgaProbeBytes;
     if (ext == "hkx") return assets::kHkxProbeBytes;
     if (ext == "wav" || ext == "xwm" || ext == "fuz") return kAudioProbe;
-    if (ext == "nif") return textures ? assets::kNifMaxBytes : asset::kNifProbeBytes;
+    if (ext == "nif") return asset::kNifMaxBytes;  // the game label needs the skin partitions too
     if (ext == "pex") return assets::kPexMaxBytes;
     if (ext == "tri") return assets::kTriMaxBytes;
     return 0;
@@ -339,28 +339,33 @@ std::string ReadFacts(int64_t id, const std::string& ext, const uint8_t* d, size
         int64_t shapes = 0;
         for (uint16_t t : i.blockTypeIndex)
             if (t < i.blockTypes.size() && kShapes.count(i.blockTypes[t])) ++shapes;
-        const char* game = i.engine == asset::NifEngine::SkyrimSe       ? "se"
-                         : i.engine == asset::NifEngine::SkyrimLe       ? "le"
-                         : i.engine == asset::NifEngine::SkyrimEither   ? "both"
-                                                                        : "unknown";
-        // vertex_count / triangle_count: not in beth-asset-metadata v0.1.0.
+        // The game, by Cathedral Assets Optimizer's rule (beth-asset-metadata):
+        // se with BSTriShape-family geometry, le only with strips (shapes or
+        // skin partitions, which SE cannot use), both otherwise.
+        asset::NifBody body;
+        const asset::Status ts = whole ? asset::read_nif_body(d, n, body) : asset::Status::Truncated;
+        const asset::NifEngine engine = asset::nif_engine(i, body);
+        const char* game = engine == asset::NifEngine::SkyrimSe       ? "se"
+                         : engine == asset::NifEngine::SkyrimLe       ? "le"
+                         : engine == asset::NifEngine::SkyrimEither   ? "both"
+                                                                      : "unknown";
+        // vertex_count / triangle_count: not in beth-asset-metadata yet.
         rows->push_back({kNif,
                          {Cell::Int(id), Cell::Text(asset::nif_version_string(i.version)), Cell::Int(i.userVersion),
                           OptInt(i.hasBsHeader, i.bsVersion), Cell::Int(i.blockCount), Cell::Int(shapes), Cell(),
                           Cell(), Cell::Text(game)}});
-        if (textures && whole) {
-            std::vector<assets::NifTexture> tex;
-            std::string terr;
-            assets::ReadNifTextures(d, n, &tex, &terr);
+        if (ts != asset::Status::Ok && i.engine != asset::NifEngine::Unknown) return st(ts, "nif body");
+        if (textures) {
             int64_t idx = 0;
-            for (const auto& t : tex) {
-                std::string norm = assets::NormalizeTexturePath(t.path);
+            for (const auto& t : body.textures) {
+                // Stored as Windows-1252 or UTF-8.
+                std::string norm = assets::NormalizeTexturePath(
+                    Utf8Lossy(reinterpret_cast<const uint8_t*>(t.path.data()), t.path.size()));
                 if (norm.empty()) continue;
                 rows->push_back({kNifTextures,
                                  {Cell::Int(id), Cell::Int(idx++), Cell::Text(t.block), Cell::Int(t.slot),
                                   Cell::Text(norm), Cell()}});
             }
-            if (!terr.empty() && i.engine != asset::NifEngine::Unknown) return terr;
         }
     } else if (ext == "wav" || ext == "xwm" || ext == "fuz") {
         asset::AudioInfo i;
@@ -489,7 +494,7 @@ void ProcessLoose(const Shared& sh, size_t index, AssetBatch* batch) {
     row.inData = f.inData;
     std::vector<TableRow> rows;
     const std::string ext = assets::SplitPath(f.path).ext;
-    size_t want = BytesNeeded(ext, sh.textures);
+    size_t want = BytesNeeded(ext);
     std::vector<uint8_t> bytes;
     std::unique_ptr<Sha256> hash(sh.hash ? new Sha256 : nullptr);
     const std::wstring full = r.path + Widen(f.path);
@@ -500,7 +505,7 @@ void ProcessLoose(const Shared& sh, size_t index, AssetBatch* batch) {
             bool whole = static_cast<int64_t>(bytes.size()) >= f.size;
             row.error = ReadFacts(f.dbId, ext, bytes.data(), bytes.size(), whole, sh.textures, &rows, &more);
             if (more) {  // audio / NIF header longer than the probe: read more
-                size_t cap = ext == "nif" ? assets::kNifMaxBytes : kAudioMax;
+                size_t cap = ext == "nif" ? asset::kNifMaxBytes : kAudioMax;
                 std::string err;
                 if (ReadLoose(full, cap, f.size, nullptr, &bytes, &err)) {
                     whole = static_cast<int64_t>(bytes.size()) >= f.size;
@@ -597,7 +602,7 @@ void ProcessArchive(const Shared& sh, size_t index, AssetBatch* batch, AssetQueu
         bool haveRaw = reader.raw(e, raw, rawSize) == bsa::Status::Ok;
         if (e.compressed && haveRaw) p.packed = static_cast<int64_t>(rawSize);
         const std::string ext = assets::SplitPath(p.path).ext;
-        const size_t want = BytesNeeded(ext, sh.textures);
+        const size_t want = BytesNeeded(ext);
         std::vector<TableRow> rows;
         if (want || sh.hash) {
             const uint8_t* d = nullptr;
@@ -868,7 +873,7 @@ const char* kColumnDocs[][5] = {
     {"nif", "shape_count", "geometry blocks (BSTriShape family, NiTriShape, NiTriStrips)", nullptr, nullptr},
     {"nif", "vertex_count", "not filled yet", nullptr, "needs beth-asset-metadata support"},
     {"nif", "triangle_count", "not filled yet", nullptr, "needs beth-asset-metadata support"},
-    {"nif", "game", "le | se | both | unknown, from the block types (BSTriShape family = se, NiTriShape/NiTriStrips = le, neither = both)", nullptr, nullptr},
+    {"nif", "game", "le | se | both | unknown, by Cathedral Assets Optimizer's rule: se = BSTriShape family; le = strips (NiTriStrips or skin-partition strips), which SE cannot use; both = NiTriShape without strips, or no geometry", nullptr, nullptr},
     {"nif_textures", "file_id", "the mesh", "files.file_id", nullptr},
     {"nif_textures", "idx", "position within the mesh", nullptr, nullptr},
     {"nif_textures", "block", "BSShaderTextureSet | BSEffectShaderProperty", nullptr, nullptr},
@@ -1351,7 +1356,7 @@ int BuildAssets(const AssetOptions& opt, std::string* error) {
         for (size_t i = 0; i < files.size(); ++i) {
             const std::string ext = assets::SplitPath(files[i].path).ext;
             if (ext == "bsa") isArchive[i] = 1;
-            if (isArchive[i] || opt.hash || BytesNeeded(ext, false)) {
+            if (isArchive[i] || opt.hash || BytesNeeded(ext)) {
                 work.push_back(i);
             } else {
                 FileRow row;

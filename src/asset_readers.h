@@ -89,17 +89,5 @@ constexpr size_t kTriMaxBytes = size_t{64} << 20;
 // the body does not fit the counts.
 bool ReadTri(const uint8_t* d, size_t n, TriInfo* out, std::string* error);
 
-// ---- NIF texture paths ----
-
-struct NifTexture {
-    std::string block;  // BSShaderTextureSet | BSEffectShaderProperty
-    int slot = 0;       // position in the texture set (effect shader: 0 source, 1 greyscale)
-    std::string path;   // as stored
-};
-constexpr size_t kNifMaxBytes = size_t{64} << 20;
-// Skyrim NIFs (20.2.0.7, little-endian) only; the whole file. Walks the
-// header to the block sizes and reads the texture-set blocks.
-bool ReadNifTextures(const uint8_t* d, size_t n, std::vector<NifTexture>* out, std::string* error);
-
 }  // namespace assets
 }  // namespace spf
