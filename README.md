@@ -76,6 +76,12 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
   `fts_names_tri` (substrings): search every form occurrence by editor ID or
   name. An extra, on by default: `--skip fts_names` leaves it out,
   `spf db add fts_names` adds it later.
+- Plugin facts (extras, each on by default, `--skip` any): `plugin_facts`
+  holds per plugin the master form count and ESLable verdict, deleted
+  placed objects and navmeshes, missing masters (view `missing_masters`) and
+  invalid references. `invalid_refs` lists every reference to a form no
+  plugin defines; the plugin count keeps only those held by a form another
+  form references, since most others sit in leftovers nothing uses.
 - Raw byte runs are stored as BLOBs (`kind` = `bytes`); `SELECT hex(col)`
   gives the hex text `spf export` shows. Inside JSON values they stay hex text.
 - `subrecord_overflow` / `subrecord_raw`: whatever did not fit, so nothing
