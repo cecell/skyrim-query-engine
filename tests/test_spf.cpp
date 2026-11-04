@@ -329,6 +329,10 @@ void TestAssetPaths() {
     CHECK(NormalizeTexturePath("Data\\Textures\\A.dds") == "textures\\a.dds");
     CHECK(NormalizeTexturePath("C:\\Skyrim\\Data\\textures\\b.dds") == "textures\\b.dds");
     CHECK(NormalizeTexturePath("  ") == "");
+    CHECK(NormalizeAssetPath("Clutter\\Key01.NIF", "meshes\\") == "meshes\\clutter\\key01.nif");
+    CHECK(NormalizeAssetPath("Meshes/Clutter/Key01.nif", "meshes\\") == "meshes\\clutter\\key01.nif");
+    CHECK(NormalizeAssetPath("Sound\\FX\\a.wav", "sound\\") == "sound\\fx\\a.wav");
+    CHECK(NormalizeAssetPath("C:\\Games\\Data\\Music\\x.wav", "music\\") == "music\\x.wav");
     PathParts p = SplitPath("textures\\armor\\x.dds");
     CHECK(p.dir == "textures\\armor" && p.name == "x.dds" && p.ext == "dds");
     CHECK(SplitPath("readme").ext == "" && SplitPath("readme").dir == "");

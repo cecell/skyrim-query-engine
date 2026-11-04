@@ -25,6 +25,9 @@ std::string NormalizePath(const std::string& utf8);
 // The texture a mesh names, as the game looks it up: normalized, without a
 // leading "data\", under "textures\" (prefixed when missing). "" when empty.
 std::string NormalizeTexturePath(const std::string& raw);
+// A path a plugin field names, relative to `root` ("meshes\\", "textures\\",
+// "sound\\", ...): normalized, with the root added unless already there.
+std::string NormalizeAssetPath(const std::string& raw, const std::string& root);
 
 struct PathParts {
     std::string dir, name, ext;  // ext without the dot, '' when none

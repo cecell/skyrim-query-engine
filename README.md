@@ -88,6 +88,12 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
   indexes are 29% of the file (about 320 MB of 1.16 GB) and about 10 s of
   build time; without them a lookup scans its table (about 100 ms instead of
   under 1 ms at 2.3M forms).
+- `asset_refs`: every file a form names (models, textures, sounds, music,
+  VMAD scripts as `scripts\<name>.pex`), normalized exactly like
+  `assets.db` paths, so `ATTACH 'assets.db'` and join on `path` to find a
+  form's files or a file's users. On a 192-plugin load order: 150,946
+  references from 141 fields; 95-99.9% resolve to existing files (sound
+  fields name `.wav`, the game also plays `.xwm` / `.fuz`).
 - ITM records (`itm_forms`, `plugin_facts.itm`): an extra that is off by
   default (`--with itm`), since it reads every plugin and its masters.
   Compared the way xEdit's Quick Auto Clean does, without its known false
