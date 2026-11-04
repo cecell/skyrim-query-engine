@@ -112,6 +112,54 @@ object ID`, computed from the bytes. It is the same whichever plugin a
 reference is read from, so joins are plain integer joins. `spf build-db
 --help` has the details.
 
+## `spf build-assets`: every asset file as one SQLite database
+
+```
+spf build-assets --out assets.db --data "<Skyrim>\Data"
+                 [--staging <root> | --mo2 <instance> --profile <name>]
+                 [--load-order plugins.txt] [--hash] [--skip e,..] [--threads n] [--quiet]
+```
+
+Catalogues every file under the Data folder and every mod staging folder,
+and every file packed in their BSAs, in its own database (ATTACH it to a
+build-db database; join on `paths.path` and plugin names). Folders are walked
+from directory listings with their NTFS file IDs (no file is opened for
+that), headers are read by a thread pool, largest work first, and one thread
+writes. Data and staging folders are only read.
+
+- `roots`: the Data folder, each staging subfolder (Vortex recognised), MO2
+  mod folders (enabled, priority from modlist.txt) and overwrite, with a
+  file count / total size / newest mtime fingerprint.
+- `paths`: every normalized relative path once (lower case, backslashes,
+  relative to Data), with dir, name, ext and kind.
+- `files`: every copy of every file, loose or packed (`archive_id`), with
+  size, packed size, mtime, `in_data`, `is_winner`, optional SHA-256 and
+  `error` (why the file or its header could not be read).
+- `archives`: per BSA, its header facts and whether, why (`ini` / `plugin`)
+  and in which order (`load_rank`) the game loads it.
+- Header facts, loose and packed alike: `dds`, `tga`, `nif`, `audio` (from
+  [beth-asset-metadata](https://github.com/cecell/beth-asset-metadata)),
+  `pex` (script and parent), `hkx` (Havok version, pointer size = LE / SE),
+  `tri` / `tri_morphs` (FaceGen and BodySlide morph names); `voice` and
+  `facegen` from their path conventions (plugin + object id).
+  `nif.game` comes from the block types, never the BS version.
+- Extras, on by default (`--skip` leaves them out): `nif_textures` (every
+  texture path a mesh expects, `path_id` NULL when no such file exists) and
+  the indexes `files_path`, `files_root`, `files_archive`, `paths_kind`.
+- Views `winning_files` and `conflicts`; `st_tables` / `st_columns`.
+
+Winners: a staging file that is the same physical file as the Data file at
+its path (a hardlink) is stored once, with its staging root, `in_data = 1`;
+Data-only files keep the Data root. A loose `in_data` copy wins; otherwise
+the copy in the loaded archive with the highest `load_rank` (archives in
+the Skyrim.ini / SkyrimCustom.ini archive lists first, then
+`<Plugin>.bsa` / `<Plugin> - Textures.bsa` of active plugins in load order).
+With MO2 and nothing deployed, the virtual Data (enabled mods by priority,
+overwrite highest, real Data lowest) decides `in_data`.
+
+The real Data folder (870,401 loose files, 892 BSAs, 1.53 million rows)
+builds in about 100 seconds (1.3 GB).
+
 ## Damaged and hostile files
 
 Every size and count spf reads from a file is checked before it is used:
@@ -134,14 +182,16 @@ table.
 
 Visual Studio 2026 with the MSVC 14.44 toolset, CMake and Ninja: run
 `build.cmd`. Output: `build\spf.exe` with `patterns.json` next to it. The
-first configure downloads bsa-reader from GitHub (pinned to a commit in
-`CMakeLists.txt`).
+first configure downloads bsa-reader and beth-asset-metadata from GitHub
+(pinned to commits in `CMakeLists.txt`).
 
 ## Testing
 
 - `ctest --test-dir build` (or `build\spf_tests.exe`): unit tests with
-  hand-built valid and damaged plugins, strings files and zlib streams. CI
-  runs them on every push.
+  hand-built valid and damaged plugins, strings files and zlib streams, the
+  asset readers on synthetic bytes, and build-assets' winners on a fixture
+  tree (hardlinks, BSAs, an MO2 instance) written to `%TEMP%\spf_tests_assets`.
+  CI runs them on every push.
 - `tools/verify_tables.py <db> build/spf.exe <data dir> <plugin> <TYPE>...`:
   checks a database cell for cell against `spf export`.
 - Fuzzing, with MSVC's libFuzzer and AddressSanitizer:
@@ -166,6 +216,9 @@ first configure downloads bsa-reader from GitHub (pinned to a commit in
 - `src/strings.*`: localized strings, from loose files or BSAs
 - `src/db_build.*`: `spf build-db`
 - `src/db_schema.*`: build-db's per-record-type tables, generated from the catalog
+- `src/db_util.h`: SQLite / queue helpers shared by the builders
+- `src/asset_build.*`: `spf build-assets`
+- `src/asset_readers.*`: PEX, HKX, TRI and NIF-texture readers; asset path rules
 - `tools/export_catalog_meta.py`: adds `_multi` (repeating subrecords) and
   `_display` (xEdit names) to the catalog
 - `tools/verify_tables.py`: checks a built database against `spf export`

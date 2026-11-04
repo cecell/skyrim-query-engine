@@ -298,6 +298,7 @@ std::string ReadFacts(int64_t id, const std::string& ext, const uint8_t* d, size
     // (a DDS named .tga, an MP3 named .wav).
     auto st = [&](asset::Status s, const char* what) {
         std::string e = std::string(what) + ": " + asset::to_string(s);
+        if (n == 0) return e + " (empty file)";
         if (s != asset::Status::NotRecognized && s != asset::Status::Corrupt) return e;
         static const char* kKinds[] = {nullptr, "DDS", "NIF", "FUZ", "WAV", "XWM"};
         const char* kind = kKinds[static_cast<int>(asset::detect(d, n))];
@@ -305,7 +306,6 @@ std::string ReadFacts(int64_t id, const std::string& ext, const uint8_t* d, size
         else if (n >= 4 && memcmp(d, "OggS", 4) == 0) kind = "OGG";
         else if (n >= 4 && memcmp(d + 1, "PNG", 3) == 0) kind = "PNG";
         if (kind) e += std::string(" (content is ") + kind + ")";
-        else if (n == 0) e += " (empty file)";
         return e;
     };
     if (ext == "dds") {
