@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "db_schema.h"
 #include "inflate.h"
 #include "plugin.h"
 #include "strings.h"
@@ -334,6 +335,20 @@ int WriteSeeds(const std::wstring& dir) {
     return 0;
 }
 
+void TestSchema(const PatternCatalog& cat) {
+    // Raw byte runs become BLOB columns, and nothing else does.
+    Schema schema;
+    schema.Build(cat, [](const std::string&) { return true; });
+    int bytes = 0, mismatched = 0;
+    for (const auto& t : schema.tables())
+        for (const auto& c : t.columns) {
+            if (c.kind == "bytes") ++bytes;
+            if ((c.kind == "bytes") != (c.sqlType == "BLOB")) ++mismatched;
+        }
+    CHECK(bytes > 0);
+    CHECK(mismatched == 0);
+}
+
 int wmain(int argc, wchar_t** argv) {
     if (argc > 2 && std::wstring(argv[1]) == L"--seeds") return WriteSeeds(argv[2]);
     std::wstring patterns;
@@ -359,6 +374,7 @@ int wmain(int argc, wchar_t** argv) {
     TestDamagedFields(cat);
     TestInflate();
     TestStrings();
+    TestSchema(cat);
     printf("%d passed, %d failed\n", g_passed, g_failed);
     return g_failed ? 1 : 0;
 }

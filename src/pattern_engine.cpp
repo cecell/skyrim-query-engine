@@ -833,7 +833,7 @@ std::optional<Shape> Walk(const Pattern& p) {
             return s ? *s : Leaf(K::Unknown);
         }
         case PType::Skip: return std::nullopt;
-        case PType::Bytes: return Leaf(K::Text);
+        case PType::Bytes: return Leaf(K::Bytes);
         case PType::Bitfield: return Leaf(K::Flags);
     }
     return Leaf(K::Unknown);

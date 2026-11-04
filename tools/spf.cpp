@@ -315,7 +315,7 @@ OPTIONS
   --threads <n>            decode threads (default: logical cores - 1).
   --quiet                  no progress output.
 
-WHAT IS IN IT (schema version 5)
+WHAT IS IN IT (schema version 6)
   plugins         one row per plugin: plugin_no (its number in this DB),
                   load_order, mod_index (light slot for light plugins),
                   is_light, is_master, header facts, size, mtime, crc32.
@@ -344,6 +344,8 @@ WHAT IS IN IT (schema version 5)
   *_ctda) and lists of FormIDs inside one (weap_kwda keywords).
   FormID columns hold form_key integers. Other lists, and anything nested
   below them, are JSON text. Bitfield flags are a JSON list of names.
+  Raw byte runs are BLOBs: SELECT hex(col) gives the hex text spf export
+  shows (inside JSON they stay hex text).
   MODULES (optional; their tables exist in every build, empty until built):
     navmesh          NAVM geometry (vertices, triangles, edge and door
                      links) and NAVI
@@ -363,10 +365,12 @@ WHAT IS IN IT (schema version 5)
                   plugin defines. "Sits in this cell" is forms.parent_key,
                   not a reference.
   subrecord_overflow  extra occurrences of subrecords expected once.
-  subrecord_raw       subrecords with no pattern or bytes that did not fit.
+  subrecord_raw       subrecords with no pattern or bytes that did not fit
+                      (bytes: a BLOB).
   st_tables, st_columns  the data dictionary: every table and column, with
                   its subrecord, its spf export path, what a key column
-                  refers to, and xEdit's name for the subrecord.
+                  refers to, xEdit's name for the subrecord, and notes
+                  (how to read a BLOB column).
 
 KEYS
   form_key = owner plugin_no * 16777216 + object ID. It is the same in every

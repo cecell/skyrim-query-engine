@@ -106,6 +106,7 @@ struct Columns {
             case K::LString: Add(name, "TEXT", "lstring", path, steps); break;
             case K::Marker: Add(name, "INTEGER", "marker", path, steps); break;
             case K::Flags: Add(name, "TEXT", "flags", path, steps); break;
+            case K::Bytes: Add(name, "BLOB", "bytes", path, steps); break;
             case K::List: Add(name, "TEXT", "json", path, steps); break;
             case K::Unknown: Add(name, "", "any", path, steps); break;
         }
