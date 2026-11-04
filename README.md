@@ -94,6 +94,13 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
   form's files or a file's users. On a 192-plugin load order: 150,946
   references from 141 fields; 95-99.9% resolve to existing files (sound
   fields name `.wav`, the game also plays `.xwm` / `.fuz`).
+- `plugin_facts_v`: the shell extension's columns per plugin by name (master
+  forms, ESLable, deleted, ITM, dirty, missing masters, invalid references).
+- `spf db drop <extra>` removes a built extra (drops an index, empties a fact
+  table); `spf db add` builds it again. Predesigned indexes ship off by
+  default for queries that need them: `idx_ref_base` (references by their
+  base object: 221 ms -> 5 ms on a 192-plugin load order) and
+  `idx_persistent_type` (persistent forms by type).
 - ITM records (`itm_forms`, `plugin_facts.itm`): an extra that is off by
   default (`--with itm`), since it reads every plugin and its masters.
   Compared the way xEdit's Quick Auto Clean does, without its known false

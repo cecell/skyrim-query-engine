@@ -1047,10 +1047,6 @@ bool BuildAssetRefs(ExtraContext& c, std::string* error) {
     return true;
 }
 
-// Indexes are extras too: each can be skipped and built later. They come
-// first, so the other extras' queries can use them.
-bool Index(ExtraContext& c, const char* sql, std::string* error) { return c.db.Exec(sql, error); }
-
 bool BuildTableKeys(ExtraContext& c, std::string* error) {
     std::string sql;
     for (const auto& t : c.schema.tables())
@@ -1061,70 +1057,103 @@ bool BuildTableKeys(ExtraContext& c, std::string* error) {
 // Extras: built after the core tables (from the database; itm also reads the
 // plugins), so they can be skipped at build time and added later with db add.
 // Built in this order.
+// Index groups whose tables come from the schema: (form_key, plugin_no) of
+// every type and child table, and the base object (NAME) of every placed
+// object.
+const std::set<std::string> kPlacedTypes = {"ACHR", "REFR", "PARW", "PBAR", "PBEA", "PCON", "PFLA", "PGRE", "PHZD", "PMIS"};
+
+std::string RefBaseIndexes(const Schema& schema, bool drop) {
+    std::string sql;
+    for (const auto& t : schema.tables()) {
+        if (!t.fs.empty() || !kPlacedTypes.count(t.rt)) continue;
+        for (const auto& col : t.columns) {
+            if (col.path != "NAME" || col.kind != "formid") continue;
+            sql += drop ? "DROP INDEX IF EXISTS " + Quote(t.name + "_base") + ";\n"
+                        : "CREATE INDEX IF NOT EXISTS " + Quote(t.name + "_base") + " ON " + Quote(t.name) + "(" +
+                              Quote(col.name) + ");\n";
+        }
+    }
+    return sql;
+}
+
+// Extras: built after the core tables (from the database; itm also reads the
+// plugins), so they can be skipped at build time, added later with db add and
+// removed with db drop. Built in this order, indexes first so the others can
+// use them. An extra is either SQL (sql / dropSql) or code (build / drop).
+// Off-by-default indexes are predesigned: build them for the queries that
+// need them, drop them when done.
 struct Extra {
     const char* name;
     const char* description;
     bool byDefault;
+    const char* sql;      // builds it, when build is null
+    const char* dropSql;  // removes it, when drop is null
     bool (*build)(ExtraContext& c, std::string* error);
+    bool (*drop)(ExtraContext& c, std::string* error);
 };
 const Extra kExtras[] = {
     {"idx_forms_key", "index forms(form_key, plugin_no): a form's occurrences", true,
-     [](ExtraContext& c, std::string* e) {
-         return Index(c, "CREATE INDEX IF NOT EXISTS forms_key ON forms(form_key, plugin_no);", e);
-     }},
+     "CREATE INDEX IF NOT EXISTS forms_key ON forms(form_key, plugin_no);", "DROP INDEX IF EXISTS forms_key;"},
     {"idx_forms_plugin", "index forms(plugin_no, type): a plugin's forms", true,
-     [](ExtraContext& c, std::string* e) {
-         return Index(c, "CREATE INDEX IF NOT EXISTS forms_plugin ON forms(plugin_no, type);", e);
-     }},
-    {"idx_forms_type", "index forms(type)", true,
-     [](ExtraContext& c, std::string* e) { return Index(c, "CREATE INDEX IF NOT EXISTS forms_type ON forms(type);", e); }},
+     "CREATE INDEX IF NOT EXISTS forms_plugin ON forms(plugin_no, type);", "DROP INDEX IF EXISTS forms_plugin;"},
+    {"idx_forms_type", "index forms(type)", true, "CREATE INDEX IF NOT EXISTS forms_type ON forms(type);",
+     "DROP INDEX IF EXISTS forms_type;"},
     {"idx_forms_edid", "index forms(edid): look up editor IDs", true,
-     [](ExtraContext& c, std::string* e) { return Index(c, "CREATE INDEX IF NOT EXISTS forms_edid ON forms(edid);", e); }},
+     "CREATE INDEX IF NOT EXISTS forms_edid ON forms(edid);", "DROP INDEX IF EXISTS forms_edid;"},
     {"idx_forms_parent", "index forms(parent_key): what sits in a CELL / WRLD / DIAL", true,
-     [](ExtraContext& c, std::string* e) {
-         return Index(c, "CREATE INDEX IF NOT EXISTS forms_parent ON forms(parent_key) WHERE parent_key IS NOT NULL;", e);
-     }},
+     "CREATE INDEX IF NOT EXISTS forms_parent ON forms(parent_key) WHERE parent_key IS NOT NULL;",
+     "DROP INDEX IF EXISTS forms_parent;"},
     {"idx_forms_flags", "partial indexes of deleted and persistent forms per plugin", true,
-     [](ExtraContext& c, std::string* e) {
-         return Index(c,
-                      "CREATE INDEX IF NOT EXISTS forms_deleted ON forms(plugin_no) WHERE flags & 0x20;"
-                      "CREATE INDEX IF NOT EXISTS forms_persistent ON forms(plugin_no) WHERE flags & 0x400;",
-                      e);
-     }},
+     "CREATE INDEX IF NOT EXISTS forms_deleted ON forms(plugin_no) WHERE flags & 0x20;"
+     "CREATE INDEX IF NOT EXISTS forms_persistent ON forms(plugin_no) WHERE flags & 0x400;",
+     "DROP INDEX IF EXISTS forms_deleted; DROP INDEX IF EXISTS forms_persistent;"},
     {"idx_plugin_masters", "index plugin_masters(master_no): a plugin's dependents", true,
-     [](ExtraContext& c, std::string* e) {
-         return Index(c, "CREATE INDEX IF NOT EXISTS plugin_masters_master ON plugin_masters(master_no);", e);
-     }},
+     "CREATE INDEX IF NOT EXISTS plugin_masters_master ON plugin_masters(master_no);",
+     "DROP INDEX IF EXISTS plugin_masters_master;"},
     {"idx_leftovers", "index subrecord_overflow and subrecord_raw by occurrence", true,
-     [](ExtraContext& c, std::string* e) {
-         return Index(c,
-                      "CREATE INDEX IF NOT EXISTS subrecord_overflow_key ON subrecord_overflow(form_key, plugin_no);"
-                      "CREATE INDEX IF NOT EXISTS subrecord_raw_key ON subrecord_raw(form_key, plugin_no);",
-                      e);
-     }},
+     "CREATE INDEX IF NOT EXISTS subrecord_overflow_key ON subrecord_overflow(form_key, plugin_no);"
+     "CREATE INDEX IF NOT EXISTS subrecord_raw_key ON subrecord_raw(form_key, plugin_no);",
+     "DROP INDEX IF EXISTS subrecord_overflow_key; DROP INDEX IF EXISTS subrecord_raw_key;"},
     {"idx_refs_to", "index form_refs(ref_key): what references a form", true,
-     [](ExtraContext& c, std::string* e) {
-         return Index(c, "CREATE INDEX IF NOT EXISTS form_refs_ref ON form_refs(ref_key);", e);
-     }},
+     "CREATE INDEX IF NOT EXISTS form_refs_ref ON form_refs(ref_key);", "DROP INDEX IF EXISTS form_refs_ref;"},
     {"idx_refs_from", "index form_refs(form_key, plugin_no): what a form references", true,
+     "CREATE INDEX IF NOT EXISTS form_refs_key ON form_refs(form_key, plugin_no);",
+     "DROP INDEX IF EXISTS form_refs_key;"},
+    {"idx_table_keys", "index every type and child table by (form_key, plugin_no)", true, nullptr, nullptr,
+     BuildTableKeys,
      [](ExtraContext& c, std::string* e) {
-         return Index(c, "CREATE INDEX IF NOT EXISTS form_refs_key ON form_refs(form_key, plugin_no);", e);
+         std::string sql;
+         for (const auto& t : c.schema.tables()) sql += "DROP INDEX IF EXISTS " + Quote(t.name + "_key") + ";\n";
+         return c.db.Exec(sql, e);
      }},
-    {"idx_table_keys", "index every type and child table by (form_key, plugin_no)", true, BuildTableKeys},
+    // Predesigned (off by default): xEdit filters that need them (XEDIT_FILTERS.md).
+    {"idx_persistent_type", "partial index forms(type) of persistent forms: 'only persistent' filters by type",
+     false, "CREATE INDEX IF NOT EXISTS forms_persistent_type ON forms(type, plugin_no) WHERE flags & 0x400;",
+     "DROP INDEX IF EXISTS forms_persistent_type;"},
+    {"idx_ref_base", "index each placed-object table by its base object (NAME): filter references by base", false,
+     nullptr, nullptr,
+     [](ExtraContext& c, std::string* e) { return c.db.Exec(RefBaseIndexes(c.schema, false), e); },
+     [](ExtraContext& c, std::string* e) { return c.db.Exec(RefBaseIndexes(c.schema, true), e); }},
     {"asset_refs", "every file a form names (models, textures, sounds, scripts), joinable with assets.db paths", true,
-     BuildAssetRefs},
+     nullptr, "DELETE FROM asset_refs;", BuildAssetRefs},
     {"idx_asset_refs", "index asset_refs(path): which forms use a file", true,
-     [](ExtraContext& c, std::string* e) {
-         return Index(c, "CREATE INDEX IF NOT EXISTS asset_refs_path ON asset_refs(path);", e);
-     }},
+     "CREATE INDEX IF NOT EXISTS asset_refs_path ON asset_refs(path);", "DROP INDEX IF EXISTS asset_refs_path;"},
     {"fts_names", "full-text search over editor IDs and names: fts_names (words), fts_names_tri (substrings)", true,
+     nullptr,
+     "DELETE FROM form_names; INSERT INTO fts_names(fts_names) VALUES('rebuild');"
+     "INSERT INTO fts_names_tri(fts_names_tri) VALUES('rebuild');",
      BuildFtsNames},
-    {"eslable", "per plugin: master form count and whether it can be flagged light", true, BuildEslable},
-    {"deleted", "per plugin: deleted placed objects and deleted navmeshes", true, BuildDeleted},
-    {"missing_masters", "per plugin: masters that are not in the load order", true, BuildMissingMasters},
-    {"invalid_refs", "references to forms no plugin defines, with the noise filter", true, BuildInvalidRefs},
+    {"eslable", "per plugin: master form count and whether it can be flagged light", true, nullptr,
+     "UPDATE plugin_facts SET master_forms = NULL, eslable = NULL, esl_needs_1130 = NULL;", BuildEslable},
+    {"deleted", "per plugin: deleted placed objects and deleted navmeshes", true, nullptr,
+     "UPDATE plugin_facts SET deleted_refs = NULL, deleted_navm = NULL;", BuildDeleted},
+    {"missing_masters", "per plugin: masters that are not in the load order", true, nullptr,
+     "UPDATE plugin_facts SET missing_masters = NULL;", BuildMissingMasters},
+    {"invalid_refs", "references to forms no plugin defines, with the noise filter", true, nullptr,
+     "DELETE FROM invalid_refs; UPDATE plugin_facts SET invalid_refs = NULL, invalid_refs_all = NULL;",
+     BuildInvalidRefs},
     {"itm", "ITM records (identical to master); reads every plugin and its masters, so off by default", false,
-     BuildItm},
+     nullptr, "DELETE FROM itm_forms; UPDATE plugin_facts SET itm = NULL;", BuildItm},
 };
 
 bool IsExtra(const std::string& name) {
@@ -1138,7 +1167,7 @@ bool BuildExtras(ExtraContext& c, const std::set<std::string>& extras, const std
                  std::string* error) {
     for (const auto& e : kExtras) {
         if (!extras.count(e.name)) continue;
-        if (!e.build(c, error)) return false;
+        if (!(e.build ? e.build(c, error) : c.db.Exec(e.sql, error))) return false;
         done(e.name);
     }
     return true;
@@ -1254,6 +1283,16 @@ FROM plugin_masters m
 JOIN plugins p ON p.plugin_no = m.plugin_no
 JOIN plugins x ON x.plugin_no = m.master_no
 WHERE p.load_order >= 0 AND x.load_order IS NULL;
+
+-- The shell extension's columns per plugin, by name. dirty: deleted placed
+-- objects or ITM records (NULL until both extras that decide it are built).
+CREATE VIEW plugin_facts_v AS
+SELECT p.load_order, p.name AS plugin, p.is_light, p.is_master, p.hedr_version, p.num_records,
+       f.master_forms, f.eslable, f.esl_needs_1130, f.deleted_refs, f.deleted_navm, f.itm,
+       CASE WHEN f.deleted_refs > 0 OR f.itm > 0 THEN 1
+            WHEN f.deleted_refs = 0 AND f.itm = 0 THEN 0 END AS dirty,
+       f.missing_masters, f.invalid_refs, f.invalid_refs_all
+FROM plugin_facts f JOIN plugins p USING (plugin_no);
 )SQL";
 
 // Inserts the table rows decode workers produce: type / child / module
@@ -1745,6 +1784,83 @@ std::vector<std::string> LoadOrder(const BuildOptions& opt, const std::vector<st
     order.clear();
     for (const auto& p : all) order.push_back(p.name);
     return order;
+}
+
+// spf db drop: removes extras (an index, a fact table's rows) so they can be
+// rebuilt later with db add; spf_modules and modules_not_built follow.
+int DropExtras(const AddOptions& opt, std::string* error) {
+    Db db;
+    if (GetFileAttributesW(opt.db.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        *error = "no database at " + Utf8(opt.db);
+        return 1;
+    }
+    if (!db.Open(opt.db, error)) return 1;
+    {
+        Stmt q{db.Prepare("SELECT value FROM spf_meta WHERE key='schema_version'", error)};
+        if (!q.st) return 1;
+        std::string version = sqlite3_step(q.st) == SQLITE_ROW && sqlite3_column_text(q.st, 0)
+                                  ? reinterpret_cast<const char*>(sqlite3_column_text(q.st, 0))
+                                  : "";
+        if (version != std::to_string(kSchemaVersion)) {
+            *error = "the database has schema version " + (version.empty() ? std::string("?") : version) +
+                     ", this spf writes " + std::to_string(kSchemaVersion) + ": rebuild it with build-db";
+            return 1;
+        }
+    }
+    PatternCatalog catalog;
+    if (!LoadCatalog(opt.patterns, &catalog, error)) return 2;
+    Schema schema;
+    schema.Build(catalog, UsableName);
+    std::vector<const Extra*> drop;
+    for (const auto& m : opt.modules) {
+        const Extra* found = nullptr;
+        for (const auto& e : kExtras)
+            if (m == e.name) found = &e;
+        if (!found) {
+            *error = "'" + m + "' is not an extra (only extras can be dropped; spf db --help lists them)";
+            return 2;
+        }
+        Stmt q{db.Prepare("SELECT 1 FROM spf_modules WHERE name=?", error)};
+        if (!q.st) return 1;
+        q.Text(1, m);
+        if (sqlite3_step(q.st) != SQLITE_ROW) {
+            *error = m + " is not built";
+            return 1;
+        }
+        drop.push_back(found);
+    }
+    if (drop.empty()) {
+        *error = "no extra given";
+        return 2;
+    }
+    if (!db.Exec("BEGIN", error)) return 1;
+    ExtraContext ctx{db, schema, catalog, opt.threads};
+    Stmt del{db.Prepare("DELETE FROM spf_modules WHERE name=?", error)};
+    if (!del.st) return 1;
+    for (const Extra* e : drop) {
+        if (!(e->drop ? e->drop(ctx, error) : db.Exec(e->dropSql, error))) {
+            std::string ignored;
+            db.Exec("ROLLBACK", &ignored);
+            return 1;
+        }
+        del.Text(1, e->name).Run();
+        if (!opt.quiet) fprintf(stderr, "dropped %s\n", e->name);
+    }
+    std::string notBuilt;
+    {
+        Stmt q{db.Prepare("SELECT name FROM spf_modules", error)};
+        if (!q.st) return 1;
+        std::set<std::string> built;
+        while (sqlite3_step(q.st) == SQLITE_ROW) built.insert(reinterpret_cast<const char*>(sqlite3_column_text(q.st, 0)));
+        for (const auto& m : Schema::Modules())
+            if (!built.count(m.first)) notBuilt += (notBuilt.empty() ? "" : ",") + m.first;
+        for (const auto& e : kExtras)
+            if (!built.count(e.name)) notBuilt += (notBuilt.empty() ? "" : ",") + std::string(e.name);
+    }
+    Stmt meta{db.Prepare("UPDATE spf_meta SET value=? WHERE key='modules_not_built'", error)};
+    if (!meta.st) return 1;
+    meta.Text(1, notBuilt).Run();
+    return db.Exec("COMMIT", error) ? 0 : 1;
 }
 
 int AddModules(const AddOptions& opt, std::string* error) {
