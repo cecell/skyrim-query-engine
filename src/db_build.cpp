@@ -25,7 +25,7 @@
 namespace spf {
 namespace {
 
-constexpr int kSchemaVersion = 5;
+constexpr int kSchemaVersion = 6;
 constexpr size_t kBatchRows = 50000;
 constexpr int64_t kKeyShift = 1 << 24;
 
@@ -274,7 +274,7 @@ struct StringRow {
 
 // One SQL value.
 struct Cell {
-    enum class T : uint8_t { Null, Int, Real, Text } t = T::Null;
+    enum class T : uint8_t { Null, Int, Real, Text, Blob } t = T::Null;
     int64_t i = 0;
     double d = 0;
     std::string s;
@@ -294,6 +294,15 @@ struct Cell {
         Cell c;
         c.t = T::Text;
         c.s = std::move(v);
+        return c;
+    }
+    // Hex text (as the decoder writes byte runs) as the bytes themselves.
+    static Cell Blob(const std::string& hex) {
+        Cell c;
+        c.t = T::Blob;
+        c.s.reserve(hex.size() / 2);
+        auto nib = [](char h) { return h <= '9' ? h - '0' : (h & ~0x20) - 'A' + 10; };
+        for (size_t i = 0; i + 1 < hex.size(); i += 2) c.s.push_back(static_cast<char>(nib(hex[i]) << 4 | nib(hex[i + 1])));
         return c;
     }
 };
@@ -355,10 +364,9 @@ Cell ToCell(const Value& v, const ColumnDef& col) {
         case Value::Kind::Bool: return Cell::Int(v.AsBool());
         case Value::Kind::Int: return Cell::Int(v.AsInt());
         case Value::Kind::Float: return std::isfinite(v.AsFloat()) ? Cell::Real(v.AsFloat()) : Cell();
-        case Value::Kind::String: return Cell::Text(v.AsString());
+        case Value::Kind::String: return col.kind == "bytes" ? Cell::Blob(v.AsString()) : Cell::Text(v.AsString());
         default: break;
     }
-    (void)col;
     std::string json;  // a list or object: JSON text
     WriteJson(v, &json);
     return Cell::Text(std::move(json));
@@ -478,7 +486,7 @@ void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
             if (!def || !f.decoded) {
                 batch.rows.push_back({kRawTable,
                                       {Cell::Int(key), Cell::Int(info.no), Cell::Text(rt), Cell::Text(f.sig),
-                                       Cell::Int(static_cast<int64_t>(k)), Cell::Text(f.value.AsString().substr(1)),
+                                       Cell::Int(static_cast<int64_t>(k)), Cell::Blob(f.value.AsString().substr(1)),
                                        Cell::Text(def ? "did not decode" : "no pattern")}});
                 continue;
             }
@@ -711,7 +719,7 @@ CREATE TABLE subrecord_raw(
   type      TEXT NOT NULL,
   sig       TEXT NOT NULL,
   idx       INTEGER NOT NULL,
-  bytes_hex TEXT NOT NULL,
+  bytes     BLOB NOT NULL,
   reason    TEXT NOT NULL
 );
 
@@ -752,6 +760,7 @@ CREATE TABLE st_columns(
   path        TEXT,
   refers_to   TEXT,
   description TEXT,
+  notes       TEXT,
   PRIMARY KEY(table_name, column_name)
 ) WITHOUT ROWID;
 )SQL";
@@ -770,6 +779,9 @@ const char* kCoreTables[][2] = {
     {"st_tables", "The data dictionary: tables."},
     {"st_columns", "The data dictionary: columns."},
 };
+
+// st_columns.notes of every BLOB column.
+const char kBlobNote[] = "raw bytes; SELECT hex(col) for hex text";
 
 std::string Quote(const std::string& name) { return "\"" + name + "\""; }
 
@@ -809,6 +821,7 @@ bool BindRun(sqlite3_stmt* st, const std::vector<Cell>& cells) {
             case Cell::T::Int: sqlite3_bind_int64(st, k, c.i); break;
             case Cell::T::Real: sqlite3_bind_double(st, k, c.d); break;
             case Cell::T::Text: sqlite3_bind_text(st, k, c.s.data(), static_cast<int>(c.s.size()), SQLITE_STATIC); break;
+            case Cell::T::Blob: sqlite3_bind_blob(st, k, c.s.data(), static_cast<int>(c.s.size()), SQLITE_STATIC); break;
         }
     }
     int rc = sqlite3_step(st);
@@ -1267,12 +1280,14 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
 
         // The data dictionary.
         Stmt insT{db.Prepare("INSERT INTO st_tables VALUES(?,?,?,?,?,?)", error)};
-        Stmt insC{db.Prepare("INSERT INTO st_columns VALUES(?,?,?,?,?,?,?,?,?)", error)};
+        Stmt insC{db.Prepare("INSERT INTO st_columns VALUES(?,?,?,?,?,?,?,?,?,?)", error)};
         if (!insT.st || !insC.st) return 1;
         for (const auto& ct : kCoreTables)
             insT.Text(1, ct[0]).Text(2, "core").Null(3).Null(4).Null(5).Text(6, ct[1]).Run();
-        if (!db.Exec("INSERT INTO st_columns SELECT m.table_name, p.name, p.cid, p.type, NULL, NULL, NULL, NULL, NULL "
-                     "FROM st_tables m, pragma_table_info(m.table_name) p",
+        if (!db.Exec("INSERT INTO st_columns SELECT m.table_name, p.name, p.cid, p.type, NULL, NULL, NULL, NULL, NULL, NULL "
+                     "FROM st_tables m, pragma_table_info(m.table_name) p;"
+                     "UPDATE st_columns SET notes = '" + std::string(kBlobNote) + "' "
+                     "WHERE table_name = 'subrecord_raw' AND column_name = 'bytes'",
                      error))
             return 1;
         for (const auto& t : schema.tables()) {
@@ -1287,7 +1302,7 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
                 insC.Text(1, t.name).Text(2, name).Int(3, pos++).Text(4, "INTEGER").Text(5, "key").Null(6).Null(7);
                 if (refers) insC.Text(8, refers);
                 else insC.Null(8);
-                insC.Text(9, desc).Run();
+                insC.Text(9, desc).Null(10).Run();
             };
             key("form_key", "forms.form_key", "the form (owner plugin_no * 16777216 + object ID)");
             key("plugin_no", "plugins.plugin_no", "the plugin this occurrence is recorded in");
@@ -1303,6 +1318,8 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
                 else insC.Null(8);
                 if (display.empty()) insC.Null(9);
                 else insC.Text(9, display);
+                if (c.kind == "bytes") insC.Text(10, kBlobNote);
+                else insC.Null(10);
                 insC.Run();
             }
         }

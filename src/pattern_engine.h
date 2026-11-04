@@ -58,6 +58,7 @@ struct Shape {
         LString,  // "[LSTRING:0x...]", or text when not localized
         Marker,   // empty_marker: present or not
         Flags,    // bitfield: list of set flag names
+        Bytes,    // raw byte run (hex text in exports)
         List,     // repeat: elem[0] is the element shape
         Map,      // labeled seq: fields by name
         Tuple,    // unlabeled seq / colour: a list, fields by position

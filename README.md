@@ -70,7 +70,10 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
   form, and what a form references. Views `winning_refs` (references the load
   order ends up with) and `dangling_refs` (references to forms nobody defines).
 - `st_tables` / `st_columns`: the data dictionary (what each column is,
-  which subrecord and path it comes from, what a key refers to).
+  which subrecord and path it comes from, what a key refers to, notes such
+  as how to read a BLOB).
+- Raw byte runs are stored as BLOBs (`kind` = `bytes`); `SELECT hex(col)`
+  gives the hex text `spf export` shows. Inside JSON values they stay hex text.
 - `subrecord_overflow` / `subrecord_raw`: whatever did not fit, so nothing
   is lost silently.
 - Views `forms_v` (readable `Skyrim.esm:012EB7` keys, in-game FormIDs) and
@@ -119,8 +122,8 @@ table.
   group at offset 1234 has an impossible size"). `build-db` reports it,
   records the reason in `plugins.load_error`, leaves its rows out entirely,
   and builds the rest.
-- A subrecord whose bytes do not fit its pattern is kept as raw hex
-  (`subrecord_raw` in the database, `"#0A1B..."` in exports); the rest of the
+- A subrecord whose bytes do not fit its pattern is kept raw
+  (`subrecord_raw.bytes` BLOB in the database, `"#0A1B..."` in exports); the rest of the
   record still decodes.
 
 ## Building

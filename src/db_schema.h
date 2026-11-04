@@ -27,8 +27,8 @@ struct PathStep {
 
 struct ColumnDef {
     std::string name;     // SQL column name
-    std::string sqlType;  // INTEGER / REAL / TEXT, empty = any
-    std::string kind;     // int real text bool formid lstring marker flags json any
+    std::string sqlType;  // INTEGER / REAL / TEXT / BLOB, empty = any
+    std::string kind;     // int real text bool formid lstring marker flags bytes json any
     std::string path;     // spf export path: "DATA.damage", "SNAM.Faction"
     std::vector<PathStep> steps;  // from the subrecord's value (or the list element)
 };

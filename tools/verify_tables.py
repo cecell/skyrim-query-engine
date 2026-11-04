@@ -63,6 +63,8 @@ def cell_equal(dbv, ev, kind):
         return dbv == 1
     if ev is None:
         return dbv is None
+    if kind == "bytes":  # BLOB in the DB, hex text in exports
+        return isinstance(dbv, bytes) and dbv.hex().upper() == ev
     if isinstance(ev, bool):
         return dbv == int(ev)
     if isinstance(ev, (list, dict)):
