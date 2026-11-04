@@ -316,7 +316,7 @@ OPTIONS
   --threads <n>            decode threads (default: logical cores - 1).
   --quiet                  no progress output.
 
-WHAT IS IN IT (schema version 6)
+WHAT IS IN IT (schema version 7)
   plugins         one row per plugin: plugin_no (its number in this DB),
                   load_order, mod_index (light slot for light plugins),
                   is_light, is_master, header facts, size, mtime, crc32.
@@ -360,6 +360,15 @@ WHAT IS IN IT (schema version 6)
                      ID and name: form_names (the text), fts_names (words,
                      prefixes: MATCH 'iron sword', 'iro*'), fts_names_tri
                      (substrings of 3+ characters: MATCH 'onswo')
+    eslable          plugin_facts.master_forms, eslable (Already, True, Save
+                     in CK, False, Corrupted), esl_needs_1130
+    deleted          plugin_facts.deleted_refs (placed objects), deleted_navm
+    missing_masters  plugin_facts.missing_masters (view missing_masters
+                     lists them)
+    invalid_refs     invalid_refs: references to forms no plugin defines;
+                     plugin_facts.invalid_refs counts only those held by a
+                     form another form references (most others are
+                     leftovers nothing uses), invalid_refs_all counts all
   spf_modules lists what is built; st_tables.module says which tables
   belong to which module or extra.
   form_refs       the xref: one row per FormID inside a record, wherever it
@@ -410,6 +419,7 @@ rows for any FormIDs in them). Core tables are not touched. Extras left out
 with build-db --skip are added the same way, from the database alone:
 
   fts_names        full-text search over editor IDs and names
+  eslable, deleted, missing_masters, invalid_refs   plugin facts
 
   navmesh          NAVM geometry (vertices, triangles, edge and door links)
                    and NAVI

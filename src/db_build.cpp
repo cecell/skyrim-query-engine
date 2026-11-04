@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <iterator>
 #include <mutex>
 #include <set>
@@ -25,7 +26,7 @@
 namespace spf {
 namespace {
 
-constexpr int kSchemaVersion = 6;
+constexpr int kSchemaVersion = 7;
 constexpr size_t kBatchRows = 50000;
 constexpr int64_t kKeyShift = 1 << 24;
 
@@ -778,34 +779,47 @@ CREATE VIRTUAL TABLE fts_names USING fts5(edid, name, content='form_names', cont
   tokenize='unicode61 remove_diacritics 2');
 CREATE VIRTUAL TABLE fts_names_tri USING fts5(edid, name, content='form_names', content_rowid='id',
   tokenize='trigram remove_diacritics 1');
-)SQL";
 
-// Extras: built from the database itself (no plugin is read), so they can be
-// skipped at build time and added later with db add.
-struct Extra {
-    const char* name;
-    const char* description;
-    bool byDefault;
-};
-const Extra kExtras[] = {
-    {"fts_names", "full-text search over editor IDs and names: fts_names (words), fts_names_tri (substrings)", true},
-};
+-- Fact extras (each on by default): one row per plugin in the load order. A
+-- column stays NULL when the extra that fills it was not built.
+CREATE TABLE plugin_facts(
+  plugin_no        INTEGER PRIMARY KEY REFERENCES plugins,
+  master_forms     INTEGER,  -- eslable: forms this plugin is the master of (what counts against the ESL flag)
+  eslable          TEXT,     -- eslable: Already, True, Save in CK, False or Corrupted
+  esl_needs_1130   INTEGER,  -- eslable: 1 when flagging it light needs game version 1.6.1130+ (IDs below 0x800)
+  deleted_refs     INTEGER,  -- deleted: deleted placed objects (REFR, ACHR, P***), navmeshes not included
+  deleted_navm     INTEGER,  -- deleted: deleted navmeshes
+  missing_masters  INTEGER,  -- missing_masters: masters that are not in the load order
+  invalid_refs     INTEGER,  -- invalid_refs: references to missing forms, held by forms something references
+  invalid_refs_all INTEGER   -- invalid_refs: every reference to a missing form
+);
+
+-- Extra invalid_refs: every reference to a form no plugin defines.
+CREATE TABLE invalid_refs(
+  form_key          INTEGER NOT NULL,
+  plugin_no         INTEGER NOT NULL REFERENCES plugins,
+  ref_key           INTEGER NOT NULL,
+  path_id           INTEGER NOT NULL REFERENCES ref_paths,
+  reason            TEXT NOT NULL,     -- missing_master (its plugin is not loaded) or undefined
+  holder_referenced INTEGER NOT NULL,  -- another form references the form holding it
+  holder_parent     INTEGER NOT NULL   -- the form holding it sits in a CELL, WRLD or DIAL
+);
+)SQL";
 
 const char* kExtraTables[][3] = {
     {"form_names", "fts_names", "Every form occurrence's editor ID and name (FULL): the text fts_names and fts_names_tri index."},
     {"fts_names", "fts_names",
      "Full-text index (words, prefixes) over form_names: SELECT n.* FROM fts_names JOIN form_names n ON n.id = "
      "fts_names.rowid WHERE fts_names MATCH 'iron sword'."},
+    {"plugin_facts", "eslable,deleted,missing_masters,invalid_refs",
+     "Facts per plugin: ESLable, master form count, deleted references, missing masters, invalid references."},
+    {"invalid_refs", "invalid_refs",
+     "References to forms no plugin defines. Most are leftovers in forms nothing uses: holder_referenced = 1 "
+     "keeps the ones in forms another form references."},
     {"fts_names_tri", "fts_names",
      "Substring index over form_names: ... JOIN form_names n ON n.id = fts_names_tri.rowid WHERE fts_names_tri "
      "MATCH 'onswo' (3+ characters)."},
 };
-
-bool IsExtra(const std::string& name) {
-    for (const auto& e : kExtras)
-        if (name == e.name) return true;
-    return false;
-}
 
 std::string Quote(const std::string& name);
 
@@ -833,6 +847,123 @@ bool BuildFtsNames(Db& db, const Schema& schema, std::string* error) {
            "INSERT INTO fts_names(fts_names) VALUES('rebuild');\n"
            "INSERT INTO fts_names_tri(fts_names_tri) VALUES('rebuild');\n";
     return db.Exec(sql, error);
+}
+
+// The fact extras' rows: every plugin in the load order.
+const char kFactRows[] = "INSERT OR IGNORE INTO plugin_facts(plugin_no) SELECT plugin_no FROM plugins WHERE load_order >= 0;";
+
+// ESLable, as the shell extension decides it: a plugin can be flagged light
+// when the forms it is the master of fit the light range. HEDR 1.71+ plugins
+// may use object IDs 0x000..0xFFF; older ones 0x800..0xFFF, but resaving in
+// the newer CK gives them a 1.71 header ("Save in CK"). Plugins that would
+// need compacting count as False.
+bool BuildEslable(Db& db, const Schema&, std::string* error) {
+    return db.Exec(std::string(kFactRows) + R"SQL(
+WITH own AS (
+  SELECT plugin_no, count(*) AS n, min(form_key & 16777215) AS lo, max(form_key & 16777215) AS hi
+  FROM forms WHERE form_key >> 24 = plugin_no GROUP BY plugin_no),
+c AS (
+  SELECT p.plugin_no, coalesce(o.n, 0) AS n, p.is_light, p.load_error,
+         coalesce(p.hedr_version >= 1.705, 0) AS new_range,
+         coalesce(o.hi <= 4095, 1) AS in000,
+         coalesce(o.hi <= 4095 AND o.lo >= 2048, 1) AS in800
+  FROM plugins p LEFT JOIN own o USING (plugin_no) WHERE p.load_order >= 0),
+s AS (
+  SELECT plugin_no, n, new_range, in800,
+         CASE WHEN is_light THEN 'Already'
+              WHEN load_error IS NOT NULL THEN 'Corrupted'
+              WHEN new_range THEN CASE WHEN n <= 4096 AND in000 THEN 'True' ELSE 'False' END
+              WHEN n <= 2048 AND in800 THEN 'True'
+              WHEN n <= 4096 AND in000 THEN 'Save in CK'
+              ELSE 'False' END AS status
+  FROM c)
+UPDATE plugin_facts SET master_forms = s.n, eslable = s.status,
+  esl_needs_1130 = (s.status = 'True' AND s.new_range AND NOT s.in800) OR s.status = 'Save in CK'
+FROM s WHERE s.plugin_no = plugin_facts.plugin_no;
+)SQL",
+                   error);
+}
+
+// Deleted records: the placed-object types xEdit's "Undelete and Disable
+// References" handles, and navmeshes apart (as the shell extension counts).
+bool BuildDeleted(Db& db, const Schema&, std::string* error) {
+    return db.Exec(std::string(kFactRows) + R"SQL(
+WITH d AS (
+  SELECT plugin_no,
+         sum(type IN ('ACHR','PARW','PBAR','PBEA','PCON','PFLA','PGRE','PHZD','PMIS','REFR')) AS refs,
+         sum(type = 'NAVM') AS navm
+  FROM forms WHERE flags & 0x20 GROUP BY plugin_no)
+UPDATE plugin_facts SET deleted_refs = coalesce(d.refs, 0), deleted_navm = coalesce(d.navm, 0)
+FROM (SELECT p.plugin_no, d.refs, d.navm FROM plugin_facts p LEFT JOIN d USING (plugin_no)) AS d
+WHERE d.plugin_no = plugin_facts.plugin_no;
+)SQL",
+                   error);
+}
+
+bool BuildMissingMasters(Db& db, const Schema&, std::string* error) {
+    return db.Exec(std::string(kFactRows) + R"SQL(
+UPDATE plugin_facts SET missing_masters =
+  (SELECT count(*) FROM plugin_masters m JOIN plugins x ON x.plugin_no = m.master_no
+   WHERE m.plugin_no = plugin_facts.plugin_no AND x.load_order IS NULL);
+)SQL",
+                   error);
+}
+
+// References to forms no plugin defines. Most sit in forms their author
+// abandoned, which nothing uses: the filtered count keeps only those held by
+// a form another form references (removes 95%+ of the noise, LESSONS_LEARNED).
+bool BuildInvalidRefs(Db& db, const Schema&, std::string* error) {
+    return db.Exec(std::string(kFactRows) + R"SQL(
+DELETE FROM invalid_refs;
+INSERT INTO invalid_refs
+SELECT r.form_key, r.plugin_no, r.ref_key, r.path_id,
+       CASE WHEN o.load_order IS NULL THEN 'missing_master' ELSE 'undefined' END,
+       EXISTS (SELECT 1 FROM form_refs x WHERE x.ref_key = r.form_key AND x.form_key <> r.form_key),
+       EXISTS (SELECT 1 FROM forms h WHERE h.form_key = r.form_key AND h.plugin_no = r.plugin_no
+               AND h.parent_key IS NOT NULL)
+FROM form_refs r
+LEFT JOIN plugins o ON o.plugin_no = r.ref_key >> 24
+WHERE NOT EXISTS (SELECT 1 FROM forms f WHERE f.form_key = r.ref_key);
+WITH c AS (SELECT plugin_no, count(*) AS n, sum(holder_referenced) AS kept FROM invalid_refs GROUP BY plugin_no)
+UPDATE plugin_facts SET invalid_refs = coalesce(c.kept, 0), invalid_refs_all = coalesce(c.n, 0)
+FROM (SELECT p.plugin_no, c.n, c.kept FROM plugin_facts p LEFT JOIN c USING (plugin_no)) AS c
+WHERE c.plugin_no = plugin_facts.plugin_no;
+)SQL",
+                   error);
+}
+
+// Extras: built from the database itself (no plugin is read), so they can be
+// skipped at build time and added later with db add. Built in this order.
+struct Extra {
+    const char* name;
+    const char* description;
+    bool byDefault;
+    bool (*build)(Db& db, const Schema& schema, std::string* error);
+};
+const Extra kExtras[] = {
+    {"fts_names", "full-text search over editor IDs and names: fts_names (words), fts_names_tri (substrings)", true,
+     BuildFtsNames},
+    {"eslable", "per plugin: master form count and whether it can be flagged light", true, BuildEslable},
+    {"deleted", "per plugin: deleted placed objects and deleted navmeshes", true, BuildDeleted},
+    {"missing_masters", "per plugin: masters that are not in the load order", true, BuildMissingMasters},
+    {"invalid_refs", "references to forms no plugin defines, with the noise filter", true, BuildInvalidRefs},
+};
+
+bool IsExtra(const std::string& name) {
+    for (const auto& e : kExtras)
+        if (name == e.name) return true;
+    return false;
+}
+
+// Builds the extras asked for, in kExtras order.
+bool BuildExtras(Db& db, const Schema& schema, const std::set<std::string>& extras,
+                 const std::function<void(const char*)>& done, std::string* error) {
+    for (const auto& e : kExtras) {
+        if (!extras.count(e.name)) continue;
+        if (!e.build(db, schema, error)) return false;
+        done(e.name);
+    }
+    return true;
 }
 
 const char* kCoreTables[][2] = {
@@ -964,6 +1095,14 @@ WHERE f.is_winner;
 CREATE VIEW dangling_refs AS
 SELECT v.* FROM form_refs_v v
 WHERE NOT EXISTS (SELECT 1 FROM forms f WHERE f.form_key = v.ref_key);
+
+-- Masters a plugin in the load order needs that are not in it.
+CREATE VIEW missing_masters AS
+SELECT p.plugin_no, p.name AS plugin, x.plugin_no AS master_no, x.name AS master, x.file_exists
+FROM plugin_masters m
+JOIN plugins p ON p.plugin_no = m.plugin_no
+JOIN plugins x ON x.plugin_no = m.master_no
+WHERE p.load_order >= 0 AND x.load_order IS NULL;
 )SQL";
 
 // Inserts the table rows decode workers produce: type / child / module
@@ -1350,10 +1489,7 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         say("indexes");
         if (!db.Exec(kWinners, error)) return 1;
         say("winners");
-        if (extras.count("fts_names")) {
-            if (!BuildFtsNames(db, schema, error)) return 1;
-            say("fts_names");
-        }
+        if (!BuildExtras(db, schema, extras, [&](const char* name) { say("%s", name); }, error)) return 1;
         sql = kViews;
         for (const auto& t : schema.tables()) {
             if (!t.fs.empty()) continue;
@@ -1611,13 +1747,10 @@ int AddModules(const AddOptions& opt, std::string* error) {
     } else if (!db.Exec("PRAGMA temp_store=MEMORY; BEGIN", error)) {
         return 1;
     }
-    if (extras.count("fts_names")) {
-        if (!BuildFtsNames(db, schema, error)) {
-            std::string ignored;
-            db.Exec("ROLLBACK", &ignored);
-            return 1;
-        }
-        say("fts_names");
+    if (!BuildExtras(db, schema, extras, [&](const char* name) { say("%s", name); }, error)) {
+        std::string ignored;
+        db.Exec("ROLLBACK", &ignored);
+        return 1;
     }
 
     Stmt mod{db.Prepare("INSERT INTO spf_modules VALUES(?, ?, NULL)", error)};
