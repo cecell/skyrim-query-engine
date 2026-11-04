@@ -12,6 +12,8 @@
 //   --patterns <file>             pattern catalog (default: patterns.json next to spf.exe)
 //   spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..]
 //                                               a SQLite database of a whole load order
+//   spf build-assets --out <db> --data <Data> [--staging <root> | --mo2 <instance> --profile <name>]
+//                                               a SQLite database of every asset file
 //
 // A field that occurs once is a value; one that repeats (SNAM, LVLO, CTDA...)
 // is a list of its occurrences.
@@ -29,6 +31,7 @@
 #include <string>
 #include <vector>
 
+#include "../src/asset_build.h"
 #include "../src/db_build.h"
 #include "../src/plugin.h"
 
@@ -165,6 +168,8 @@ COMMANDS
   spf export <plugin> [options]   the fields you choose, of the forms you choose
   spf build-db [options]          a SQLite database of a whole load order
   spf db add <module> --db x.db   add an optional module (navmesh, landscape...) later
+  spf build-assets [options]      a SQLite database of every asset file (Data, mod
+                                  staging folders, MO2, BSA contents) with winners
   spf help [command]              this text, or one command's details
                                   (also: spf <command> --help)
 
@@ -427,6 +432,99 @@ refused too. spf_modules lists what is built.
   spf db add fts_names --db skyrim.db
 )HELP";
 
+const char kHelpBuildAssets[] = R"HELP(spf build-assets --out <assets.db> --data <Data folder> [options]
+
+Catalogues every asset file into its own SQLite database: every file in the
+Data folder, in mod staging folders, and packed in their BSAs, with header
+facts per type and which copy the game loads. ATTACH it to a build-db
+database and join on paths.path and plugin names.
+
+OPTIONS
+  --out <file.db>          the database to write, built as <file.db>.building
+                           and moved over <file.db> when the build succeeds.
+  --data <folder>          the game's Data folder. Always scanned.
+  --staging <root>         a mod staging root (any manager): each immediate
+                           subfolder is one mod (roots.kind 'staging'). A
+                           Vortex staging folder is recognised (manager).
+  --mo2 <instance> --profile <name>
+                           an MO2 instance (the folder with ModOrganizer.ini,
+                           mods, profiles, overwrite): every mod folder,
+                           enabled flags and priority from the profile's
+                           modlist.txt, overwrite highest, the profile's
+                           plugins.txt and inis. With nothing deployed in
+                           Data, winners come from the virtual Data.
+  --load-order <file>      plugins.txt (its active * plugins, after the base
+                           masters and Skyrim.ccc). Default: the MO2
+                           profile's, else every plugin in Data.
+  --hash                   SHA-256 of every file (packed: of its unpacked
+                           bytes). Off by default: it reads everything.
+  --skip e1,e2             leave out extras (see EXTRAS).
+  --threads <n>            read threads (default: logical cores - 1).
+  --quiet                  no progress output.
+
+WINNERS
+  in_data = 1: the game sees this copy in Data. A staging file that is the
+  same physical file as the Data file at its path (a hardlink: same volume
+  serial and NTFS file ID) is stored once, with its staging root. A Data
+  file no staging folder holds keeps the Data root. A staging copy that
+  differs from Data has in_data = 0. Packed files take their archive's.
+  is_winner = 1: the copy the game loads. A loose in_data copy wins. With
+  none, the copy in the loaded archive with the highest load_rank wins:
+  archives in the ini lists (sResourceArchiveList, sResourceArchiveList2 of
+  Skyrim.ini / SkyrimCustom.ini in Documents\My Games\Skyrim Special
+  Edition; the vanilla list when neither sets one) load first, then
+  <Plugin>.bsa and <Plugin> - Textures.bsa of active plugins, in load
+  order. Paths the game does not see have no winner.
+
+WHAT IS IN IT (schema version 1)
+  roots      where files come from: data | staging | overwrite; manager,
+             enabled, priority; file_count / total_size / max_mtime.
+  paths      every normalized relative path once (lower case, backslashes,
+             relative to Data): dir, name, ext, kind (texture mesh audio
+             voice script animation plugin archive strings interface
+             facegen bodyslide other).
+  files      every copy of every file: path_id, root_id, archive_id (the
+             .bsa it is packed in; NULL = loose), size (packed: unpacked),
+             packed_size, mtime (loose), in_data, is_winner, hash, error
+             (why the file or its header could not be read).
+  archives   per .bsa: version, flags, file_flags, file_count, compressed,
+             loaded_by (ini | plugin | NULL), plugin, load_rank.
+  dds tga nif audio pex hkx tri tri_morphs
+             header facts by type, keyed by files.file_id, for loose and
+             packed files alike. nif.game: le | se | both | unknown, from the
+             block types, never the BS version.
+  voice      Sound\Voice\<plugin>\<voicetype>\<x>_<formid>_<n>.<ext>: plugin,
+             voice_type, object_id (the INFO), response.
+  facegen    FaceGenData\FaceGeom|FaceTint\<plugin>\<formid>: kind, plugin,
+             object_id.
+  winning_files  view: the copy of each path the game loads.
+  conflicts      view: paths with more than one copy, the winner marked.
+  spf_meta, st_tables, st_columns   settings and counts; the dictionary.
+
+EXTRAS (on by default; --skip to leave out)
+  nif_textures     every texture path a mesh expects (BSShaderTextureSet,
+                   BSEffectShaderProperty), normalized; path_id NULL when no
+                   such file exists anywhere.
+  files_path files_root files_archive paths_kind
+                   the indexes on files(path_id), files(root_id),
+                   files(archive_id) and paths(kind).
+
+Files are only read: Data and staging folders are never written.
+
+EXAMPLES
+  spf build-assets --out assets.db --data "C:\Games\Skyrim Special Edition\Data"
+      --load-order "%LOCALAPPDATA%\Skyrim Special Edition\plugins.txt"
+  spf build-assets --out assets.db --data D:\Skyrim\Data --staging D:\Vortex\skyrimse
+  spf build-assets --out assets.db --data D:\Skyrim\Data --mo2 D:\MO2 --profile Default
+
+  SELECT path, root, archive FROM winning_files WHERE path LIKE 'meshes\armor\iron\%';
+  SELECT * FROM conflicts WHERE kind = 'texture' LIMIT 20;
+  SELECT texture FROM nif_textures WHERE path_id IS NULL;
+  SELECT r.name, count(*) FROM files f JOIN roots r USING (root_id)
+    WHERE f.in_data = 0 AND f.archive_id IS NULL GROUP BY 1 ORDER BY 2 DESC;
+  ATTACH 'skyrim.db' AS lo;  -- the plugin DB
+)HELP";
+
 int Usage() {
     fprintf(stderr,
             "usage:\n"
@@ -435,6 +533,7 @@ int Usage() {
             "  spf export <plugin> [--type T,..] [--form ID,..] [--fields F,..] [--csv|--json] [--out file]\n"
             "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..] [--skip e,..]\n"
             "  spf db add <module>[,..] --db <db>\n"
+            "  spf build-assets --out <db> --data <Data> [--staging <root> | --mo2 <dir> --profile <p>]\n"
             "  spf help [command]      (full explanation)\n");
     return 2;
 }
@@ -442,7 +541,7 @@ int Usage() {
 int Help(const std::string& topic) {
     const char* text = topic == "info" ? kHelpInfo : topic == "fields" ? kHelpFields
                      : topic == "export" ? kHelpExport : topic == "build-db" ? kHelpBuildDb
-                     : topic == "db" ? kHelpDb : kHelp;
+                     : topic == "db" ? kHelpDb : topic == "build-assets" ? kHelpBuildAssets : kHelp;
     _setmode(_fileno(stdout), _O_BINARY);
     fwrite(text, 1, strlen(text), stdout);
     return 0;
@@ -543,6 +642,37 @@ int BuildDbCommand(int argc, wchar_t** argv) {
     return rc;
 }
 
+int BuildAssetsCommand(int argc, wchar_t** argv) {
+    AssetOptions opt;
+    for (int i = 2; i < argc; ++i) {
+        std::string a = Utf8(argv[i]);
+        bool hasNext = i + 1 < argc;
+        if (a == "--out" && hasNext) opt.out = argv[++i];
+        else if (a == "--data" && hasNext) opt.data = argv[++i];
+        else if (a == "--staging" && hasNext) opt.staging = argv[++i];
+        else if (a == "--mo2" && hasNext) opt.mo2 = argv[++i];
+        else if (a == "--profile" && hasNext) opt.profile = argv[++i];
+        else if (a == "--load-order" && hasNext) opt.loadOrderFile = argv[++i];
+        else if (a == "--hash") opt.hash = true;
+        else if (a == "--threads" && hasNext) opt.threads = _wtoi(argv[++i]);
+        else if (a == "--quiet") opt.quiet = true;
+        else if (a == "--skip" && hasNext) {
+            for (const auto& m : SplitList(Utf8(argv[++i]))) opt.skip.push_back(m);
+        } else {
+            fprintf(stderr, "build-assets: unknown option %s (spf build-assets --help)\n", a.c_str());
+            return 2;
+        }
+    }
+    if (opt.out.empty() || opt.data.empty()) {
+        fprintf(stderr, "build-assets: --out and --data are required (spf build-assets --help)\n");
+        return 2;
+    }
+    std::string err;
+    int rc = BuildAssets(opt, &err);
+    if (rc) fprintf(stderr, "build-assets: %s\n", err.c_str());
+    return rc;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -556,6 +686,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (arg1 == "build-db") return BuildDbCommand(argc, argv);
     if (arg1 == "db") return DbCommand(argc, argv);
+    if (arg1 == "build-assets") return BuildAssetsCommand(argc, argv);
     if (argc < 3) return argc == 1 ? Help("") : Usage();
     std::string cmd = Utf8(argv[1]);
     std::wstring pluginPath = argv[2];

@@ -14,6 +14,13 @@ FetchContent_Declare(bsa_reader
     GIT_REPOSITORY https://github.com/cecell/bsa-reader.git
     GIT_TAG bbff0cbc5cd04d39bb3b50c470c579669c027dbf)  # v0.1.1
 FetchContent_MakeAvailable(bsa_reader)
+# beth-asset-metadata (GPL-3.0, github.com/cecell/beth-asset-metadata): DDS,
+# TGA, NIF, WAV / XWM / FUZ header facts for build-assets. Pinned to the
+# commit of tag v0.1.0; changes go to that repo, then bump this pin.
+FetchContent_Declare(asset_metadata
+    GIT_REPOSITORY https://github.com/cecell/beth-asset-metadata.git
+    GIT_TAG b85a3b30a932218ac076ae9d29d7946765d4bba3)  # v0.1.0
+FetchContent_MakeAvailable(asset_metadata)
 
 add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 add_compile_options(/utf-8 "$<$<COMPILE_LANGUAGE:CXX>:/W4;/permissive-;/EHsc>")
@@ -27,7 +34,8 @@ target_compile_definitions(sqlite3 PRIVATE SQLITE_THREADSAFE=0 SQLITE_DQS=0 SQLI
 target_compile_options(sqlite3 PRIVATE /W0)
 
 # The library: pattern engine (decodes subrecords from data/patterns.json),
-# zlib inflate, localized strings, and the plugin / record / field objects.
+# zlib inflate, localized strings, the plugin / record / field objects, and
+# the database builders (build-db, build-assets).
 add_library(spf STATIC
     src/pattern_value.cpp
     src/pattern_engine.cpp
@@ -35,9 +43,11 @@ add_library(spf STATIC
     src/strings.cpp
     src/plugin.cpp
     src/db_schema.cpp
-    src/db_build.cpp)
+    src/db_build.cpp
+    src/asset_readers.cpp
+    src/asset_build.cpp)
 target_include_directories(spf PUBLIC src)
-target_link_libraries(spf PUBLIC sqlite3 PRIVATE bsa::reader)
+target_link_libraries(spf PUBLIC sqlite3 PRIVATE bsa::reader asset::metadata bcrypt shell32 ole32)
 
 add_executable(spf_cli tools/spf.cpp)
 set_target_properties(spf_cli PROPERTIES OUTPUT_NAME spf)
@@ -64,7 +74,7 @@ if(SPF_FUZZ)
     # Everything linked into spf_fuzz must agree on ASan (container
     # annotations). Coverage-instrumented code needs libFuzzer's runtime, so
     # in a fuzz build only spf_fuzz links: build that target alone.
-    foreach(t spf bsa_reader)
+    foreach(t spf bsa_reader asset_metadata)
         target_compile_options(${t} PRIVATE /Zi /fsanitize=address /fsanitize-coverage=inline-8bit-counters
             /fsanitize-coverage=edge /fsanitize-coverage=trace-cmp)
     endforeach()
