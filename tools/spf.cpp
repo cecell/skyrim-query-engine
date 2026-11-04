@@ -369,6 +369,11 @@ WHAT IS IN IT (schema version 7)
                      plugin_facts.invalid_refs counts only those held by a
                      form another form references (most others are
                      leftovers nothing uses), invalid_refs_all counts all
+    itm              OFF by default (--with itm): itm_forms, overrides
+                     identical to their masters' version, compared as
+                     xEdit's Quick Auto Clean does minus its known false
+                     positives; plugin_facts.itm. Reads every plugin and
+                     its masters (slowest extra)
   spf_modules lists what is built; st_tables.module says which tables
   belong to which module or extra.
   form_refs       the xref: one row per FormID inside a record, wherever it
@@ -420,6 +425,7 @@ with build-db --skip are added the same way, from the database alone:
 
   fts_names        full-text search over editor IDs and names
   eslable, deleted, missing_masters, invalid_refs   plugin facts
+  itm              ITM records (reads the plugins: refused if one changed)
 
   navmesh          NAVM geometry (vertices, triangles, edge and door links)
                    and NAVI
