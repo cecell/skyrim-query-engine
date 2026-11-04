@@ -35,7 +35,8 @@ add_library(spf STATIC
     src/strings.cpp
     src/plugin.cpp
     src/db_schema.cpp
-    src/db_build.cpp)
+    src/db_build.cpp
+    src/itm.cpp)
 target_include_directories(spf PUBLIC src)
 target_link_libraries(spf PUBLIC sqlite3 PRIVATE bsa::reader)
 

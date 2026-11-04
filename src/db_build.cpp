@@ -20,6 +20,7 @@
 
 #include "pattern_value.h"
 #include "db_schema.h"
+#include "itm.h"
 #include "plugin.h"
 #include "sqlite3.h"
 
@@ -791,7 +792,15 @@ CREATE TABLE plugin_facts(
   deleted_navm     INTEGER,  -- deleted: deleted navmeshes
   missing_masters  INTEGER,  -- missing_masters: masters that are not in the load order
   invalid_refs     INTEGER,  -- invalid_refs: references to missing forms, held by forms something references
-  invalid_refs_all INTEGER   -- invalid_refs: every reference to a missing form
+  invalid_refs_all INTEGER,  -- invalid_refs: every reference to a missing form
+  itm              INTEGER   -- itm (off by default): ITM records; NULL when not known (a master is missing)
+);
+
+-- Extra itm (off by default): overrides identical to their masters' version.
+CREATE TABLE itm_forms(
+  form_key  INTEGER NOT NULL,
+  plugin_no INTEGER NOT NULL REFERENCES plugins,
+  type      TEXT NOT NULL
 );
 
 -- Extra invalid_refs: every reference to a form no plugin defines.
@@ -811,7 +820,8 @@ const char* kExtraTables[][3] = {
     {"fts_names", "fts_names",
      "Full-text index (words, prefixes) over form_names: SELECT n.* FROM fts_names JOIN form_names n ON n.id = "
      "fts_names.rowid WHERE fts_names MATCH 'iron sword'."},
-    {"plugin_facts", "eslable,deleted,missing_masters,invalid_refs",
+    {"itm_forms", "itm", "ITM records: overrides identical to the version in their masters (off by default)."},
+    {"plugin_facts", "eslable,deleted,missing_masters,invalid_refs,itm",
      "Facts per plugin: ESLable, master form count, deleted references, missing masters, invalid references."},
     {"invalid_refs", "invalid_refs",
      "References to forms no plugin defines. Most are leftovers in forms nothing uses: holder_referenced = 1 "
@@ -823,8 +833,18 @@ const char* kExtraTables[][3] = {
 
 std::string Quote(const std::string& name);
 
+// What an extra's builder works with.
+struct ExtraContext {
+    Db& db;
+    const Schema& schema;
+    const PatternCatalog& catalog;
+    int threads;
+};
+
 // Fills form_names and both indexes from forms and the type tables' FULL.
-bool BuildFtsNames(Db& db, const Schema& schema, std::string* error) {
+bool BuildFtsNames(ExtraContext& c, std::string* error) {
+    Db& db = c.db;
+    const Schema& schema = c.schema;
     std::string names;
     for (const auto& t : schema.tables()) {
         if (!t.fs.empty()) continue;
@@ -857,8 +877,8 @@ const char kFactRows[] = "INSERT OR IGNORE INTO plugin_facts(plugin_no) SELECT p
 // may use object IDs 0x000..0xFFF; older ones 0x800..0xFFF, but resaving in
 // the newer CK gives them a 1.71 header ("Save in CK"). Plugins that would
 // need compacting count as False.
-bool BuildEslable(Db& db, const Schema&, std::string* error) {
-    return db.Exec(std::string(kFactRows) + R"SQL(
+bool BuildEslable(ExtraContext& c, std::string* error) {
+    return c.db.Exec(std::string(kFactRows) + R"SQL(
 WITH own AS (
   SELECT plugin_no, count(*) AS n, min(form_key & 16777215) AS lo, max(form_key & 16777215) AS hi
   FROM forms WHERE form_key >> 24 = plugin_no GROUP BY plugin_no),
@@ -886,8 +906,8 @@ FROM s WHERE s.plugin_no = plugin_facts.plugin_no;
 
 // Deleted records: the placed-object types xEdit's "Undelete and Disable
 // References" handles, and navmeshes apart (as the shell extension counts).
-bool BuildDeleted(Db& db, const Schema&, std::string* error) {
-    return db.Exec(std::string(kFactRows) + R"SQL(
+bool BuildDeleted(ExtraContext& c, std::string* error) {
+    return c.db.Exec(std::string(kFactRows) + R"SQL(
 WITH d AS (
   SELECT plugin_no,
          sum(type IN ('ACHR','PARW','PBAR','PBEA','PCON','PFLA','PGRE','PHZD','PMIS','REFR')) AS refs,
@@ -900,8 +920,8 @@ WHERE d.plugin_no = plugin_facts.plugin_no;
                    error);
 }
 
-bool BuildMissingMasters(Db& db, const Schema&, std::string* error) {
-    return db.Exec(std::string(kFactRows) + R"SQL(
+bool BuildMissingMasters(ExtraContext& c, std::string* error) {
+    return c.db.Exec(std::string(kFactRows) + R"SQL(
 UPDATE plugin_facts SET missing_masters =
   (SELECT count(*) FROM plugin_masters m JOIN plugins x ON x.plugin_no = m.master_no
    WHERE m.plugin_no = plugin_facts.plugin_no AND x.load_order IS NULL);
@@ -912,8 +932,8 @@ UPDATE plugin_facts SET missing_masters =
 // References to forms no plugin defines. Most sit in forms their author
 // abandoned, which nothing uses: the filtered count keeps only those held by
 // a form another form references (removes 95%+ of the noise, LESSONS_LEARNED).
-bool BuildInvalidRefs(Db& db, const Schema&, std::string* error) {
-    return db.Exec(std::string(kFactRows) + R"SQL(
+bool BuildInvalidRefs(ExtraContext& c, std::string* error) {
+    return c.db.Exec(std::string(kFactRows) + R"SQL(
 DELETE FROM invalid_refs;
 INSERT INTO invalid_refs
 SELECT r.form_key, r.plugin_no, r.ref_key, r.path_id,
@@ -932,13 +952,82 @@ WHERE c.plugin_no = plugin_facts.plugin_no;
                    error);
 }
 
-// Extras: built from the database itself (no plugin is read), so they can be
-// skipped at build time and added later with db add. Built in this order.
+// ITM records: overrides identical to the version in their masters, compared
+// the way xEdit's Quick Auto Clean does (the plugin with its masters only, its
+// ignored fields and sorted arrays) but without its known false positives (an
+// added INFO PNAM or a DIAL subtype fix is a change: LESSONS_LEARNED). Reads
+// every plugin and its masters, so it refuses plugins changed since the build.
+bool BuildItm(ExtraContext& c, std::string* error) {
+    struct Job {
+        PluginInfo info;
+        std::vector<std::pair<int, bool>> masters;  // plugin_no, is_light
+        ItmResult result;
+    };
+    std::vector<Job> jobs;
+    {
+        Stmt q{c.db.Prepare("SELECT plugin_no, name, path, size, mtime, is_light FROM plugins "
+                            "WHERE load_order >= 0 AND path IS NOT NULL AND load_error IS NULL ORDER BY size DESC",
+                            error)};
+        Stmt m{c.db.Prepare("SELECT x.plugin_no, x.is_light FROM plugin_masters pm JOIN plugins x "
+                            "ON x.plugin_no = pm.master_no WHERE pm.plugin_no = ? ORDER BY pm.idx",
+                            error)};
+        if (!q.st || !m.st) return false;
+        while (sqlite3_step(q.st) == SQLITE_ROW) {
+            Job j;
+            j.info.no = sqlite3_column_int(q.st, 0);
+            j.info.name = reinterpret_cast<const char*>(sqlite3_column_text(q.st, 1));
+            j.info.path = Widen(reinterpret_cast<const char*>(sqlite3_column_text(q.st, 2)));
+            j.info.light = sqlite3_column_int(q.st, 5) != 0;
+            PluginInfo now = j.info;
+            ReadHeader(&now);
+            if (now.size != sqlite3_column_int64(q.st, 3) || now.mtime != sqlite3_column_int64(q.st, 4)) {
+                *error = j.info.name + " changed since the build; rebuild the database";
+                return false;
+            }
+            m.Int(1, j.info.no);
+            while (sqlite3_step(m.st) == SQLITE_ROW)
+                j.masters.emplace_back(sqlite3_column_int(m.st, 0), sqlite3_column_int(m.st, 1) != 0);
+            sqlite3_reset(m.st);
+            jobs.push_back(std::move(j));
+        }
+    }
+    int threads = c.threads > 0 ? c.threads : std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 1);
+    threads = std::min<int>(threads, static_cast<int>(jobs.size()));
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> pool;
+    for (int t = 0; t < threads; ++t) {
+        pool.emplace_back([&] {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            for (size_t i; (i = next++) < jobs.size();) jobs[i].result = FindItms(jobs[i].info.path, c.catalog);
+        });
+    }
+    for (auto& t : pool) t.join();
+
+    // Stored FormIDs to form keys, as the decoder computes them.
+    Stmt ins{c.db.Prepare("INSERT INTO itm_forms VALUES(?,?,?)", error)};
+    Stmt fact{c.db.Prepare("UPDATE plugin_facts SET itm = ? WHERE plugin_no = ?", error)};
+    if (!ins.st || !fact.st || !c.db.Exec(std::string(kFactRows) + "DELETE FROM itm_forms;", error)) return false;
+    for (const auto& j : jobs) {
+        if (!j.result.ok || !j.result.missingMasters.empty()) continue;  // itm stays NULL: not known
+        for (const auto& r : j.result.itms) {
+            size_t idx = r.formId >> 24;
+            bool light = idx < j.masters.size() ? j.masters[idx].second : j.info.light;
+            int64_t owner = idx < j.masters.size() ? j.masters[idx].first : j.info.no;
+            ins.Int(1, owner * 16777216 + (r.formId & (light ? 0xFFFu : 0xFFFFFFu))).Int(2, j.info.no).Text(3, r.type).Run();
+        }
+        fact.Int(1, static_cast<int64_t>(j.result.itms.size())).Int(2, j.info.no).Run();
+    }
+    return true;
+}
+
+// Extras: built after the core tables (from the database; itm also reads the
+// plugins), so they can be skipped at build time and added later with db add.
+// Built in this order.
 struct Extra {
     const char* name;
     const char* description;
     bool byDefault;
-    bool (*build)(Db& db, const Schema& schema, std::string* error);
+    bool (*build)(ExtraContext& c, std::string* error);
 };
 const Extra kExtras[] = {
     {"fts_names", "full-text search over editor IDs and names: fts_names (words), fts_names_tri (substrings)", true,
@@ -947,6 +1036,8 @@ const Extra kExtras[] = {
     {"deleted", "per plugin: deleted placed objects and deleted navmeshes", true, BuildDeleted},
     {"missing_masters", "per plugin: masters that are not in the load order", true, BuildMissingMasters},
     {"invalid_refs", "references to forms no plugin defines, with the noise filter", true, BuildInvalidRefs},
+    {"itm", "ITM records (identical to master); reads every plugin and its masters, so off by default", false,
+     BuildItm},
 };
 
 bool IsExtra(const std::string& name) {
@@ -956,11 +1047,11 @@ bool IsExtra(const std::string& name) {
 }
 
 // Builds the extras asked for, in kExtras order.
-bool BuildExtras(Db& db, const Schema& schema, const std::set<std::string>& extras,
-                 const std::function<void(const char*)>& done, std::string* error) {
+bool BuildExtras(ExtraContext& c, const std::set<std::string>& extras, const std::function<void(const char*)>& done,
+                 std::string* error) {
     for (const auto& e : kExtras) {
         if (!extras.count(e.name)) continue;
-        if (!e.build(db, schema, error)) return false;
+        if (!e.build(c, error)) return false;
         done(e.name);
     }
     return true;
@@ -1489,7 +1580,8 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         say("indexes");
         if (!db.Exec(kWinners, error)) return 1;
         say("winners");
-        if (!BuildExtras(db, schema, extras, [&](const char* name) { say("%s", name); }, error)) return 1;
+        ExtraContext ctx{db, schema, catalog, opt.threads};
+        if (!BuildExtras(ctx, extras, [&](const char* name) { say("%s", name); }, error)) return 1;
         sql = kViews;
         for (const auto& t : schema.tables()) {
             if (!t.fs.empty()) continue;
@@ -1747,7 +1839,8 @@ int AddModules(const AddOptions& opt, std::string* error) {
     } else if (!db.Exec("PRAGMA temp_store=MEMORY; BEGIN", error)) {
         return 1;
     }
-    if (!BuildExtras(db, schema, extras, [&](const char* name) { say("%s", name); }, error)) {
+    ExtraContext ctx{db, schema, catalog, opt.threads};
+    if (!BuildExtras(ctx, extras, [&](const char* name) { say("%s", name); }, error)) {
         std::string ignored;
         db.Exec("ROLLBACK", &ignored);
         return 1;
