@@ -763,7 +763,77 @@ CREATE TABLE st_columns(
   notes       TEXT,
   PRIMARY KEY(table_name, column_name)
 ) WITHOUT ROWID;
+
+-- Extra fts_names (on by default): every form occurrence's editor ID and
+-- name, with two full-text indexes over them: fts_names (words, prefixes)
+-- and fts_names_tri (substrings of 3+ characters).
+CREATE TABLE form_names(
+  id        INTEGER PRIMARY KEY,
+  form_key  INTEGER NOT NULL,
+  plugin_no INTEGER NOT NULL,
+  edid      TEXT,
+  name      TEXT
+);
+CREATE VIRTUAL TABLE fts_names USING fts5(edid, name, content='form_names', content_rowid='id',
+  tokenize='unicode61 remove_diacritics 2');
+CREATE VIRTUAL TABLE fts_names_tri USING fts5(edid, name, content='form_names', content_rowid='id',
+  tokenize='trigram remove_diacritics 1');
 )SQL";
+
+// Extras: built from the database itself (no plugin is read), so they can be
+// skipped at build time and added later with db add.
+struct Extra {
+    const char* name;
+    const char* description;
+    bool byDefault;
+};
+const Extra kExtras[] = {
+    {"fts_names", "full-text search over editor IDs and names: fts_names (words), fts_names_tri (substrings)", true},
+};
+
+const char* kExtraTables[][3] = {
+    {"form_names", "fts_names", "Every form occurrence's editor ID and name (FULL): the text fts_names and fts_names_tri index."},
+    {"fts_names", "fts_names",
+     "Full-text index (words, prefixes) over form_names: SELECT n.* FROM fts_names JOIN form_names n ON n.id = "
+     "fts_names.rowid WHERE fts_names MATCH 'iron sword'."},
+    {"fts_names_tri", "fts_names",
+     "Substring index over form_names: ... JOIN form_names n ON n.id = fts_names_tri.rowid WHERE fts_names_tri "
+     "MATCH 'onswo' (3+ characters)."},
+};
+
+bool IsExtra(const std::string& name) {
+    for (const auto& e : kExtras)
+        if (name == e.name) return true;
+    return false;
+}
+
+std::string Quote(const std::string& name);
+
+// Fills form_names and both indexes from forms and the type tables' FULL.
+bool BuildFtsNames(Db& db, const Schema& schema, std::string* error) {
+    std::string names;
+    for (const auto& t : schema.tables()) {
+        if (!t.fs.empty()) continue;
+        for (const auto& c : t.columns)
+            if (c.path == "FULL")
+                names += (names.empty() ? "" : " UNION ALL ") + std::string("SELECT form_key, plugin_no, ") +
+                         Quote(c.name) + " FROM " + Quote(t.name) + " WHERE " + Quote(c.name) +
+                         " NOT LIKE '[LSTRING:%'";  // unresolved (no strings file): not text to search
+    }
+    std::string sql =
+        "CREATE TEMP TABLE full_names(form_key INTEGER, plugin_no INTEGER, name TEXT, PRIMARY KEY(form_key, plugin_no)) "
+        "WITHOUT ROWID;\n";
+    if (!names.empty()) sql += "INSERT OR IGNORE INTO full_names " + names + ";\n";
+    sql += "DELETE FROM form_names;\n"
+           "INSERT INTO form_names(form_key, plugin_no, edid, name) "
+           "SELECT f.form_key, f.plugin_no, f.edid, n.name FROM forms f "
+           "LEFT JOIN full_names n ON n.form_key = f.form_key AND n.plugin_no = f.plugin_no "
+           "WHERE f.edid IS NOT NULL OR n.name IS NOT NULL ORDER BY f.form_key, f.plugin_no;\n"
+           "DROP TABLE full_names;\n"
+           "INSERT INTO fts_names(fts_names) VALUES('rebuild');\n"
+           "INSERT INTO fts_names_tri(fts_names_tri) VALUES('rebuild');\n";
+    return db.Exec(sql, error);
+}
 
 const char* kCoreTables[][2] = {
     {"plugins", "Every plugin in the load order, plus masters it lacks (load_order NULL) and SkyrimSE.exe (load_order -1, the engine's own forms). load_error: why a plugin could not be read (it then has no rows)."},
@@ -1011,14 +1081,24 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
     Schema schema;
     schema.Build(catalog, UsableName);
     std::set<std::string> modules;  // optional modules built too (--with)
+    std::set<std::string> extras;   // extras built (default ones unless --skip)
+    for (const auto& e : kExtras)
+        if (e.byDefault) extras.insert(e.name);
     for (const auto& m : opt.modules) {
-        bool known = false;
+        bool known = IsExtra(m);
         for (const auto& km : Schema::Modules()) known = known || km.first == m;
         if (!known) {
             *error = "unknown module '" + m + "' (spf build-db --help lists them)";
             return 2;
         }
-        modules.insert(m);
+        (IsExtra(m) ? extras : modules).insert(m);
+    }
+    for (const auto& s : opt.skip) {
+        if (!IsExtra(s)) {
+            *error = "--skip: '" + s + "' is not an extra (spf build-db --help lists them)";
+            return 2;
+        }
+        extras.erase(s);
     }
 
     // Phase 1: load order and headers.
@@ -1270,6 +1350,10 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         say("indexes");
         if (!db.Exec(kWinners, error)) return 1;
         say("winners");
+        if (extras.count("fts_names")) {
+            if (!BuildFtsNames(db, schema, error)) return 1;
+            say("fts_names");
+        }
         sql = kViews;
         for (const auto& t : schema.tables()) {
             if (!t.fs.empty()) continue;
@@ -1284,6 +1368,8 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         if (!insT.st || !insC.st) return 1;
         for (const auto& ct : kCoreTables)
             insT.Text(1, ct[0]).Text(2, "core").Null(3).Null(4).Null(5).Text(6, ct[1]).Run();
+        for (const auto& et : kExtraTables)
+            insT.Text(1, et[0]).Text(2, "extra").Null(3).Null(4).Text(5, et[1]).Text(6, et[2]).Run();
         if (!db.Exec("INSERT INTO st_columns SELECT m.table_name, p.name, p.cid, p.type, NULL, NULL, NULL, NULL, NULL, NULL "
                      "FROM st_tables m, pragma_table_info(m.table_name) p;"
                      "UPDATE st_columns SET notes = '" + std::string(kBlobNote) + "' "
@@ -1339,11 +1425,14 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         std::string skipped;
         for (const auto& m : Schema::Modules())
             if (!modules.count(m.first)) skipped += (skipped.empty() ? "" : ",") + m.first;
+        for (const auto& e : kExtras)
+            if (!extras.count(e.name)) skipped += (skipped.empty() ? "" : ",") + std::string(e.name);
         putMeta("modules_not_built", skipped);
         putMeta("plugins_failed", std::to_string(failed.size()));
         Stmt mod{db.Prepare("INSERT INTO spf_modules VALUES(?, ?, NULL)", error)};
         mod.Text(1, "core").Text(2, NowIso()).Run();
         for (const auto& m : modules) mod.Text(1, m).Text(2, NowIso()).Run();
+        for (const auto& e : extras) mod.Text(1, e).Text(2, NowIso()).Run();
         if (!db.Exec("COMMIT; ANALYZE;", error)) return 1;
         say("committed");
     }
@@ -1399,10 +1488,10 @@ int AddModules(const AddOptions& opt, std::string* error) {
     Schema schema;
     schema.Build(catalog, UsableName);
 
-    // The modules asked for: known, and not built yet.
-    std::set<std::string> modules;
+    // The modules (and extras) asked for: known, and not built yet.
+    std::set<std::string> modules, extras;
     for (const auto& m : opt.modules) {
-        bool known = false;
+        bool known = IsExtra(m);
         for (const auto& km : Schema::Modules()) known = known || km.first == m;
         if (!known) {
             *error = "unknown module '" + m + "' (spf db add --help lists them)";
@@ -1412,114 +1501,129 @@ int AddModules(const AddOptions& opt, std::string* error) {
         if (!q.st) return 1;
         q.Text(1, m);
         if (sqlite3_step(q.st) == SQLITE_ROW) {
-            *error = "module " + m + " is already built";
+            *error = m + " is already built";
             return 1;
         }
-        modules.insert(m);
+        (IsExtra(m) ? extras : modules).insert(m);
     }
-    if (modules.empty()) {
+    if (modules.empty() && extras.empty()) {
         *error = "no module given";
         return 2;
     }
 
-    // The plugins as the build recorded them; any that changed since refuse
-    // the add (their core rows would no longer match the new module rows).
-    std::vector<PluginInfo> all;
-    std::unordered_map<std::string, int> noByName;
-    std::vector<int> work;
-    std::vector<std::string> changed;
-    {
-        Stmt q{db.Prepare("SELECT plugin_no, name, load_order, is_light, file_exists, path, size, mtime, load_error "
-                          "FROM plugins ORDER BY plugin_no",
-                          error)};
-        if (!q.st) return 1;
-        while (sqlite3_step(q.st) == SQLITE_ROW) {
-            PluginInfo p;
-            p.no = sqlite3_column_int(q.st, 0);
-            p.name = reinterpret_cast<const char*>(sqlite3_column_text(q.st, 1));
-            p.inLoadOrder = sqlite3_column_type(q.st, 2) != SQLITE_NULL && sqlite3_column_int(q.st, 2) >= 0;
-            p.light = sqlite3_column_int(q.st, 3) != 0;
-            p.exists = sqlite3_column_int(q.st, 4) != 0;
-            if (sqlite3_column_text(q.st, 5)) p.path = Widen(reinterpret_cast<const char*>(sqlite3_column_text(q.st, 5)));
-            p.size = sqlite3_column_int64(q.st, 6);
-            p.mtime = sqlite3_column_int64(q.st, 7);
-            bool failed = sqlite3_column_type(q.st, 8) != SQLITE_NULL;
-            if (p.no != static_cast<int>(all.size())) {
-                *error = "the plugins table is not numbered 0..n-1";
-                return 1;
+    // Modules re-read their subrecords from the plugins; extras need only
+    // the database.
+    if (!modules.empty()) {
+        // The plugins as the build recorded them; any that changed since refuse
+        // the add (their core rows would no longer match the new module rows).
+        std::vector<PluginInfo> all;
+        std::unordered_map<std::string, int> noByName;
+        std::vector<int> work;
+        std::vector<std::string> changed;
+        {
+            Stmt q{db.Prepare("SELECT plugin_no, name, load_order, is_light, file_exists, path, size, mtime, load_error "
+                              "FROM plugins ORDER BY plugin_no",
+                              error)};
+            if (!q.st) return 1;
+            while (sqlite3_step(q.st) == SQLITE_ROW) {
+                PluginInfo p;
+                p.no = sqlite3_column_int(q.st, 0);
+                p.name = reinterpret_cast<const char*>(sqlite3_column_text(q.st, 1));
+                p.inLoadOrder = sqlite3_column_type(q.st, 2) != SQLITE_NULL && sqlite3_column_int(q.st, 2) >= 0;
+                p.light = sqlite3_column_int(q.st, 3) != 0;
+                p.exists = sqlite3_column_int(q.st, 4) != 0;
+                if (sqlite3_column_text(q.st, 5)) p.path = Widen(reinterpret_cast<const char*>(sqlite3_column_text(q.st, 5)));
+                p.size = sqlite3_column_int64(q.st, 6);
+                p.mtime = sqlite3_column_int64(q.st, 7);
+                bool failed = sqlite3_column_type(q.st, 8) != SQLITE_NULL;
+                if (p.no != static_cast<int>(all.size())) {
+                    *error = "the plugins table is not numbered 0..n-1";
+                    return 1;
+                }
+                noByName[Lower(p.name)] = p.no;
+                if (p.inLoadOrder && p.exists && !failed) {
+                    PluginInfo now = p;
+                    ReadHeader(&now);
+                    if (now.size != p.size || now.mtime != p.mtime) changed.push_back(p.name);
+                    work.push_back(p.no);
+                }
+                all.push_back(std::move(p));
             }
-            noByName[Lower(p.name)] = p.no;
-            if (p.inLoadOrder && p.exists && !failed) {
-                PluginInfo now = p;
-                ReadHeader(&now);
-                if (now.size != p.size || now.mtime != p.mtime) changed.push_back(p.name);
-                work.push_back(p.no);
-            }
-            all.push_back(std::move(p));
         }
-    }
-    if (!changed.empty()) {
-        *error = std::to_string(changed.size()) + " plugin(s) changed since the build (first: " + changed[0] +
-                 "); rebuild the database";
+        if (!changed.empty()) {
+            *error = std::to_string(changed.size()) + " plugin(s) changed since the build (first: " + changed[0] +
+                     "); rebuild the database";
+            return 1;
+        }
+        std::sort(work.begin(), work.end(), [&](int a, int b) { return all[a].size > all[b].size; });
+        const std::string language = metaValue("language").empty() ? "english" : metaValue("language");
+
+        // One transaction: a failure leaves the database as it was.
+        if (!db.Exec("PRAGMA cache_size=-262144; PRAGMA temp_store=MEMORY; BEGIN", error)) return 1;
+        RowSink sink;
+        if (!sink.Prepare(db, schema, error) || !sink.LoadPaths(db, error)) return 1;
+
+        int threads = opt.threads > 0 ? opt.threads : std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 1);
+        threads = std::min<int>(threads, static_cast<int>(work.size()));
+        BatchQueue queue;
+        queue.SetProducers(threads);
+        std::atomic<size_t> nextWork{0};
+        std::vector<std::thread> pool;
+        for (int t = 0; t < threads; ++t) {
+            pool.emplace_back([&] {
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                for (size_t w; (w = nextWork++) < work.size();) {
+                    std::string failure;
+                    try {
+                        DecodePlugin(all[work[w]], all, noByName, language, catalog, schema, modules, false, &queue);
+                    } catch (const std::exception& e) {
+                        failure = e.what();
+                    } catch (...) {
+                        failure = "unexpected error";
+                    }
+                    if (!failure.empty()) {
+                        Batch fail;
+                        fail.pluginNo = all[work[w]].no;
+                        fail.last = true;
+                        fail.error = "failed while decoding: " + failure;
+                        queue.Push(std::move(fail));
+                    }
+                }
+                queue.ProducerDone();
+            });
+        }
+        std::string list;
+        for (const auto& m : modules) list += (list.empty() ? "" : ",") + m;
+        say("adding %s from %zu plugins with %d threads", list.c_str(), work.size(), threads);
+        std::string firstError;
+        Batch b;
+        while (queue.Pop(&b)) {
+            sink.Write(db, b.rows, &firstError);
+            if (b.last && !b.error.empty() && firstError.empty()) firstError = all[b.pluginNo].name + ": " + b.error;
+        }
+        for (auto& t : pool) t.join();
+        if (!firstError.empty()) {
+            db.Exec("ROLLBACK", error);
+            *error = firstError + " (nothing was added)";
+            return 1;
+        }
+        say("wrote %lld rows, %lld references", static_cast<long long>(sink.rows), static_cast<long long>(sink.refs));
+    } else if (!db.Exec("PRAGMA temp_store=MEMORY; BEGIN", error)) {
         return 1;
     }
-    std::sort(work.begin(), work.end(), [&](int a, int b) { return all[a].size > all[b].size; });
-    const std::string language = metaValue("language").empty() ? "english" : metaValue("language");
-
-    // One transaction: a failure leaves the database as it was.
-    if (!db.Exec("PRAGMA cache_size=-262144; PRAGMA temp_store=MEMORY; BEGIN", error)) return 1;
-    RowSink sink;
-    if (!sink.Prepare(db, schema, error) || !sink.LoadPaths(db, error)) return 1;
-
-    int threads = opt.threads > 0 ? opt.threads : std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 1);
-    threads = std::min<int>(threads, static_cast<int>(work.size()));
-    BatchQueue queue;
-    queue.SetProducers(threads);
-    std::atomic<size_t> nextWork{0};
-    std::vector<std::thread> pool;
-    for (int t = 0; t < threads; ++t) {
-        pool.emplace_back([&] {
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-            for (size_t w; (w = nextWork++) < work.size();) {
-                std::string failure;
-                try {
-                    DecodePlugin(all[work[w]], all, noByName, language, catalog, schema, modules, false, &queue);
-                } catch (const std::exception& e) {
-                    failure = e.what();
-                } catch (...) {
-                    failure = "unexpected error";
-                }
-                if (!failure.empty()) {
-                    Batch fail;
-                    fail.pluginNo = all[work[w]].no;
-                    fail.last = true;
-                    fail.error = "failed while decoding: " + failure;
-                    queue.Push(std::move(fail));
-                }
-            }
-            queue.ProducerDone();
-        });
+    if (extras.count("fts_names")) {
+        if (!BuildFtsNames(db, schema, error)) {
+            std::string ignored;
+            db.Exec("ROLLBACK", &ignored);
+            return 1;
+        }
+        say("fts_names");
     }
-    std::string list;
-    for (const auto& m : modules) list += (list.empty() ? "" : ",") + m;
-    say("adding %s from %zu plugins with %d threads", list.c_str(), work.size(), threads);
-    std::string firstError;
-    Batch b;
-    while (queue.Pop(&b)) {
-        sink.Write(db, b.rows, &firstError);
-        if (b.last && !b.error.empty() && firstError.empty()) firstError = all[b.pluginNo].name + ": " + b.error;
-    }
-    for (auto& t : pool) t.join();
-    if (!firstError.empty()) {
-        db.Exec("ROLLBACK", error);
-        *error = firstError + " (nothing was added)";
-        return 1;
-    }
-    say("wrote %lld rows, %lld references", static_cast<long long>(sink.rows), static_cast<long long>(sink.refs));
 
     Stmt mod{db.Prepare("INSERT INTO spf_modules VALUES(?, ?, NULL)", error)};
     if (!mod.st) return 1;
     for (const auto& m : modules) mod.Text(1, m).Text(2, NowIso()).Run();
+    for (const auto& e : extras) mod.Text(1, e).Text(2, NowIso()).Run();
     std::string notBuilt;
     {
         Stmt q{db.Prepare("SELECT name FROM spf_modules", error)};
@@ -1528,6 +1632,8 @@ int AddModules(const AddOptions& opt, std::string* error) {
         while (sqlite3_step(q.st) == SQLITE_ROW) built.insert(reinterpret_cast<const char*>(sqlite3_column_text(q.st, 0)));
         for (const auto& m : Schema::Modules())
             if (!built.count(m.first)) notBuilt += (notBuilt.empty() ? "" : ",") + m.first;
+        for (const auto& e : kExtras)
+            if (!built.count(e.name)) notBuilt += (notBuilt.empty() ? "" : ",") + std::string(e.name);
     }
     Stmt meta{db.Prepare("UPDATE spf_meta SET value=? WHERE key='modules_not_built'", error)};
     if (!meta.st) return 1;
