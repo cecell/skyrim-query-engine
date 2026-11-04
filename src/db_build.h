@@ -41,6 +41,13 @@ struct AddOptions {
 // Refuses when a plugin changed since the build (rebuild, or sync later).
 int AddModules(const AddOptions& opt, std::string* error);
 
+// The load order build-db uses (base masters, Skyrim.ccc, plugins.txt's
+// active plugins or every plugin; masters first), for other builders.
+// `present`, when given, lists the plugins the Data folder holds (file name,
+// full path) instead of listing opt.data: an MO2 virtual Data.
+std::vector<std::string> LoadOrder(const BuildOptions& opt, const std::vector<std::pair<std::string, std::wstring>>* present,
+                                   std::string* error);
+
 // The optional modules and what each holds.
 std::vector<std::pair<std::string, std::string>> AvailableModules();
 
