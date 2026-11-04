@@ -15,11 +15,12 @@ FetchContent_Declare(bsa_reader
     GIT_TAG bbff0cbc5cd04d39bb3b50c470c579669c027dbf)  # v0.1.1
 FetchContent_MakeAvailable(bsa_reader)
 # beth-asset-metadata (GPL-3.0, github.com/cecell/beth-asset-metadata): DDS,
-# TGA, NIF, WAV / XWM / FUZ header facts for build-assets. Pinned to the
-# commit of tag v0.1.0; changes go to that repo, then bump this pin.
+# TGA, NIF (header and texture paths), WAV / XWM / FUZ header facts for
+# build-assets. Pinned to the commit of tag v0.3.0; changes go to that repo,
+# then bump this pin.
 FetchContent_Declare(asset_metadata
     GIT_REPOSITORY https://github.com/cecell/beth-asset-metadata.git
-    GIT_TAG b85a3b30a932218ac076ae9d29d7946765d4bba3)  # v0.1.0
+    GIT_TAG 675c9540e88c3d926b5eaf52178ac38a4ba656e8)  # v0.3.0
 FetchContent_MakeAvailable(asset_metadata)
 
 add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)

@@ -509,53 +509,6 @@ void TestTri() {
     }
 }
 
-Bytes SizedString(const char* s) { return Bytes().u32(static_cast<uint32_t>(strlen(s))).raw(s, strlen(s)); }
-
-Bytes SkyrimNif() {
-    Bytes set;
-    set.u32(3).add(SizedString("textures\\armor\\a.dds")).add(SizedString("")).add(SizedString("Armor\\A_n.dds"));
-    Bytes fx;
-    fx.u32(0).u32(0).u32(0xFFFFFFFF).u32(0).u32(0).f32(0).f32(0).f32(1).f32(1);
-    fx.add(SizedString("effects\\glow.dds")).u8(3).u8(0).u8(0).u8(0);
-    for (int i = 0; i < 4 + 4 + 2; ++i) fx.f32(1);
-    fx.add(SizedString("effects\\gradient.dds"));
-    Bytes n;
-    const char line[] = "Gamebryo File Format, Version 20.2.0.7\n";
-    n.raw(line, strlen(line)).u32(0x14020007).u8(1).u32(12).u32(3);
-    n.u32(100).u8(1).u8(0).u8(1).u8(0).u8(1).u8(0);  // BS header: author, process, export
-    n.u16(3).add(SizedString("NiNode")).add(SizedString("BSShaderTextureSet")).add(SizedString("BSEffectShaderProperty"));
-    n.u16(0).u16(1).u16(2);
-    n.u32(4).u32(static_cast<uint32_t>(set.size())).u32(static_cast<uint32_t>(fx.size()));
-    n.u32(0).u32(0).u32(0);  // strings, max length, groups
-    n.u32(0).add(set).add(fx);
-    return n;
-}
-
-void TestNifTextures() {
-    Bytes n = SkyrimNif();
-    std::vector<assets::NifTexture> tex;
-    std::string err;
-    CHECK(assets::ReadNifTextures(n.b.data(), n.size(), &tex, &err) && err.empty());
-    CHECK(tex.size() == 4);
-    if (tex.size() == 4) {
-        CHECK(tex[0].block == "BSShaderTextureSet" && tex[0].slot == 0 && tex[0].path == "textures\\armor\\a.dds");
-        CHECK(tex[1].slot == 2 && assets::NormalizeTexturePath(tex[1].path) == "textures\\armor\\a_n.dds");
-        CHECK(tex[2].block == "BSEffectShaderProperty" && tex[2].slot == 0 && tex[2].path == "effects\\glow.dds");
-        CHECK(tex[3].slot == 1 && tex[3].path == "effects\\gradient.dds");
-    }
-    int refused = 0;
-    for (size_t k = 0; k < n.size(); ++k) {
-        std::vector<assets::NifTexture> t;
-        std::string e;
-        if (!assets::ReadNifTextures(n.b.data(), k, &t, &e)) ++refused;
-    }
-    CHECK(refused == static_cast<int>(n.size()));  // the last block is cut in every prefix
-    Bytes huge = SkyrimNif();
-    huge.b[huge.size() - 60] = 0xFF;  // a texture string length in the effect block
-    std::vector<assets::NifTexture> t;
-    assets::ReadNifTextures(huge.b.data(), huge.size(), &t, &err);
-    CHECK(t.size() <= 4);
-}
 
 // ---- End to end: a Data folder, staging folders, an MO2 instance ----
 
@@ -824,7 +777,6 @@ int wmain(int argc, wchar_t** argv) {
     TestPex();
     TestHkx();
     TestTri();
-    TestNifTextures();
     TestBuildAssetsStaging();
     TestBuildAssetsMo2();
     printf("%d passed, %d failed\n", g_passed, g_failed);

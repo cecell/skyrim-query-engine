@@ -731,10 +731,10 @@ bool BuildFtsNames(ExtraContext& c, std::string* error) {
     std::string names;
     for (const auto& t : schema.tables()) {
         if (!t.fs.empty()) continue;
-        for (const auto& c : t.columns)
-            if (c.path == "FULL")
+        for (const auto& col : t.columns)
+            if (col.path == "FULL")
                 names += (names.empty() ? "" : " UNION ALL ") + std::string("SELECT form_key, plugin_no, ") +
-                         Quote(c.name) + " FROM " + Quote(t.name) + " WHERE " + Quote(c.name) +
+                         Quote(col.name) + " FROM " + Quote(t.name) + " WHERE " + Quote(col.name) +
                          " NOT LIKE '[LSTRING:%'";  // unresolved (no strings file): not text to search
     }
     std::string sql =
