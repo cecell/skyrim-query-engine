@@ -102,20 +102,22 @@ std::string NormalizePath(const std::string& utf8) {
     return s.substr(lead);
 }
 
-std::string NormalizeTexturePath(const std::string& raw) {
+std::string NormalizeAssetPath(const std::string& raw, const std::string& root) {
     std::string s = NormalizePath(raw);
     while (!s.empty() && (s.back() == ' ' || s.back() == '\\')) s.pop_back();
     size_t lead = 0;
     while (lead < s.size() && (s[lead] == ' ' || s[lead] == '\\')) ++lead;
     s.erase(0, lead);
     if (s.empty()) return s;
-    // Absolute or Data-relative paths left by exporters: keep from textures\.
-    size_t t = s.find("\\textures\\");
-    if (!StartsWith(s, "textures\\") && t != std::string::npos) s.erase(0, t + 1);
+    // Absolute or Data-relative paths left by exporters: keep from the root.
+    size_t t = root.empty() ? std::string::npos : s.find("\\" + root);
+    if (!root.empty() && !StartsWith(s, root.c_str()) && t != std::string::npos) s.erase(0, t + 1);
     if (StartsWith(s, "data\\")) s.erase(0, 5);
-    if (!StartsWith(s, "textures\\")) s = "textures\\" + s;
+    if (!root.empty() && !StartsWith(s, root.c_str())) s = root + s;
     return s;
 }
+
+std::string NormalizeTexturePath(const std::string& raw) { return NormalizeAssetPath(raw, "textures\\"); }
 
 PathParts SplitPath(const std::string& path) {
     PathParts p;

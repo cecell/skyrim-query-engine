@@ -13,6 +13,7 @@
 #include <deque>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -20,6 +21,7 @@
 
 #include "pattern_value.h"
 #include "db_schema.h"
+#include "asset_readers.h"
 #include "db_util.h"
 #include "itm.h"
 #include "plugin.h"
@@ -679,6 +681,16 @@ CREATE TABLE plugin_facts(
   itm              INTEGER   -- itm (off by default): ITM records; NULL when not known (a master is missing)
 );
 
+-- Extra asset_refs: every file a form names (models, textures, sounds,
+-- scripts), normalized like assets.db paths (lower case, backslashes,
+-- relative to Data), so the two join on path. field -> ref_paths.
+CREATE TABLE asset_refs(
+  form_key  INTEGER NOT NULL,
+  plugin_no INTEGER NOT NULL REFERENCES plugins,
+  path      TEXT NOT NULL,
+  path_id   INTEGER NOT NULL REFERENCES ref_paths
+);
+
 -- Extra itm (off by default): overrides identical to their masters' version.
 CREATE TABLE itm_forms(
   form_key  INTEGER NOT NULL,
@@ -704,6 +716,10 @@ const char* kExtraTables[][3] = {
      "Full-text index (words, prefixes) over form_names: SELECT n.* FROM fts_names JOIN form_names n ON n.id = "
      "fts_names.rowid WHERE fts_names MATCH 'iron sword'."},
     {"itm_forms", "itm", "ITM records: overrides identical to the version in their masters (off by default)."},
+    {"asset_refs", "asset_refs",
+     "Every file a form names: path normalized like assets.db (lower case, backslashes, from Data: meshes\\..., "
+     "textures\\..., sound\\..., scripts\\<name>.pex); path_id -> ref_paths (the field). Sound fields name .wav; "
+     "the game also plays .xwm / .fuz of the same name."},
     {"plugin_facts", "eslable,deleted,missing_masters,invalid_refs,itm",
      "Facts per plugin: ESLable, master form count, deleted references, missing masters, invalid references."},
     {"invalid_refs", "invalid_refs",
@@ -912,6 +928,125 @@ bool BuildItm(ExtraContext& c, std::string* error) {
     return true;
 }
 
+// The folder a plugin field's file path is relative to, or nullptr when the
+// field holds no path. Measured on a full install: each field's values
+// resolve to existing files with this root. Left out on purpose: BPTD's
+// "base meshes\..." names (the CK's source files) and TES4.MAST (masters).
+const char* AssetRoot(const std::string& rt, const std::string& field) {
+    static const std::set<std::string> kMeshes = {"MODL", "MOD2", "MOD3", "MOD4", "MOD5", "DMDL"};
+    static const std::set<std::string> kTextures = {"ICON", "ICO2", "MICO", "MIC2"};
+    static const std::map<std::string, const char*> kTyped = {
+        {"TXST.TX00", "textures\\"}, {"TXST.TX01", "textures\\"}, {"TXST.TX02", "textures\\"},
+        {"TXST.TX03", "textures\\"}, {"TXST.TX04", "textures\\"}, {"TXST.TX05", "textures\\"},
+        {"TXST.TX06", "textures\\"}, {"TXST.TX07", "textures\\"}, {"EFSH.NAM7", "textures\\"},
+        {"EFSH.NAM8", "textures\\"}, {"EFSH.NAM9", "textures\\"}, {"CLMT.FNAM", "textures\\"},
+        {"CLMT.GNAM", "textures\\"}, {"CELL.XWEM", "textures\\"}, {"WRLD.XWEM", "textures\\"},
+        {"WRLD.TNAM", "textures\\"}, {"WRLD.UNAM", "textures\\"}, {"WATR.NAM2", "textures\\"},
+        {"WATR.NAM3", "textures\\"}, {"WATR.NAM4", "textures\\"}, {"WATR.NAM5", "textures\\"},
+        {"WATR.NNAM", "textures\\"}, {"WTHR.ANAM", "textures\\"}, {"WTHR.BNAM", "textures\\"},
+        {"WTHR.CNAM", "textures\\"}, {"WTHR.DNAM", "textures\\"}, {"RACE.TINT", "textures\\"},
+        {"RACE.ANAM", "meshes\\"},   {"HDPT.NAM1", "meshes\\"},   {"PROJ.NAM1", "meshes\\"},
+        {"IDLE.DNAM", "meshes\\"},   {"STAT.MNAM", "meshes\\"},   {"DEBR.DATA[1]", "meshes\\"},
+        {"FURN.XMRK", "meshes\\"},   {"SNDR.ANAM", "sound\\"},    {"SOUN.FNAM", "sound\\"},
+        {"MUST.ANAM", "music\\"},    {"MUST.BNAM", "music\\"},
+    };
+    if (kMeshes.count(field)) return "meshes\\";
+    if (kTextures.count(field)) return "textures\\";
+    if (rt == "WTHR" && field.size() == 4 && field.compare(1, 3, "0TX") == 0) return "textures\\";  // cloud layers
+    auto it = kTyped.find(rt + "." + field);
+    return it == kTyped.end() ? nullptr : it->second;
+}
+
+// Script names in a decoded VMAD (scripts list or fragments). A script entry
+// is [name, status, property count, properties]; a fragments block names its
+// script file first, and each fragment entry ends [..., script, function].
+void ScriptNames(const Value& v, bool fragmentsRoot, std::vector<std::string>* out) {
+    if (v.kind() != Value::Kind::List) return;
+    const auto& it = v.Items();
+    static const std::set<std::string> kStatus = {"Local", "Inherited", "Removed", "Inherited and Removed"};
+    if (it.size() >= 4 && it[0].kind() == Value::Kind::String && it[1].kind() == Value::Kind::String &&
+        kStatus.count(it[1].AsString()) && it[3].kind() == Value::Kind::List) {
+        out->push_back(it[0].AsString());
+        return;  // its properties hold no script names
+    }
+    if (fragmentsRoot) {
+        for (const auto& x : it)
+            if (x.kind() == Value::Kind::String) {
+                if (!x.AsString().empty()) out->push_back(x.AsString());
+                break;
+            }
+        for (const auto& x : it) {  // fragment lists: [..., script, function]
+            if (x.kind() != Value::Kind::List) continue;
+            for (const auto& e : x.Items()) {
+                if (e.kind() != Value::Kind::List) continue;
+                std::vector<const std::string*> strs;
+                for (const auto& s : e.Items())
+                    if (s.kind() == Value::Kind::String) strs.push_back(&s.AsString());
+                if (strs.size() >= 2 && !strs[strs.size() - 2]->empty()) out->push_back(*strs[strs.size() - 2]);
+            }
+        }
+    }
+    for (const auto& x : it) ScriptNames(x, false, out);
+}
+
+void Strings(const Value& v, std::vector<std::string>* out) {
+    if (v.kind() == Value::Kind::String) out->push_back(v.AsString());
+    else if (v.kind() == Value::Kind::List)
+        for (const auto& x : v.Items()) Strings(x, out);
+}
+
+// asset_refs from the path fields of the type and child tables and from
+// VMAD script names (Scripts\<name>.pex).
+bool BuildAssetRefs(ExtraContext& c, std::string* error) {
+    if (!c.db.Exec("DELETE FROM asset_refs;", error)) return false;
+    Stmt ins{c.db.Prepare("INSERT INTO asset_refs VALUES(?,?,?,?)", error)};
+    Stmt addPath{c.db.Prepare("INSERT OR IGNORE INTO ref_paths(type, path) VALUES(?,?)", error)};
+    Stmt getPath{c.db.Prepare("SELECT path_id FROM ref_paths WHERE type = ? AND path = ?", error)};
+    if (!ins.st || !addPath.st || !getPath.st) return false;
+    for (const auto& t : c.schema.tables()) {
+        for (const auto& col : t.columns) {
+            std::string field = col.path.substr(0, col.path.find_first_of(".["));
+            if (col.path == "DATA[1]") field = col.path;  // DEBR: the model inside DATA
+            const bool vmad = field == "VMAD" && (col.path == "VMAD[3]" || col.path == "VMAD[4]");
+            const char* root = vmad ? "scripts\\" : AssetRoot(t.rt, field);
+            if (!root || (col.kind != "text" && col.kind != "json" && col.kind != "any")) continue;
+            addPath.Text(1, t.rt).Text(2, vmad ? "VMAD" : field).Run();
+            getPath.Text(1, t.rt).Text(2, vmad ? "VMAD" : field);
+            int64_t pathId = sqlite3_step(getPath.st) == SQLITE_ROW ? sqlite3_column_int64(getPath.st, 0) : 0;
+            sqlite3_reset(getPath.st);
+            const std::string sql = "SELECT form_key, plugin_no, " + Quote(col.name) + " FROM " + Quote(t.name) +
+                                    " WHERE " + Quote(col.name) + " IS NOT NULL";
+            Stmt q{c.db.Prepare(sql.c_str(), error)};
+            if (!q.st) return false;
+            std::vector<std::string> names;
+            std::set<std::string> seen;
+            while (sqlite3_step(q.st) == SQLITE_ROW) {
+                const char* text = reinterpret_cast<const char*>(sqlite3_column_text(q.st, 2));
+                if (!text) continue;
+                names.clear();
+                Value v;
+                std::string ignored;
+                if (vmad || col.kind != "text") {
+                    if (text[0] != '[' || !ParseJson(text, &v, &ignored)) continue;
+                    if (vmad) ScriptNames(v, col.path == "VMAD[4]", &names);
+                    else Strings(v, &names);
+                } else {
+                    names.push_back(text);
+                }
+                seen.clear();
+                for (const auto& n : names) {
+                    std::string p = assets::NormalizeAssetPath(n, root);
+                    if (p.empty() || p == root) continue;
+                    if (vmad) p += ".pex";
+                    if (!seen.insert(p).second) continue;
+                    ins.Int(1, sqlite3_column_int64(q.st, 0)).Int(2, sqlite3_column_int64(q.st, 1)).Text(3, p).Int(4, pathId).Run();
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // Indexes are extras too: each can be skipped and built later. They come
 // first, so the other extras' queries can use them.
 bool Index(ExtraContext& c, const char* sql, std::string* error) { return c.db.Exec(sql, error); }
@@ -976,6 +1111,12 @@ const Extra kExtras[] = {
          return Index(c, "CREATE INDEX IF NOT EXISTS form_refs_key ON form_refs(form_key, plugin_no);", e);
      }},
     {"idx_table_keys", "index every type and child table by (form_key, plugin_no)", true, BuildTableKeys},
+    {"asset_refs", "every file a form names (models, textures, sounds, scripts), joinable with assets.db paths", true,
+     BuildAssetRefs},
+    {"idx_asset_refs", "index asset_refs(path): which forms use a file", true,
+     [](ExtraContext& c, std::string* e) {
+         return Index(c, "CREATE INDEX IF NOT EXISTS asset_refs_path ON asset_refs(path);", e);
+     }},
     {"fts_names", "full-text search over editor IDs and names: fts_names (words), fts_names_tri (substrings)", true,
      BuildFtsNames},
     {"eslable", "per plugin: master form count and whether it can be flagged light", true, BuildEslable},

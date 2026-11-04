@@ -374,6 +374,12 @@ WHAT IS IN IT (schema version 7)
                      plugin_facts.invalid_refs counts only those held by a
                      form another form references (most others are
                      leftovers nothing uses), invalid_refs_all counts all
+    asset_refs       asset_refs: every file a form names (models, textures,
+                     sounds, music, VMAD scripts as scripts\<name>.pex),
+                     normalized like assets.db paths so the two join on
+                     path; path_id -> ref_paths says which field. Sound
+                     fields name .wav; the game also plays .xwm / .fuz.
+                     idx_asset_refs indexes path (which forms use a file).
     itm              OFF by default (--with itm): itm_forms, overrides
                      identical to their masters' version, compared as
                      xEdit's Quick Auto Clean does minus its known false
