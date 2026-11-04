@@ -459,6 +459,20 @@ refused too. spf_modules lists what is built.
   spf db add navmesh --db skyrim.db
   spf db add landscape,wrld_large_refs --db skyrim.db
   spf db add fts_names --db skyrim.db
+
+spf db drop <extra>[,<extra>] --db <file.db>
+
+Removes built extras: an index is dropped, a fact table is emptied. db add
+builds them again. Modules cannot be dropped. Predesigned indexes, off by
+default, are meant for this: build one for the queries that need it, drop it
+when done:
+
+  idx_persistent_type  persistent forms by type ("only persistent" filters)
+  idx_ref_base         placed objects by base object (filter references by
+                       the base's EditorID, name or type)
+
+  spf db add idx_ref_base --db skyrim.db
+  spf db drop idx_ref_base --db skyrim.db
 )HELP";
 
 const char kHelpBuildAssets[] = R"HELP(spf build-assets --out <assets.db> --data <Data folder> [options]
@@ -596,11 +610,11 @@ std::wstring PatternsNextToExe() {
     return p.substr(0, p.find_last_of(L"\\/") + 1) + L"patterns.json";
 }
 
-// spf db add <module>[,<module>...] --db <file.db>
+// spf db add|drop <name>[,<name>...] --db <file.db>
 int DbCommand(int argc, wchar_t** argv) {
     std::string sub = argc > 2 ? Utf8(argv[2]) : "";
-    if (sub != "add") {
-        fprintf(stderr, "usage: spf db add <module>[,<module>] --db <file.db> (spf db --help)\n");
+    if (sub != "add" && sub != "drop") {
+        fprintf(stderr, "usage: spf db add|drop <name>[,<name>] --db <file.db> (spf db --help)\n");
         return 2;
     }
     AddOptions opt;
@@ -614,18 +628,18 @@ int DbCommand(int argc, wchar_t** argv) {
         else if (!a.empty() && a[0] != '-') {
             for (const auto& m : SplitList(a)) opt.modules.push_back(m);
         } else {
-            fprintf(stderr, "db add: unknown option %s (spf db --help)\n", a.c_str());
+            fprintf(stderr, "db %s: unknown option %s (spf db --help)\n", sub.c_str(), a.c_str());
             return 2;
         }
     }
     if (opt.db.empty() || opt.modules.empty()) {
-        fprintf(stderr, "db add: a module and --db are required (spf db --help)\n");
+        fprintf(stderr, "db %s: a name and --db are required (spf db --help)\n", sub.c_str());
         return 2;
     }
     if (opt.patterns.empty()) opt.patterns = PatternsNextToExe();
     std::string err;
-    int rc = AddModules(opt, &err);
-    if (rc) fprintf(stderr, "db add: %s\n", err.c_str());
+    int rc = sub == "add" ? AddModules(opt, &err) : DropExtras(opt, &err);
+    if (rc) fprintf(stderr, "db %s: %s\n", sub.c_str(), err.c_str());
     return rc;
 }
 
