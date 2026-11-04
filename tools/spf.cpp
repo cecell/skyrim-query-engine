@@ -312,6 +312,7 @@ OPTIONS
                            Either way masters (ESM flag) load first.
   --language <name>        strings language (default english).
   --with m1,m2             build optional modules too (see MODULES).
+  --skip e1,e2             leave out extras built by default (see EXTRAS).
   --threads <n>            decode threads (default: logical cores - 1).
   --quiet                  no progress output.
 
@@ -353,8 +354,14 @@ WHAT IS IN IT (schema version 6)
                      layers), CELL / WRLD height maps, occlusion, LOD offsets
     wrld_large_refs  WRLD.RNAM large-reference lists
   Build them with --with, or add them later: spf db add <module> --db x.db.
+  EXTRAS (built from the database itself; on by default, --skip to leave
+  out, spf db add to add later):
+    fts_names        full-text search over every form occurrence's editor
+                     ID and name: form_names (the text), fts_names (words,
+                     prefixes: MATCH 'iron sword', 'iro*'), fts_names_tri
+                     (substrings of 3+ characters: MATCH 'onswo')
   spf_modules lists what is built; st_tables.module says which tables
-  belong to which module.
+  belong to which module or extra.
   form_refs       the xref: one row per FormID inside a record, wherever it
                   sits (form_key, plugin_no = the occurrence; ref_key = the
                   form it points at; path_id -> ref_paths: record type and
@@ -389,6 +396,8 @@ EXAMPLES
     JOIN weap_kwda x USING (form_key, plugin_no)
     JOIN winning_forms k ON k.form_key = x.kwda;
   SELECT column_name, kind, path, description FROM st_columns WHERE table_name = 'npc';
+  SELECT n.edid, n.name, n.plugin_no FROM fts_names
+    JOIN form_names n ON n.id = fts_names.rowid WHERE fts_names MATCH 'iron sword';
   SELECT form, type, path FROM winning_refs
     WHERE ref_key = (SELECT form_key FROM winning_forms WHERE edid = 'IronSword');
 )HELP";
@@ -397,7 +406,10 @@ const char kHelpDb[] = R"HELP(spf db add <module>[,<module>] --db <file.db> [--t
 
 Adds optional modules to a database build-db made: re-reads only those
 modules' subrecords from the same plugins and fills their tables (plus xref
-rows for any FormIDs in them). Core tables are not touched.
+rows for any FormIDs in them). Core tables are not touched. Extras left out
+with build-db --skip are added the same way, from the database alone:
+
+  fts_names        full-text search over editor IDs and names
 
   navmesh          NAVM geometry (vertices, triangles, edge and door links)
                    and NAVI
@@ -407,11 +419,12 @@ rows for any FormIDs in them). Core tables are not touched.
 
 It runs in one transaction: if anything fails, nothing is added. It refuses
 when a plugin changed (size or date) since the build, because the new rows
-would not match the core ones; rebuild then. A module already built is
+would not match the core ones; rebuild then (extras alone do not check). A module already built is
 refused too. spf_modules lists what is built.
 
   spf db add navmesh --db skyrim.db
   spf db add landscape,wrld_large_refs --db skyrim.db
+  spf db add fts_names --db skyrim.db
 )HELP";
 
 int Usage() {
@@ -420,7 +433,7 @@ int Usage() {
             "  spf info   <plugin>\n"
             "  spf fields <plugin> <TYPE>\n"
             "  spf export <plugin> [--type T,..] [--form ID,..] [--fields F,..] [--csv|--json] [--out file]\n"
-            "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..]\n"
+            "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..] [--skip e,..]\n"
             "  spf db add <module>[,..] --db <db>\n"
             "  spf help [command]      (full explanation)\n");
     return 2;
@@ -507,6 +520,8 @@ int BuildDbCommand(int argc, wchar_t** argv) {
         else if (a == "--patterns" && hasNext) opt.patterns = argv[++i];
         else if (a == "--with" && hasNext) {
             for (const auto& m : SplitList(Utf8(argv[++i]))) opt.modules.push_back(m);
+        } else if (a == "--skip" && hasNext) {
+            for (const auto& m : SplitList(Utf8(argv[++i]))) opt.skip.push_back(m);
         } else {
             fprintf(stderr, "build-db: unknown option %s (spf build-db --help)\n", a.c_str());
             return 2;

@@ -18,7 +18,8 @@ struct BuildOptions {
     std::wstring loadOrderFile;        // plugins.txt; empty = see `plugins`
     std::vector<std::string> plugins;  // explicit load order; both empty = every plugin in `data`
     std::wstring patterns;             // the pattern catalog (patterns.json)
-    std::vector<std::string> modules;  // optional modules to build too (--with)
+    std::vector<std::string> modules;  // optional modules (and off-by-default extras) to build too (--with)
+    std::vector<std::string> skip;     // default extras not to build (--skip), e.g. fts_names
     std::string language = "english";
     int threads = 0;                   // 0 = one per logical core, minus the writer
     bool quiet = false;

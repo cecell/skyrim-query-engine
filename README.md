@@ -72,6 +72,10 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
 - `st_tables` / `st_columns`: the data dictionary (what each column is,
   which subrecord and path it comes from, what a key refers to, notes such
   as how to read a BLOB).
+- `form_names` with full-text indexes `fts_names` (words, prefixes) and
+  `fts_names_tri` (substrings): search every form occurrence by editor ID or
+  name. An extra, on by default: `--skip fts_names` leaves it out,
+  `spf db add fts_names` adds it later.
 - Raw byte runs are stored as BLOBs (`kind` = `bytes`); `SELECT hex(col)`
   gives the hex text `spf export` shows. Inside JSON values they stay hex text.
 - `subrecord_overflow` / `subrecord_raw`: whatever did not fit, so nothing
