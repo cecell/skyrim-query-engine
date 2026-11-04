@@ -82,6 +82,12 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
   invalid references. `invalid_refs` lists every reference to a form no
   plugin defines; the plugin count keeps only those held by a form another
   form references, since most others sit in leftovers nothing uses.
+- Every index is optional: each is an extra (`idx_forms_key`,
+  `idx_refs_to`, `idx_table_keys`, ...), on by default, `--skip` to leave it
+  out and `spf db add` to build it later. On a 192-plugin load order the
+  indexes are 29% of the file (about 320 MB of 1.16 GB) and about 10 s of
+  build time; without them a lookup scans its table (about 100 ms instead of
+  under 1 ms at 2.3M forms).
 - ITM records (`itm_forms`, `plugin_facts.itm`): an extra that is off by
   default (`--with itm`), since it reads every plugin and its masters.
   Compared the way xEdit's Quick Auto Clean does, without its known false

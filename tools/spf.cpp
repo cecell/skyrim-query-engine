@@ -374,6 +374,13 @@ WHAT IS IN IT (schema version 7)
                      xEdit's Quick Auto Clean does minus its known false
                      positives; plugin_facts.itm. Reads every plugin and
                      its masters (slowest extra)
+  INDEXES are extras too, all on by default; --skip any to save disk and
+  build time (lookups then scan the table), spf db add to build later:
+    idx_forms_key, idx_forms_plugin, idx_forms_type, idx_forms_edid,
+    idx_forms_parent, idx_forms_flags (deleted / persistent), idx_plugin_masters,
+    idx_leftovers (overflow / raw), idx_refs_to (what references X),
+    idx_refs_from (what X references), idx_table_keys (every type and
+    child table by form_key, plugin_no)
   spf_modules lists what is built; st_tables.module says which tables
   belong to which module or extra.
   form_refs       the xref: one row per FormID inside a record, wherever it
