@@ -19,6 +19,7 @@
 
 #include "pattern_value.h"
 #include "db_schema.h"
+#include "db_util.h"
 #include "plugin.h"
 #include "sqlite3.h"
 
@@ -156,22 +157,29 @@ bool ReadHeader(PluginInfo* p) {
     return true;
 }
 
-// The load order: names only, in order.
-std::vector<std::string> ResolveLoadOrder(const BuildOptions& opt, const std::wstring& data, std::string* error) {
+// The load order: names only, in order. `present`, when given, replaces the
+// listing of the Data folder (build-assets: an MO2 virtual Data).
+std::vector<std::string> ResolveLoadOrder(const BuildOptions& opt, const std::wstring& data, std::string* error,
+                                          const std::vector<std::string>* present = nullptr) {
     if (!opt.plugins.empty()) return opt.plugins;
 
     std::vector<std::string> inData;  // every plugin file in the Data folder
-    WIN32_FIND_DATAW fd;
-    HANDLE f = FindFirstFileW((data + L"*").c_str(), &fd);
-    if (f == INVALID_HANDLE_VALUE) {
-        *error = "cannot list the Data folder";
-        return {};
+    if (present) {
+        for (const auto& n : *present)
+            if (IsPluginName(n)) inData.push_back(n);
+    } else {
+        WIN32_FIND_DATAW fd;
+        HANDLE f = FindFirstFileW((data + L"*").c_str(), &fd);
+        if (f == INVALID_HANDLE_VALUE) {
+            *error = "cannot list the Data folder";
+            return {};
+        }
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && IsPluginName(Utf8(fd.cFileName)))
+                inData.push_back(Utf8(fd.cFileName));
+        } while (FindNextFileW(f, &fd));
+        FindClose(f);
     }
-    do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && IsPluginName(Utf8(fd.cFileName)))
-            inData.push_back(Utf8(fd.cFileName));
-    } while (FindNextFileW(f, &fd));
-    FindClose(f);
     std::unordered_map<std::string, std::string> byLower;  // lower -> name as on disk
     for (const auto& n : inData) byLower[Lower(n)] = n;
 
@@ -272,41 +280,6 @@ struct StringRow {
     std::string text;
 };
 
-// One SQL value.
-struct Cell {
-    enum class T : uint8_t { Null, Int, Real, Text, Blob } t = T::Null;
-    int64_t i = 0;
-    double d = 0;
-    std::string s;
-    static Cell Int(int64_t v) {
-        Cell c;
-        c.t = T::Int;
-        c.i = v;
-        return c;
-    }
-    static Cell Real(double v) {
-        Cell c;
-        c.t = T::Real;
-        c.d = v;
-        return c;
-    }
-    static Cell Text(std::string v) {
-        Cell c;
-        c.t = T::Text;
-        c.s = std::move(v);
-        return c;
-    }
-    // Hex text (as the decoder writes byte runs) as the bytes themselves.
-    static Cell Blob(const std::string& hex) {
-        Cell c;
-        c.t = T::Blob;
-        c.s.reserve(hex.size() / 2);
-        auto nib = [](char h) { return h <= '9' ? h - '0' : (h & ~0x20) - 'A' + 10; };
-        for (size_t i = 0; i + 1 < hex.size(); i += 2) c.s.push_back(static_cast<char>(nib(hex[i]) << 4 | nib(hex[i + 1])));
-        return c;
-    }
-};
-
 // Table ids besides the schema's (which are >= 0).
 constexpr int kOverflowTable = -1, kRawTable = -2, kRefsTable = -3;
 
@@ -326,36 +299,7 @@ struct Batch {
     std::string error;
 };
 
-class BatchQueue {
-public:
-    void Push(Batch b) {
-        std::unique_lock<std::mutex> lk(m_);
-        notFull_.wait(lk, [this] { return q_.size() < 32; });
-        q_.push_back(std::move(b));
-        notEmpty_.notify_one();
-    }
-    bool Pop(Batch* b) {
-        std::unique_lock<std::mutex> lk(m_);
-        notEmpty_.wait(lk, [this] { return !q_.empty() || producers_ == 0; });
-        if (q_.empty()) return false;
-        *b = std::move(q_.front());
-        q_.pop_front();
-        notFull_.notify_one();
-        return true;
-    }
-    void SetProducers(int n) { producers_ = n; }
-    void ProducerDone() {
-        std::lock_guard<std::mutex> lk(m_);
-        --producers_;
-        notEmpty_.notify_all();
-    }
-
-private:
-    std::mutex m_;
-    std::condition_variable notEmpty_, notFull_;
-    std::deque<Batch> q_;
-    int producers_ = 0;
-};
+using BatchQueue = BoundedQueue<Batch>;
 
 // A decoded value as the cell of a column of that kind.
 Cell ToCell(const Value& v, const ColumnDef& col) {
@@ -574,67 +518,6 @@ void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
 }
 
 // ---- SQLite ----
-
-class Db {
-public:
-    ~Db() {
-        if (db_) sqlite3_close(db_);
-    }
-    bool Open(const std::wstring& path, std::string* error) {
-        if (sqlite3_open16(path.c_str(), &db_) != SQLITE_OK) {
-            *error = db_ ? sqlite3_errmsg(db_) : "cannot create the database";
-            return false;
-        }
-        return true;
-    }
-    bool Exec(const std::string& sql, std::string* error) {
-        char* msg = nullptr;
-        if (sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &msg) != SQLITE_OK) {
-            *error = std::string(msg ? msg : "sqlite error") + " in: " + sql.substr(0, 200);
-            sqlite3_free(msg);
-            return false;
-        }
-        return true;
-    }
-    sqlite3_stmt* Prepare(const char* sql, std::string* error) {
-        sqlite3_stmt* st = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &st, nullptr) != SQLITE_OK) *error = sqlite3_errmsg(db_);
-        return st;
-    }
-    const char* Message() const { return sqlite3_errmsg(db_); }
-    sqlite3* raw() const { return db_; }
-
-private:
-    sqlite3* db_ = nullptr;
-};
-
-struct Stmt {
-    sqlite3_stmt* st = nullptr;
-    ~Stmt() {
-        if (st) sqlite3_finalize(st);
-    }
-    Stmt& Int(int i, int64_t v) {
-        sqlite3_bind_int64(st, i, v);
-        return *this;
-    }
-    Stmt& Real(int i, double v) {
-        sqlite3_bind_double(st, i, v);
-        return *this;
-    }
-    Stmt& Text(int i, const std::string& v) {
-        sqlite3_bind_text(st, i, v.data(), static_cast<int>(v.size()), SQLITE_TRANSIENT);
-        return *this;
-    }
-    Stmt& Null(int i) {
-        sqlite3_bind_null(st, i);
-        return *this;
-    }
-    bool Run() {
-        int rc = sqlite3_step(st);
-        sqlite3_reset(st);
-        return rc == SQLITE_DONE;
-    }
-};
 
 const char kSchema[] = R"SQL(
 CREATE TABLE spf_meta(
@@ -882,22 +765,6 @@ std::string InsertSql(const std::string& table, size_t columns) {
     return sql + ")";
 }
 
-bool BindRun(sqlite3_stmt* st, const std::vector<Cell>& cells) {
-    for (size_t i = 0; i < cells.size(); ++i) {
-        const Cell& c = cells[i];
-        int k = static_cast<int>(i) + 1;
-        switch (c.t) {
-            case Cell::T::Null: sqlite3_bind_null(st, k); break;
-            case Cell::T::Int: sqlite3_bind_int64(st, k, c.i); break;
-            case Cell::T::Real: sqlite3_bind_double(st, k, c.d); break;
-            case Cell::T::Text: sqlite3_bind_text(st, k, c.s.data(), static_cast<int>(c.s.size()), SQLITE_STATIC); break;
-            case Cell::T::Blob: sqlite3_bind_blob(st, k, c.s.data(), static_cast<int>(c.s.size()), SQLITE_STATIC); break;
-        }
-    }
-    int rc = sqlite3_step(st);
-    sqlite3_reset(st);
-    return rc == SQLITE_DONE;
-}
 
 const char kIndexes[] = R"SQL(
 CREATE INDEX forms_key    ON forms(form_key, plugin_no);
@@ -1049,14 +916,6 @@ bool LoadCatalog(const std::wstring& path, PatternCatalog* catalog, std::string*
     return true;
 }
 
-std::string NowIso() {
-    SYSTEMTIME t;
-    GetSystemTime(&t);
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%04u-%02u-%02uT%02u:%02u:%02uZ", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
-             t.wSecond);
-    return buf;
-}
 
 }  // namespace
 
@@ -1445,6 +1304,36 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
 }
 
 std::vector<std::pair<std::string, std::string>> AvailableModules() { return Schema::Modules(); }
+
+std::vector<std::string> LoadOrder(const BuildOptions& opt, const std::vector<std::pair<std::string, std::wstring>>* present,
+                                   std::string* error) {
+    const std::wstring data = WithSlash(opt.data);
+    std::vector<std::string> names;
+    std::unordered_map<std::string, std::wstring> pathOf;  // lower name -> file
+    if (present) {
+        for (const auto& p : *present) {
+            names.push_back(p.first);
+            pathOf[Lower(p.first)] = p.second;
+        }
+    }
+    std::vector<std::string> order = ResolveLoadOrder(opt, data, error, present ? &names : nullptr);
+    // As build-db: masters (ESM flag, from the header) load first.
+    std::vector<PluginInfo> all;
+    std::set<std::string> seen;
+    for (const auto& n : order) {
+        if (!seen.insert(Lower(n)).second) continue;
+        PluginInfo p;
+        p.name = n;
+        auto it = pathOf.find(Lower(n));
+        p.path = it != pathOf.end() ? it->second : data + Widen(n);
+        ReadHeader(&p);
+        all.push_back(std::move(p));
+    }
+    std::stable_partition(all.begin(), all.end(), [](const PluginInfo& p) { return p.master; });
+    order.clear();
+    for (const auto& p : all) order.push_back(p.name);
+    return order;
+}
 
 int AddModules(const AddOptions& opt, std::string* error) {
     using Clock = std::chrono::steady_clock;
