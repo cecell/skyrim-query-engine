@@ -934,16 +934,25 @@ UPDATE plugin_facts SET missing_masters =
 // a form another form references (removes 95%+ of the noise, LESSONS_LEARNED).
 bool BuildInvalidRefs(ExtraContext& c, std::string* error) {
     return c.db.Exec(std::string(kFactRows) + R"SQL(
+-- Keyed temp tables, so this is fast whichever indexes were built.
+CREATE TEMP TABLE defined(form_key INTEGER PRIMARY KEY);
+INSERT OR IGNORE INTO defined SELECT form_key FROM forms;
+CREATE TEMP TABLE referenced(form_key INTEGER PRIMARY KEY);
+INSERT OR IGNORE INTO referenced SELECT ref_key FROM form_refs WHERE ref_key <> form_key;
+CREATE TEMP TABLE parented(form_key INTEGER, plugin_no INTEGER, PRIMARY KEY(form_key, plugin_no)) WITHOUT ROWID;
+INSERT OR IGNORE INTO parented SELECT form_key, plugin_no FROM forms WHERE parent_key IS NOT NULL;
 DELETE FROM invalid_refs;
 INSERT INTO invalid_refs
 SELECT r.form_key, r.plugin_no, r.ref_key, r.path_id,
        CASE WHEN o.load_order IS NULL THEN 'missing_master' ELSE 'undefined' END,
-       EXISTS (SELECT 1 FROM form_refs x WHERE x.ref_key = r.form_key AND x.form_key <> r.form_key),
-       EXISTS (SELECT 1 FROM forms h WHERE h.form_key = r.form_key AND h.plugin_no = r.plugin_no
-               AND h.parent_key IS NOT NULL)
+       r.form_key IN referenced,
+       EXISTS (SELECT 1 FROM parented h WHERE h.form_key = r.form_key AND h.plugin_no = r.plugin_no)
 FROM form_refs r
 LEFT JOIN plugins o ON o.plugin_no = r.ref_key >> 24
-WHERE NOT EXISTS (SELECT 1 FROM forms f WHERE f.form_key = r.ref_key);
+WHERE r.ref_key NOT IN defined;
+DROP TABLE defined;
+DROP TABLE referenced;
+DROP TABLE parented;
 WITH c AS (SELECT plugin_no, count(*) AS n, sum(holder_referenced) AS kept FROM invalid_refs GROUP BY plugin_no)
 UPDATE plugin_facts SET invalid_refs = coalesce(c.kept, 0), invalid_refs_all = coalesce(c.n, 0)
 FROM (SELECT p.plugin_no, c.n, c.kept FROM plugin_facts p LEFT JOIN c USING (plugin_no)) AS c
@@ -1020,6 +1029,17 @@ bool BuildItm(ExtraContext& c, std::string* error) {
     return true;
 }
 
+// Indexes are extras too: each can be skipped and built later. They come
+// first, so the other extras' queries can use them.
+bool Index(ExtraContext& c, const char* sql, std::string* error) { return c.db.Exec(sql, error); }
+
+bool BuildTableKeys(ExtraContext& c, std::string* error) {
+    std::string sql;
+    for (const auto& t : c.schema.tables())
+        sql += "CREATE INDEX IF NOT EXISTS " + Quote(t.name + "_key") + " ON " + Quote(t.name) + "(form_key, plugin_no);\n";
+    return c.db.Exec(sql, error);
+}
+
 // Extras: built after the core tables (from the database; itm also reads the
 // plugins), so they can be skipped at build time and added later with db add.
 // Built in this order.
@@ -1030,6 +1050,49 @@ struct Extra {
     bool (*build)(ExtraContext& c, std::string* error);
 };
 const Extra kExtras[] = {
+    {"idx_forms_key", "index forms(form_key, plugin_no): a form's occurrences", true,
+     [](ExtraContext& c, std::string* e) {
+         return Index(c, "CREATE INDEX IF NOT EXISTS forms_key ON forms(form_key, plugin_no);", e);
+     }},
+    {"idx_forms_plugin", "index forms(plugin_no, type): a plugin's forms", true,
+     [](ExtraContext& c, std::string* e) {
+         return Index(c, "CREATE INDEX IF NOT EXISTS forms_plugin ON forms(plugin_no, type);", e);
+     }},
+    {"idx_forms_type", "index forms(type)", true,
+     [](ExtraContext& c, std::string* e) { return Index(c, "CREATE INDEX IF NOT EXISTS forms_type ON forms(type);", e); }},
+    {"idx_forms_edid", "index forms(edid): look up editor IDs", true,
+     [](ExtraContext& c, std::string* e) { return Index(c, "CREATE INDEX IF NOT EXISTS forms_edid ON forms(edid);", e); }},
+    {"idx_forms_parent", "index forms(parent_key): what sits in a CELL / WRLD / DIAL", true,
+     [](ExtraContext& c, std::string* e) {
+         return Index(c, "CREATE INDEX IF NOT EXISTS forms_parent ON forms(parent_key) WHERE parent_key IS NOT NULL;", e);
+     }},
+    {"idx_forms_flags", "partial indexes of deleted and persistent forms per plugin", true,
+     [](ExtraContext& c, std::string* e) {
+         return Index(c,
+                      "CREATE INDEX IF NOT EXISTS forms_deleted ON forms(plugin_no) WHERE flags & 0x20;"
+                      "CREATE INDEX IF NOT EXISTS forms_persistent ON forms(plugin_no) WHERE flags & 0x400;",
+                      e);
+     }},
+    {"idx_plugin_masters", "index plugin_masters(master_no): a plugin's dependents", true,
+     [](ExtraContext& c, std::string* e) {
+         return Index(c, "CREATE INDEX IF NOT EXISTS plugin_masters_master ON plugin_masters(master_no);", e);
+     }},
+    {"idx_leftovers", "index subrecord_overflow and subrecord_raw by occurrence", true,
+     [](ExtraContext& c, std::string* e) {
+         return Index(c,
+                      "CREATE INDEX IF NOT EXISTS subrecord_overflow_key ON subrecord_overflow(form_key, plugin_no);"
+                      "CREATE INDEX IF NOT EXISTS subrecord_raw_key ON subrecord_raw(form_key, plugin_no);",
+                      e);
+     }},
+    {"idx_refs_to", "index form_refs(ref_key): what references a form", true,
+     [](ExtraContext& c, std::string* e) {
+         return Index(c, "CREATE INDEX IF NOT EXISTS form_refs_ref ON form_refs(ref_key);", e);
+     }},
+    {"idx_refs_from", "index form_refs(form_key, plugin_no): what a form references", true,
+     [](ExtraContext& c, std::string* e) {
+         return Index(c, "CREATE INDEX IF NOT EXISTS form_refs_key ON form_refs(form_key, plugin_no);", e);
+     }},
+    {"idx_table_keys", "index every type and child table by (form_key, plugin_no)", true, BuildTableKeys},
     {"fts_names", "full-text search over editor IDs and names: fts_names (words), fts_names_tri (substrings)", true,
      BuildFtsNames},
     {"eslable", "per plugin: master form count and whether it can be flagged light", true, BuildEslable},
@@ -1120,17 +1183,6 @@ bool BindRun(sqlite3_stmt* st, const std::vector<Cell>& cells) {
     sqlite3_reset(st);
     return rc == SQLITE_DONE;
 }
-
-const char kIndexes[] = R"SQL(
-CREATE INDEX forms_key    ON forms(form_key, plugin_no);
-CREATE INDEX forms_plugin ON forms(plugin_no, type);
-CREATE INDEX forms_type   ON forms(type);
-CREATE INDEX forms_edid   ON forms(edid);
-CREATE INDEX forms_parent ON forms(parent_key) WHERE parent_key IS NOT NULL;
-CREATE INDEX forms_deleted    ON forms(plugin_no) WHERE flags & 0x20;
-CREATE INDEX forms_persistent ON forms(plugin_no) WHERE flags & 0x400;
-CREATE INDEX plugin_masters_master ON plugin_masters(master_no);
-)SQL";
 
 // The winner of each form: its occurrence in the plugin loaded last.
 const char kWinners[] = R"SQL(
@@ -1569,20 +1621,11 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             static_cast<long long>(forms), static_cast<long long>(sink.rows), static_cast<long long>(sink.refs),
             static_cast<long long>(strings), done);
 
-        std::string sql = kIndexes;
-        sql += "CREATE INDEX subrecord_overflow_key ON subrecord_overflow(form_key, plugin_no);\n"
-               "CREATE INDEX subrecord_raw_key ON subrecord_raw(form_key, plugin_no);\n"
-               "CREATE INDEX form_refs_ref ON form_refs(ref_key);\n"
-               "CREATE INDEX form_refs_key ON form_refs(form_key, plugin_no);\n";
-        for (const auto& t : schema.tables())
-            sql += "CREATE INDEX " + Quote(t.name + "_key") + " ON " + Quote(t.name) + "(form_key, plugin_no);\n";
-        if (!db.Exec(sql, error)) return 1;
-        say("indexes");
         if (!db.Exec(kWinners, error)) return 1;
         say("winners");
         ExtraContext ctx{db, schema, catalog, opt.threads};
         if (!BuildExtras(ctx, extras, [&](const char* name) { say("%s", name); }, error)) return 1;
-        sql = kViews;
+        std::string sql = kViews;
         for (const auto& t : schema.tables()) {
             if (!t.fs.empty()) continue;
             sql += "CREATE VIEW " + Quote("winning_" + t.name) + " AS SELECT t.* FROM " + Quote(t.name) +
