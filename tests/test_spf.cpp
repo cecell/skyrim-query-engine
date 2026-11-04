@@ -1,6 +1,8 @@
 // Unit tests: hand-built plugins and strings files, valid and damaged. Every
 // damaged input must be refused or skipped cleanly, never crash or allocate
-// what the file claims.
+// what the file claims. build-assets: its readers on synthetic bytes (every
+// truncation), path rules, and winners on a fixture tree (a Data folder with
+// hardlinks, staging folders, BSAs, an MO2 instance) in %TEMP%.
 //
 //   spf_tests [patterns.json]   (default: patterns.json next to the exe)
 #include <windows.h>
@@ -14,9 +16,12 @@
 #include <string>
 #include <vector>
 
+#include "asset_build.h"
+#include "asset_readers.h"
 #include "db_schema.h"
 #include "inflate.h"
 #include "plugin.h"
+#include "sqlite3.h"
 #include "strings.h"
 
 using namespace spf;
@@ -297,6 +302,445 @@ void TestStrings() {
     CHECK(!t4.Parse(5, s.b.data(), s.size()));
 }
 
+// ---- build-assets: readers, path rules, winners ----
+
+// Big-endian builder (Papyrus).
+struct BeBytes {
+    std::vector<uint8_t> b;
+    BeBytes& u8(uint8_t v) {
+        b.push_back(v);
+        return *this;
+    }
+    BeBytes& u16(uint16_t v) { return u8(static_cast<uint8_t>(v >> 8)).u8(static_cast<uint8_t>(v)); }
+    BeBytes& u32(uint32_t v) { return u16(static_cast<uint16_t>(v >> 16)).u16(static_cast<uint16_t>(v)); }
+    BeBytes& str(const char* s) {
+        u16(static_cast<uint16_t>(strlen(s)));
+        b.insert(b.end(), s, s + strlen(s));
+        return *this;
+    }
+};
+
+void TestAssetPaths() {
+    using namespace assets;
+    CHECK(NormalizePath("Textures/Armor/X.DDS") == "textures\\armor\\x.dds");
+    CHECK(NormalizePath("\\Meshes\\A.nif") == "meshes\\a.nif");
+    CHECK(NormalizePath("Textures/\xC3\x84rmel.dds") == "textures\\\xC3\xA4rmel.dds");  // Ä -> ä
+    CHECK(NormalizeTexturePath("Armor\\Iron\\Cuirass.dds") == "textures\\armor\\iron\\cuirass.dds");
+    CHECK(NormalizeTexturePath("Data\\Textures\\A.dds") == "textures\\a.dds");
+    CHECK(NormalizeTexturePath("C:\\Skyrim\\Data\\textures\\b.dds") == "textures\\b.dds");
+    CHECK(NormalizeTexturePath("  ") == "");
+    PathParts p = SplitPath("textures\\armor\\x.dds");
+    CHECK(p.dir == "textures\\armor" && p.name == "x.dds" && p.ext == "dds");
+    CHECK(SplitPath("readme").ext == "" && SplitPath("readme").dir == "");
+    CHECK(std::string(PathKind("textures\\a.dds")) == "texture");
+    CHECK(std::string(PathKind("meshes\\a.nif")) == "mesh");
+    CHECK(std::string(PathKind("meshes\\actors\\character\\animations\\a.hkx")) == "animation");
+    CHECK(std::string(PathKind("sound\\voice\\skyrim.esm\\malenord\\a_0001_1.fuz")) == "voice");
+    CHECK(std::string(PathKind("sound\\fx\\a.wav")) == "audio");
+    CHECK(std::string(PathKind("scripts\\a.pex")) == "script");
+    CHECK(std::string(PathKind("skyrim.esm")) == "plugin");
+    CHECK(std::string(PathKind("skyrim - misc.bsa")) == "archive");
+    CHECK(std::string(PathKind("meshes\\actors\\character\\facegendata\\facegeom\\a.esp\\00000800.nif")) == "facegen");
+    CHECK(std::string(PathKind("calientetools\\bodyslide\\sliderpresets\\a.xml")) == "bodyslide");
+    CHECK(std::string(PathKind("skse\\plugins\\a.dll")) == "other");
+
+    VoicePath v;
+    CHECK(ParseVoicePath("sound\\voice\\skyrim.esm\\malenord\\dialoguege_dialoguegener_00013ec5_1.fuz", &v));
+    CHECK(v.plugin == "skyrim.esm" && v.voiceType == "malenord" && v.objectId == 0x013EC5 && v.response == 1);
+    CHECK(ParseVoicePath("sound\\voice\\a.esp\\femaleyoung\\x_y_fe012345_12.lip", &v) && v.objectId == 0x012345 &&
+          v.response == 12);
+    CHECK(!ParseVoicePath("sound\\voice\\a.esp\\femaleyoung\\readme.txt", &v));
+    CHECK(!ParseVoicePath("sound\\voice\\a.esp\\x_00013ec5_1.fuz", &v));          // no voice type folder
+    CHECK(!ParseVoicePath("sound\\voice\\a.esp\\vt\\x_0001zec5_1.fuz", &v));      // not hex
+    FaceGenPath g;
+    CHECK(ParseFaceGenPath("meshes\\actors\\character\\facegendata\\facegeom\\skyrim.esm\\00013bb8.nif", &g));
+    CHECK(g.kind == "geom" && g.plugin == "skyrim.esm" && g.objectId == 0x013BB8);
+    CHECK(ParseFaceGenPath("textures\\actors\\character\\facegendata\\facetint\\a.esp\\fe000d64.dds", &g));
+    CHECK(g.kind == "tint" && g.objectId == 0x000D64);
+    CHECK(!ParseFaceGenPath("textures\\actors\\character\\facegendata\\facetint\\a.esp\\00000d64.tga", &g));
+    CHECK(!ParseFaceGenPath("meshes\\actors\\character\\facegendata\\facegeom\\a.esp\\x.nif", &g));
+    auto list = SplitArchiveList(" Skyrim - Misc.bsa,Skyrim - Shaders.bsa , ,x.bsa");
+    CHECK(list.size() == 3 && list[0] == "Skyrim - Misc.bsa" && list[1] == "Skyrim - Shaders.bsa" && list[2] == "x.bsa");
+}
+
+void TestPlanArchives() {
+    using assets::PlanArchives;
+    // In Data: two ini archives (listed out of directory order), plugin
+    // archives, one archive nobody loads, one claimed twice.
+    std::vector<std::string> inData = {"Skyrim - Misc.bsa", "Skyrim - Textures0.bsa", "Mod.bsa", "Mod - Textures.bsa",
+                                       "Orphan.bsa", "Late.BSA", "Dawnguard.bsa"};
+    auto plan = PlanArchives(inData, {"skyrim - textures0.bsa", "Skyrim - Misc.bsa", "Missing.bsa", "Dawnguard.bsa"},
+                             {"Skyrim.esm", "Dawnguard.esm", "Mod.esp", "late.esl"});
+    CHECK(plan.size() == 6);
+    auto find = [&](const char* n) -> const assets::ArchiveLoad* {
+        for (const auto& a : plan)
+            if (a.name == n) return &a;
+        return nullptr;
+    };
+    CHECK(find("Skyrim - Textures0.bsa") && find("Skyrim - Textures0.bsa")->rank == 0);
+    CHECK(find("Skyrim - Misc.bsa") && find("Skyrim - Misc.bsa")->rank == 1);
+    CHECK(find("Dawnguard.bsa") && find("Dawnguard.bsa")->loadedBy == "ini" && find("Dawnguard.bsa")->rank == 2);
+    CHECK(find("Mod.bsa") && find("Mod.bsa")->loadedBy == "plugin" && find("Mod.bsa")->plugin == "Mod.esp");
+    CHECK(find("Mod - Textures.bsa") && find("Mod - Textures.bsa")->rank == find("Mod.bsa")->rank + 1);
+    CHECK(find("Late.BSA") && find("Late.BSA")->rank == 5);
+    CHECK(!find("Orphan.bsa"));
+}
+
+BeBytes Pex(const char* name, const char* parent, bool debug) {
+    BeBytes p;
+    p.u32(0xFA57C0DE).u8(3).u8(2).u16(1).u32(0).u32(0x5F000000).str("Test.psc").str("user").str("machine");
+    p.u16(3).str(name).str(parent).str("GetState");
+    p.u8(debug ? 1 : 0);
+    if (debug) p.u32(0).u32(0).u16(1).u16(0).u16(0).u16(2).u8(0).u16(2).u16(10).u16(11);
+    p.u16(1).u16(2).u8(0);              // one user flag
+    p.u16(1).u16(0).u32(64).u16(1).u16(0);  // object: name, size, parent, docstring
+    p.u32(0).u16(0);
+    return p;
+}
+
+void TestPex() {
+    assets::PexInfo i;
+    std::string err;
+    BeBytes p = Pex("MyQuestScript", "Quest", true);
+    CHECK(assets::ReadPex(p.b.data(), p.b.size(), &i, &err));
+    CHECK(i.scriptName == "MyQuestScript" && i.parentScript == "Quest" && i.gameId == 1 && err.empty());
+    BeBytes q = Pex("Base", "", false);
+    assets::PexInfo j;
+    CHECK(assets::ReadPex(q.b.data(), q.b.size(), &j, &err) && j.scriptName == "Base" && j.parentScript.empty());
+    // Every truncation is refused, never read past.
+    int refused = 0;
+    for (size_t n = 0; n + 8 < p.b.size(); ++n) {  // the last 8 bytes are not needed
+        assets::PexInfo t;
+        std::string e;
+        std::vector<uint8_t> cut(p.b.begin(), p.b.begin() + n);
+        if (!assets::ReadPex(cut.data(), cut.size(), &t, &e)) ++refused;
+    }
+    CHECK(refused == static_cast<int>(p.b.size()) - 8);
+    // A string index past the table.
+    BeBytes bad = Pex("A", "B", false);
+    bad.b[bad.b.size() - 16] = 0x7F;  // object name index high byte
+    assets::PexInfo k;
+    CHECK(!assets::ReadPex(bad.b.data(), bad.b.size(), &k, &err));
+    uint8_t le[] = {0xDE, 0xC0, 0x57, 0xFA, 3, 9};
+    CHECK(!assets::ReadPex(le, sizeof(le), &k, &err) && err.find("little-endian") != std::string::npos);
+}
+
+void TestHkx() {
+    Bytes h;
+    h.u32(0x57E0E057).u32(0x10C0C010).u32(0).u32(8).u8(8).u8(1).u8(0).u8(1).u32(3).u32(2).u32(0).u32(0).u32(0x4B);
+    h.raw("hk_2010.2.0-r1\0\0", 16).u32(0).u32(0xFFFFFFFF);
+    assets::HkxInfo i;
+    std::string err;
+    CHECK(h.size() == 64);
+    CHECK(assets::ReadHkx(h.b.data(), h.size(), &i, &err) && i.valid && i.pointerSize == 8 &&
+          i.havokVersion == "hk_2010.2.0-r1" && err.empty());
+    h.b[16] = 4;
+    assets::HkxInfo le;
+    CHECK(assets::ReadHkx(h.b.data(), h.size(), &le, &err) && le.valid && le.pointerSize == 4);
+    h.b[16] = 7;
+    assets::HkxInfo odd;
+    CHECK(assets::ReadHkx(h.b.data(), h.size(), &odd, &err) && !odd.valid);
+    assets::HkxInfo t;
+    CHECK(!assets::ReadHkx(h.b.data(), 40, &t, &err));
+    const char xml[] = "<?xml version=\"1.0\"?><hkpackfile/>";
+    assets::HkxInfo x;
+    err.clear();
+    CHECK(assets::ReadHkx(reinterpret_cast<const uint8_t*>(xml), sizeof(xml), &x, &err) && !x.valid && !err.empty());
+}
+
+Bytes FaceGenTri() {
+    Bytes t;
+    const uint32_t v = 3, tris = 1, x = 3, md = 2, ms = 1, k = 2;
+    t.raw("FRTRI003", 8).u32(v).u32(tris).u32(0).u32(0).u32(0).u32(x).u32(1).u32(md).u32(ms).u32(k);
+    for (int i = 0; i < 4; ++i) t.u32(0);
+    for (uint32_t i = 0; i < (v + k) * 3; ++i) t.f32(0.5f);
+    t.u32(0).u32(1).u32(2);                                 // triangle
+    for (uint32_t i = 0; i < x * 2; ++i) t.f32(0.25f);      // texture coordinates
+    t.u32(0).u32(1).u32(2);                                 // texture triangle
+    const char* morphs[] = {"Aah", "BigAah"};
+    for (const char* m : morphs) {
+        t.u32(static_cast<uint32_t>(strlen(m) + 1)).raw(m, strlen(m) + 1).f32(0.001f);
+        for (uint32_t i = 0; i < v * 3; ++i) t.u16(1);
+    }
+    t.u32(6).raw("Blink", 6).u32(2).u32(3).u32(4);
+    return t;
+}
+
+void TestTri() {
+    Bytes t = FaceGenTri();
+    assets::TriInfo i;
+    std::string err;
+    CHECK(assets::ReadTri(t.b.data(), t.size(), &i, &err) && err.empty());
+    CHECK(i.version == "FRTRI003" && i.vertexCount == 3 && i.triangleCount == 1 && i.uvCount == 3);
+    CHECK(i.morphs.size() == 2 && i.morphs[1] == "BigAah" && i.modifiers.size() == 1 && i.modifiers[0] == "Blink");
+    // Truncated bodies keep the header counts, drop the names, set an error.
+    int ok = 0;
+    for (size_t n = 64; n < t.size(); ++n) {
+        assets::TriInfo c;
+        std::string e;
+        if (assets::ReadTri(t.b.data(), n, &c, &e) && c.morphs.empty() && c.modifiers.empty() && !e.empty() &&
+            c.morphCount == 2)
+            ++ok;
+    }
+    CHECK(ok == static_cast<int>(t.size()) - 64);
+    assets::TriInfo h;
+    CHECK(!assets::ReadTri(t.b.data(), 63, &h, &err));
+    // A name length the file cannot hold.
+    Bytes bad = FaceGenTri();
+    size_t morph0 = 64 + 5 * 12 + 12 + 3 * 8 + 12;
+    bad.b[morph0 + 3] = 0x7F;
+    assets::TriInfo b;
+    err.clear();
+    CHECK(assets::ReadTri(bad.b.data(), bad.size(), &b, &err) && b.morphs.empty() && !err.empty());
+    // BodySlide morphs.
+    Bytes p;
+    p.raw("PIRT", 4).u16(1).u8(3).raw("3BA", 3).u16(2);
+    p.u8(4).raw("Arms", 4).f32(0.01f).u16(1).u16(5).u16(1).u16(2).u16(3);
+    p.u8(4).raw("Legs", 4).f32(0.01f).u16(0);
+    p.u16(0);
+    assets::TriInfo s;
+    err.clear();
+    CHECK(assets::ReadTri(p.b.data(), p.size(), &s, &err) && s.bodySlide && s.morphCount == 2 &&
+          s.morphs[0] == "3BA:Arms" && err.empty());
+    for (size_t n = 0; n < p.size(); ++n) {  // no crash on any prefix
+        assets::TriInfo c;
+        std::string e;
+        assets::ReadTri(p.b.data(), n, &c, &e);
+    }
+}
+
+Bytes SizedString(const char* s) { return Bytes().u32(static_cast<uint32_t>(strlen(s))).raw(s, strlen(s)); }
+
+Bytes SkyrimNif() {
+    Bytes set;
+    set.u32(3).add(SizedString("textures\\armor\\a.dds")).add(SizedString("")).add(SizedString("Armor\\A_n.dds"));
+    Bytes fx;
+    fx.u32(0).u32(0).u32(0xFFFFFFFF).u32(0).u32(0).f32(0).f32(0).f32(1).f32(1);
+    fx.add(SizedString("effects\\glow.dds")).u8(3).u8(0).u8(0).u8(0);
+    for (int i = 0; i < 4 + 4 + 2; ++i) fx.f32(1);
+    fx.add(SizedString("effects\\gradient.dds"));
+    Bytes n;
+    const char line[] = "Gamebryo File Format, Version 20.2.0.7\n";
+    n.raw(line, strlen(line)).u32(0x14020007).u8(1).u32(12).u32(3);
+    n.u32(100).u8(1).u8(0).u8(1).u8(0).u8(1).u8(0);  // BS header: author, process, export
+    n.u16(3).add(SizedString("NiNode")).add(SizedString("BSShaderTextureSet")).add(SizedString("BSEffectShaderProperty"));
+    n.u16(0).u16(1).u16(2);
+    n.u32(4).u32(static_cast<uint32_t>(set.size())).u32(static_cast<uint32_t>(fx.size()));
+    n.u32(0).u32(0).u32(0);  // strings, max length, groups
+    n.u32(0).add(set).add(fx);
+    return n;
+}
+
+void TestNifTextures() {
+    Bytes n = SkyrimNif();
+    std::vector<assets::NifTexture> tex;
+    std::string err;
+    CHECK(assets::ReadNifTextures(n.b.data(), n.size(), &tex, &err) && err.empty());
+    CHECK(tex.size() == 4);
+    if (tex.size() == 4) {
+        CHECK(tex[0].block == "BSShaderTextureSet" && tex[0].slot == 0 && tex[0].path == "textures\\armor\\a.dds");
+        CHECK(tex[1].slot == 2 && assets::NormalizeTexturePath(tex[1].path) == "textures\\armor\\a_n.dds");
+        CHECK(tex[2].block == "BSEffectShaderProperty" && tex[2].slot == 0 && tex[2].path == "effects\\glow.dds");
+        CHECK(tex[3].slot == 1 && tex[3].path == "effects\\gradient.dds");
+    }
+    int refused = 0;
+    for (size_t k = 0; k < n.size(); ++k) {
+        std::vector<assets::NifTexture> t;
+        std::string e;
+        if (!assets::ReadNifTextures(n.b.data(), k, &t, &e)) ++refused;
+    }
+    CHECK(refused == static_cast<int>(n.size()));  // the last block is cut in every prefix
+    Bytes huge = SkyrimNif();
+    huge.b[huge.size() - 60] = 0xFF;  // a texture string length in the effect block
+    std::vector<assets::NifTexture> t;
+    assets::ReadNifTextures(huge.b.data(), huge.size(), &t, &err);
+    CHECK(t.size() <= 4);
+}
+
+// ---- End to end: a Data folder, staging folders, an MO2 instance ----
+
+void WriteFile(const std::wstring& path, const std::string& bytes) {
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+std::string Dds(uint32_t w, uint32_t h) {
+    Bytes d;
+    d.raw("DDS ", 4).u32(124).u32(0x1007).u32(h).u32(w).u32(w * h / 2).u32(0).u32(1);
+    for (int i = 0; i < 11; ++i) d.u32(0);
+    d.u32(32).u32(4).raw("DXT1", 4).u32(0).u32(0).u32(0).u32(0).u32(0);
+    d.u32(0x1000).u32(0).u32(0).u32(0).u32(0);
+    d.raw(std::string(w * h / 2, '\0').data(), w * h / 2);
+    return std::string(d.b.begin(), d.b.end());
+}
+
+// A v105 BSA, uncompressed, one folder.
+std::string Bsa(const char* folder, const std::vector<std::pair<std::string, std::string>>& files) {
+    uint32_t namesLen = 0;
+    for (const auto& f : files) namesLen += static_cast<uint32_t>(f.first.size() + 1);
+    const uint32_t folderLen = static_cast<uint32_t>(strlen(folder) + 1);
+    const uint32_t block = 36 + 24;
+    const uint32_t dataStart = block + 1 + folderLen + 16 * static_cast<uint32_t>(files.size()) + namesLen;
+    Bytes b;
+    b.raw("BSA\0", 4).u32(105).u32(36).u32(3).u32(1).u32(static_cast<uint32_t>(files.size())).u32(folderLen)
+        .u32(namesLen).u32(2);
+    b.u32(1).u32(0).u32(static_cast<uint32_t>(files.size())).u32(0).u32(block + namesLen).u32(0);
+    b.u8(static_cast<uint8_t>(folderLen)).raw(folder, folderLen);
+    uint32_t off = dataStart;
+    for (size_t i = 0; i < files.size(); ++i) {
+        b.u32(static_cast<uint32_t>(i + 1)).u32(0).u32(static_cast<uint32_t>(files[i].second.size())).u32(off);
+        off += static_cast<uint32_t>(files[i].second.size());
+    }
+    for (const auto& f : files) b.raw(f.first.c_str(), f.first.size() + 1);
+    for (const auto& f : files) b.raw(f.second.data(), f.second.size());
+    return std::string(b.b.begin(), b.b.end());
+}
+
+// One value from a query (first column of the first row), as text; "" = none.
+std::string Query(sqlite3* db, const std::string& sql) {
+    sqlite3_stmt* st = nullptr;
+    std::string out;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW &&
+        sqlite3_column_text(st, 0))
+        out = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+    if (!out.size() && st == nullptr) out = std::string("SQL ERROR: ") + sqlite3_errmsg(db);
+    sqlite3_finalize(st);
+    return out;
+}
+
+// "root in_data is_winner" of the copy of `path` in `root` (archive name, or the root's name).
+std::string Copy(sqlite3* db, const std::string& path, const std::string& where) {
+    return Query(db, "SELECT in_data || ' ' || is_winner FROM conflicts_all WHERE path = '" + path +
+                         "' AND src = '" + where + "'");
+}
+
+// The fixture lives in %TEMP%\spf_tests_assets and is rewritten on every
+// run (nothing is deleted).
+std::wstring FixtureDir() {
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    return std::wstring(tmp) + L"spf_tests_assets\\";
+}
+
+sqlite3* BuildFixture(AssetOptions opt, const std::wstring& out) {
+    opt.out = out;
+    opt.quiet = true;
+    opt.threads = 3;
+    std::string err;
+    int rc = BuildAssets(opt, &err);
+    if (rc) fprintf(stderr, "build-assets: %s\n", err.c_str());
+    CHECK(rc == 0);
+    sqlite3* db = nullptr;
+    sqlite3_open16(out.c_str(), &db);
+    char* msg = nullptr;
+    sqlite3_exec(db,
+                 "CREATE TEMP VIEW conflicts_all AS SELECT p.path, coalesce(ap.name, r.name) AS src, f.in_data, "
+                 "f.is_winner FROM files f JOIN paths p USING(path_id) JOIN roots r USING(root_id) "
+                 "LEFT JOIN files af ON af.file_id = f.archive_id LEFT JOIN paths ap ON ap.path_id = af.path_id",
+                 nullptr, nullptr, &msg);
+    sqlite3_free(msg);
+    return db;
+}
+
+void TestBuildAssetsStaging() {
+    const std::wstring root = FixtureDir() + L"vortex\\";
+    const std::wstring data = root + L"Data\\", staging = root + L"staging\\";
+    const std::string ddsA = Dds(4, 4), ddsB = Dds(8, 8);
+    // ModA's a.dds is deployed (hardlinked) into Data; ModB has a different
+    // a.dds (not deployed) and a b.dds only it has.
+    WriteFile(staging + L"ModA\\textures\\a.dds", ddsA);
+    WriteFile(staging + L"ModB\\textures\\a.dds", ddsB);
+    WriteFile(staging + L"ModB\\textures\\b.dds", ddsB);
+    std::filesystem::create_directories(data + L"textures");
+    if (!CreateHardLinkW((data + L"textures\\a.dds").c_str(), (staging + L"ModA\\textures\\a.dds").c_str(), nullptr))
+        CHECK(GetLastError() == ERROR_ALREADY_EXISTS);
+    WriteFile(data + L"meshes\\only.nif", "not a mesh");
+    WriteFile(data + L"textures\\d.dds", ddsA);  // loose, also in Test.bsa: loose wins
+    WriteFile(data + L"abc.txt", "abc");
+    // Test.esp loads Test.bsa; Other.bsa has no plugin.
+    WriteFile(data + L"Test.esp", "TES4");
+    WriteFile(data + L"Test.bsa", Bsa("textures", {{"b.dds", ddsA}, {"c.dds", ddsA}, {"d.dds", ddsA}}));
+    WriteFile(data + L"Other.bsa", Bsa("textures", {{"c.dds", ddsB}}));
+    WriteFile(root + L"plugins.txt", "*Test.esp\r\n");
+
+    AssetOptions opt;
+    opt.data = data;
+    opt.staging = staging;
+    opt.loadOrderFile = root + L"plugins.txt";
+    opt.hash = true;
+    sqlite3* db = BuildFixture(opt, root + L"assets.db");
+    // Hardlink: stored once, with ModA, in_data.
+    CHECK(Query(db, "SELECT count(*) FROM files f JOIN paths p USING(path_id) WHERE path = 'textures\\a.dds'") == "2");
+    CHECK(Copy(db, "textures\\a.dds", "ModA") == "1 1");
+    CHECK(Copy(db, "textures\\a.dds", "ModB") == "0 0");
+    CHECK(Query(db, "SELECT value FROM spf_meta WHERE key = 'hardlink_matches'") == "1");
+    // Data only: the Data root.
+    CHECK(Copy(db, "meshes\\only.nif", "Data") == "1 1");
+    CHECK(Query(db, "SELECT error FROM files JOIN paths USING(path_id) WHERE path = 'meshes\\only.nif'").find("nif") == 0);
+    // No loose copy in Data: the loaded archive wins; staging-only is not seen.
+    CHECK(Copy(db, "textures\\b.dds", "test.bsa") == "1 1");
+    CHECK(Copy(db, "textures\\b.dds", "ModB") == "0 0");
+    CHECK(Copy(db, "textures\\c.dds", "test.bsa") == "1 1");
+    CHECK(Copy(db, "textures\\c.dds", "other.bsa") == "1 0");
+    CHECK(Copy(db, "textures\\d.dds", "Data") == "1 1");
+    CHECK(Copy(db, "textures\\d.dds", "test.bsa") == "1 0");
+    CHECK(Query(db, "SELECT loaded_by || ' ' || plugin FROM archives JOIN files USING(file_id) JOIN paths USING(path_id) "
+                    "WHERE path = 'test.bsa'") == "plugin Test.esp");
+    CHECK(Query(db, "SELECT count(*) FROM archives WHERE loaded_by IS NULL") == "1");
+    // Exactly one winner per path the game sees.
+    CHECK(Query(db, "SELECT count(*) FROM (SELECT path_id FROM files GROUP BY path_id "
+                    "HAVING sum(is_winner) <> (max(in_data AND archive_id IS NULL) OR "
+                    "max(in_data AND archive_id IN (SELECT file_id FROM archives WHERE load_rank IS NOT NULL))))") == "0");
+    // Headers inside the BSA; hashes.
+    CHECK(Query(db, "SELECT count(*) FROM dds JOIN files USING(file_id) WHERE archive_id IS NOT NULL") == "4");
+    CHECK(Query(db, "SELECT d.width FROM dds d JOIN files f USING(file_id) JOIN paths p USING(path_id) "
+                    "JOIN roots r USING(root_id) WHERE p.path = 'textures\\b.dds' AND r.name = 'ModB'") == "8");
+    CHECK(Query(db, "SELECT lower(hex(hash)) FROM files JOIN paths USING(path_id) WHERE path = 'abc.txt'") ==
+          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    CHECK(Query(db, "SELECT count(*) FROM winning_files") == Query(db, "SELECT count(*) FROM files WHERE is_winner"));
+    sqlite3_close(db);
+}
+
+void TestBuildAssetsMo2() {
+    const std::wstring root = FixtureDir() + L"mo2\\";
+    const std::wstring data = root + L"Data\\", inst = root + L"instance\\";
+    WriteFile(inst + L"ModOrganizer.ini", "[General]\r\ngameName=Skyrim Special Edition\r\n");
+    WriteFile(inst + L"profiles\\Default\\modlist.txt", "# order\r\n+ModY\r\n+ModX\r\n-ModZ\r\n");
+    WriteFile(inst + L"profiles\\Default\\plugins.txt", "*X.esp\r\n");
+    WriteFile(data + L"textures\\t.dds", Dds(4, 4));
+    WriteFile(data + L"textures\\real.dds", Dds(4, 4));
+    WriteFile(inst + L"mods\\ModX\\textures\\t.dds", Dds(8, 8));
+    WriteFile(inst + L"mods\\ModX\\textures\\u.dds", Dds(8, 8));
+    WriteFile(inst + L"mods\\ModY\\textures\\u.dds", Dds(16, 16));
+    WriteFile(inst + L"mods\\ModZ\\textures\\u.dds", Dds(16, 16));
+    WriteFile(inst + L"mods\\ModZ\\textures\\z.dds", Dds(16, 16));
+    WriteFile(inst + L"overwrite\\textures\\t.dds", Dds(16, 16));
+    WriteFile(inst + L"mods\\ModX\\X.esp", "TES4");
+    WriteFile(inst + L"mods\\ModX\\X.bsa", Bsa("textures", {{"x.dds", Dds(4, 4)}}));
+
+    AssetOptions opt;
+    opt.data = data;
+    opt.mo2 = inst;
+    opt.profile = L"Default";
+    sqlite3* db = BuildFixture(opt, root + L"assets.db");
+    CHECK(Query(db, "SELECT value FROM spf_meta WHERE key = 'mo2_virtual_data'") == "1");
+    CHECK(Query(db, "SELECT priority FROM roots WHERE name = 'ModY'") == "3");
+    CHECK(Query(db, "SELECT priority FROM roots WHERE kind = 'overwrite'") == "4");
+    CHECK(Query(db, "SELECT enabled FROM roots WHERE name = 'ModZ'") == "0");
+    CHECK(Copy(db, "textures\\t.dds", "Overwrite") == "1 1");  // overwrite over mods over Data
+    CHECK(Copy(db, "textures\\t.dds", "ModX") == "0 0");
+    CHECK(Copy(db, "textures\\t.dds", "Data") == "0 0");
+    CHECK(Copy(db, "textures\\u.dds", "ModY") == "1 1");  // higher in modlist.txt
+    CHECK(Copy(db, "textures\\u.dds", "ModX") == "0 0");
+    CHECK(Copy(db, "textures\\u.dds", "ModZ") == "0 0");  // disabled
+    CHECK(Copy(db, "textures\\z.dds", "ModZ") == "0 0");
+    CHECK(Copy(db, "textures\\real.dds", "Data") == "1 1");
+    CHECK(Copy(db, "textures\\x.dds", "x.bsa") == "1 1");  // the profile's plugin loads its mod's archive
+    CHECK(Query(db, "SELECT manager FROM roots WHERE name = 'ModX'") == "mo2");
+    sqlite3_close(db);
+}
+
 }  // namespace
 
 // Writes valid hand-built inputs as fuzzing seeds (CI cannot ship real
@@ -375,6 +819,14 @@ int wmain(int argc, wchar_t** argv) {
     TestInflate();
     TestStrings();
     TestSchema(cat);
+    TestAssetPaths();
+    TestPlanArchives();
+    TestPex();
+    TestHkx();
+    TestTri();
+    TestNifTextures();
+    TestBuildAssetsStaging();
+    TestBuildAssetsMo2();
     printf("%d passed, %d failed\n", g_passed, g_failed);
     return g_failed ? 1 : 0;
 }
