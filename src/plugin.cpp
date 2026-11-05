@@ -159,6 +159,8 @@ bool Plugin::Parse(std::string* error) {
         }
         q += 6 + n;
     }
+    p->keyOwners_ = p->mastersUtf8();
+    p->keyOwners_.push_back(ToUtf8(p->name_));
     p->records_.push_back({"TES4", 0, U32(d + 8), U16(d + 20), 0, 0});
 
     // Every record, with the WRLD / CELL / DIAL it sits in.
@@ -228,7 +230,7 @@ std::vector<std::string> Plugin::mastersUtf8() const {
 
 std::string Plugin::FormKey(uint32_t formId) const {
     size_t hb = formId >> 24;
-    const std::string& owner = hb < masters_.size() ? masters_[hb] : name_;
+    const std::string& owner = hb < masters_.size() ? keyOwners_[hb] : keyOwners_.back();
     char buf[16];
     snprintf(buf, sizeof(buf), ":%06X", formId & 0xFFFFFF);
     return owner + buf;

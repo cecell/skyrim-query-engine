@@ -19,6 +19,7 @@
 #include "asset_build.h"
 #include "asset_readers.h"
 #include "db_schema.h"
+#include "export_request.h"
 #include "inflate.h"
 #include "plugin.h"
 #include "sqlite3.h"
@@ -134,6 +135,16 @@ void TestHeaderFacts(const PatternCatalog& cat) {
     body.sig("ONAM").u16(0).add(onam);
     body.add(Sub("INTV", Bytes().u32(7))).add(Sub("INCC", Bytes().u32(9)));
     std::string err;
+    {
+        // A plugin name outside ASCII is UTF-8 in FormKeys (JSON must stay valid).
+        Bytes own = Header({});
+        auto named = Plugin::FromMemory(own.b.data(), own.size(), "T\xE9st.esp", cat, &err);
+        CHECK(named != nullptr);
+        if (named) {
+            CHECK(named->nameUtf8() == "T\xC3\xA9st.esp");
+            CHECK(named->FormKey(0x000800) == "T\xC3\xA9st.esp:000800");
+        }
+    }
     auto plugin = Load(Rec("TES4", 0, body, 0x281), cat, &err);
     CHECK(plugin != nullptr);
     if (!plugin) return;
@@ -157,6 +168,30 @@ void TestHeaderFacts(const PatternCatalog& cat) {
     lie.sig("ONAM").u16(0);
     auto bad = Load(Rec("TES4", 0, lie), cat, &err);
     if (bad) CHECK(bad->info().overrideCount == 0);
+}
+
+void TestExportRequest() {
+    std::vector<ExportTarget> t;
+    std::string err;
+    std::string text =
+        "\xEF\xBB\xBF# a comment\r\n\r\n[Skyrim.esm]\r\nSkyrim.esm:0132AA, Skyrim.esm:01367B\r\n  00012EB7 000800\r\n"
+        "[C:\\mods\\My Mod [v2].esp]\nMy Mod [v2].esp:000800 , Skyrim.esm:01,\n[Empty.esp]\n";
+    CHECK(ParseExportRequest(text, &t, &err));
+    CHECK(t.size() == 3);
+    if (t.size() == 3) {
+        CHECK(t[0].plugin == "Skyrim.esm" && t[0].forms.size() == 4);
+        if (t[0].forms.size() == 4)
+            CHECK(t[0].forms[1] == "Skyrim.esm:01367B" && t[0].forms[2] == "00012EB7" && t[0].forms[3] == "000800");
+        CHECK(t[1].plugin == "C:\\mods\\My Mod [v2].esp" && t[1].forms.size() == 2);
+        if (t[1].forms.size() == 2) CHECK(t[1].forms[0] == "My Mod [v2].esp:000800");
+        CHECK(t[2].plugin == "Empty.esp" && t[2].forms.empty());
+    }
+    std::vector<ExportTarget> none;
+    CHECK(!ParseExportRequest("000800\n[A.esp]\n", &none, &err));
+    none.clear();
+    CHECK(!ParseExportRequest("[A.esp\n", &none, &err));
+    none.clear();
+    CHECK(!ParseExportRequest("# nothing\n", &none, &err));
 }
 
 void TestValidPlugin(const PatternCatalog& cat) {
@@ -810,6 +845,7 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
     }
     TestHeaderFacts(cat);
+    TestExportRequest();
     TestValidPlugin(cat);
     TestDamagedStructure(cat);
     TestDamagedFields(cat);

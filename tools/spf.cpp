@@ -2,7 +2,8 @@
 //
 //   spf info   <plugin>                         masters and record counts by type
 //   spf fields <plugin> <TYPE>                  which fields that type has here, with sub-fields
-//   spf export <plugin> [options]               the chosen fields of the chosen forms
+//   spf export <plugin> [--form ..] [<plugin> [--form ..]]... [options]
+//   spf export --request <file|-> [options]     the chosen fields of the chosen forms
 //       --type WEAP[,ARMO...]     only these record types
 //       --form 00012EB7[,...]     only these forms (as stored, or Skyrim.esm:012EB7)
 //       --fields EDID,DATA.damage only these fields ("*" or omitted = all);
@@ -34,6 +35,7 @@
 
 #include "../src/asset_build.h"
 #include "../src/db_build.h"
+#include "../src/export_request.h"
 #include "../src/plugin.h"
 
 using namespace spf;
@@ -71,12 +73,13 @@ bool ParseFormSpec(const Plugin& p, const std::string& spec, uint32_t* out) {
     std::string owner = spec.substr(0, colon);
     uint32_t local = static_cast<uint32_t>(strtoul(spec.c_str() + colon + 1, nullptr, 16)) & 0xFFFFFF;
     auto same = [](const std::string& a, const std::string& b) { return _stricmp(a.c_str(), b.c_str()) == 0; };
-    if (same(owner, p.name())) {
+    if (same(owner, p.nameUtf8())) {
         *out = (static_cast<uint32_t>(p.masters().size()) << 24) | local;
         return true;
     }
-    for (size_t i = 0; i < p.masters().size(); ++i) {
-        if (same(owner, p.masters()[i])) {
+    const auto masters = p.mastersUtf8();
+    for (size_t i = 0; i < masters.size(); ++i) {
+        if (same(owner, masters[i])) {
             *out = (static_cast<uint32_t>(i) << 24) | local;
             return true;
         }
@@ -245,7 +248,7 @@ std::string InfoText(const Plugin& plugin, const std::map<std::string, size_t>& 
     const PluginHeader& h = plugin.info();
     std::string out;
     char buf[64];
-    out += "plugin: " + plugin.name() + (plugin.localized() ? " (localized)" : "") + "\n";
+    out += "plugin: " + plugin.nameUtf8() + (plugin.localized() ? " (localized)" : "") + "\n";
     snprintf(buf, sizeof(buf), "version: %.2f\n", h.version);
     out += buf;
     out += "form version: " + std::to_string(plugin.header().formVersion) + "\n";
@@ -263,9 +266,10 @@ std::string InfoText(const Plugin& plugin, const std::map<std::string, size_t>& 
     if (!h.author.empty()) out += "author: " + h.author + "\n";
     if (!h.description.empty()) out += "description: " + h.description + "\n";
     out += "masters: " + std::to_string(plugin.masters().size()) + "\n";
-    for (size_t i = 0; i < plugin.masters().size(); ++i) {
+    const auto masters = plugin.mastersUtf8();
+    for (size_t i = 0; i < masters.size(); ++i) {
         snprintf(buf, sizeof(buf), "  [%02zX] ", i);
-        out += buf + plugin.masters()[i] + " (size " + std::to_string(h.masterSizes[i]) + ")\n";
+        out += buf + masters[i] + " (size " + std::to_string(h.masterSizes[i]) + ")\n";
     }
     out += "records: " + std::to_string(plugin.records().size() - 1) + "\n";
     for (const auto& [t, n] : counts)
@@ -297,7 +301,7 @@ std::string InfoJson(const Plugin& plugin, const std::map<std::string, size_t>& 
     for (const auto& [t, n] : counts)
         if (t != "TES4") byType.Set(t, Value::Int(static_cast<int64_t>(n)));
     Value o = Value::Map();
-    o.Set("plugin", Value::Str(plugin.name()));
+    o.Set("plugin", Value::Str(plugin.nameUtf8()));
     o.Set("version", Value::Float(std::round(h.version * 100.0) / 100.0));
     o.Set("form_version", Value::Int(plugin.header().formVersion));
     o.Set("flags", hex(h.flags));
@@ -378,15 +382,35 @@ Fields only appear if at least one record in THIS plugin has them; another
 plugin may use more.
 )HELP";
 
-const char kHelpExport[] = R"HELP(spf export <plugin> [--type T,..] [--form F,..] [--fields P,..] [--csv | --json] [--out file]
+const char kHelpExport[] = R"HELP(spf export <plugin> [--form F,..] [<plugin> [--form F,..]]... [options]
+spf export --request <file | -> [options]
 
-Exports fields of the plugin's records.
+Exports fields of plugins' records. Only the plugins you name are opened: a
+plugin's masters are never needed, whatever its forms refer to, because a
+reference comes out as Owner:ObjectID from the plugin's own header.
+
+Several plugins: each --form list belongs to the plugin before it. The output
+is one list, and each row also says "plugin" (a leading plugin column in CSV).
+
+  --request <file>        read plugins and forms from a file ("-" = stdin). Use
+                          this for long lists: a Windows command line stops at
+                          32,767 characters, and at 8,191 through spf.cmd.
+                            [Skyrim.esm]
+                            Skyrim.esm:0132AA, Skyrim.esm:01367B
+                            # comments are fine; a list can span lines
+                            [C:\mods\MyMod.esp]
+                            MyMod.esp:000800 Skyrim.esm:012EB7
+                          A plugin with no forms means all of its forms.
+  --data <folder>         where to find plugins given by name alone (default:
+                          the current folder). A path is used as it is.
 
   --type WEAP,ARMO        only records of these types (default: every type)
   --form F,F,...          only these forms. Each F is either the FormID as
                           stored in this plugin (00012EB7) or Owner:ObjectID
                           (Skyrim.esm:012EB7), which works in any plugin.
-                          Missing forms are reported on stderr.
+                          Missing forms are reported on stderr. A plugin that
+                          cannot be opened is too: the others still come out,
+                          and the exit code is 1.
   --fields P,P,...        only these field paths (see `spf fields`). Omitted
                           or "*" = every field of each record (JSON only).
   --json                  (default) a JSON array, one object per record:
@@ -412,6 +436,8 @@ Field paths
 Examples
   spf export Skyrim.esm --type WEAP --fields EDID,FULL,DATA.damage,DATA.value --csv
   spf export MyMod.esp --form Skyrim.esm:012EB7
+  spf export Skyrim.esm --form Skyrim.esm:0132AA,Skyrim.esm:01367B Dawnguard.esm --form Dawnguard.esm:002B74 --fields EDID,PNAM
+  spf export --request npcs.txt --data "D:\Skyrim\Data" --fields EDID,PNAM --out headparts.json
   spf export MyMod.esp --type LVLI --fields EDID,LVLO.reference,LVLO.level
   spf export MyMod.esp --type REFR --fields NAME,DATA.pos_x,DATA.pos_y,DATA.pos_z --out refs.json
 )HELP";
@@ -694,7 +720,8 @@ int Usage() {
             "usage:\n"
             "  spf info   <plugin> [--json] [--out file]\n"
             "  spf fields <plugin> <TYPE>\n"
-            "  spf export <plugin> [--type T,..] [--form ID,..] [--fields F,..] [--csv|--json] [--out file]\n"
+            "  spf export <plugin> [--form ID,..] [<plugin> [--form ID,..]].. [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
+            "  spf export --request <file|-> [--data <folder>] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
             "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..] [--skip e,..]\n"
             "  spf db add <module>[,..] --db <db>\n"
             "  spf build-assets --out <db> --data <Data> [--staging <root> | --mo2 <dir> --profile <p>]\n"
@@ -839,6 +866,175 @@ int BuildAssetsCommand(int argc, wchar_t** argv) {
 
 }  // namespace
 
+bool LoadCatalog(std::wstring patternsPath, PatternCatalog* cat) {
+    if (patternsPath.empty()) {
+        wchar_t exe[MAX_PATH];
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        patternsPath = exe;
+        patternsPath = patternsPath.substr(0, patternsPath.find_last_of(L"\\/") + 1) + L"patterns.json";
+    }
+    std::ifstream pf(patternsPath, std::ios::binary);
+    std::stringstream ss;
+    ss << pf.rdbuf();
+    std::string err;
+    if (!cat->Load(ss.str(), &err)) {
+        fprintf(stderr, "patterns: %s\n", err.empty() ? "cannot read patterns.json" : err.c_str());
+        return false;
+    }
+    return true;
+}
+
+std::wstring WidenUtf8(const std::string& s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
+// spf export: one or many plugins, each with its own forms.
+int ExportCommand(int argc, wchar_t** argv) {
+    std::vector<ExportTarget> targets;
+    std::string types, fieldList, outPath, requestPath;
+    std::wstring patternsPath, dataDir;
+    bool csv = false;
+    for (int i = 2; i < argc; ++i) {
+        std::string a = Utf8(argv[i]);
+        auto next = [&](std::string* dst) {
+            if (i + 1 < argc) *dst = Utf8(argv[++i]);
+        };
+        if (a == "--type") next(&types);
+        else if (a == "--form") {
+            std::string list;
+            next(&list);
+            if (targets.empty()) {
+                fprintf(stderr, "--form needs a plugin before it\n");
+                return 2;
+            }
+            for (auto& spec : SplitList(list)) targets.back().forms.push_back(std::move(spec));
+        }
+        else if (a == "--fields") next(&fieldList);
+        else if (a == "--out") next(&outPath);
+        else if (a == "--request") next(&requestPath);
+        else if (a == "--csv") csv = true;
+        else if (a == "--json") csv = false;
+        else if (a == "--data" && i + 1 < argc) dataDir = argv[++i];
+        else if (a == "--patterns" && i + 1 < argc) patternsPath = argv[++i];
+        else if (a.rfind("--", 0) == 0) return Usage();
+        else targets.push_back({a, {}});
+    }
+    const bool manyPlugins = !requestPath.empty() || targets.size() > 1;
+    if (!requestPath.empty()) {
+        std::string text;
+        if (requestPath == "-") {
+            _setmode(_fileno(stdin), _O_BINARY);
+            char buf[65536];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), stdin)) > 0) text.append(buf, n);
+        } else {
+            std::ifstream rf(WidenUtf8(requestPath), std::ios::binary);
+            if (!rf) {
+                fprintf(stderr, "cannot read %s\n", requestPath.c_str());
+                return 2;
+            }
+            std::stringstream rs;
+            rs << rf.rdbuf();
+            text = rs.str();
+        }
+        std::string reqErr;
+        if (!ParseExportRequest(text, &targets, &reqErr)) {
+            fprintf(stderr, "%s: %s\n", requestPath.c_str(), reqErr.c_str());
+            return 2;
+        }
+    }
+    if (targets.empty()) return Usage();
+
+    std::vector<FieldSpec> specs = fieldList.empty() || fieldList == "*" ? std::vector<FieldSpec>{}
+                                                                          : ParseFields(fieldList);
+    if (csv && specs.empty()) {
+        fprintf(stderr, "--csv needs --fields (a fixed set of columns)\n");
+        return 2;
+    }
+    std::set<std::string> typeSet;
+    for (const auto& t : SplitList(types)) typeSet.insert(Upper(t));
+    PatternCatalog cat;
+    if (!LoadCatalog(patternsPath, &cat)) return 2;
+    if (!dataDir.empty() && dataDir.back() != L'\\' && dataDir.back() != L'/') dataDir += L'\\';
+
+    std::string out;
+    if (csv) {
+        if (manyPlugins) out += "plugin,";
+        out += "form,type,in";
+        for (const auto& s : specs) out += "," + CsvCell(Value::Str(s.text));
+        out += "\n";
+    } else {
+        out += "[\n";
+    }
+    int status = 0;
+    bool first = true;
+    for (const auto& target : targets) {
+        // A name is looked up in --data; anything with a folder in it is a path.
+        std::wstring path = WidenUtf8(target.plugin);
+        if (path.find_first_of(L"\\/:") == std::wstring::npos) path = dataDir + path;
+        std::string err;
+        auto plugin = Plugin::Open(path, cat, &err);
+        if (!plugin) {
+            fprintf(stderr, "%s: %s\n", target.plugin.c_str(), err.c_str());
+            status = 1;
+            continue;
+        }
+        const std::string shown = Utf8(path.substr(path.find_last_of(L"\\/") + 1));
+        std::vector<const Record*> recs;
+        if (!target.forms.empty()) {
+            for (const auto& spec : target.forms) {
+                uint32_t fid;
+                const Record* r = ParseFormSpec(*plugin, spec, &fid) ? plugin->Find(fid) : nullptr;
+                if (!r) fprintf(stderr, "no such form in %s: %s\n", shown.c_str(), spec.c_str());
+                else if (typeSet.empty() || typeSet.count(r->type)) recs.push_back(r);
+            }
+        } else {
+            for (const auto& r : plugin->records())
+                if (r.type != "TES4" && (typeSet.empty() || typeSet.count(r.type))) recs.push_back(&r);
+        }
+        for (const Record* r : recs) {
+            auto fields = plugin->Fields(*r);
+            Value form = Value::Str(plugin->FormKey(r->formId));
+            Value parent = r->parent ? Value::Str(plugin->FormKey(r->parent)) : Value();
+            if (csv) {
+                if (manyPlugins) out += CsvCell(Value::Str(shown)) + ",";
+                out += CsvCell(form) + "," + r->type + "," + CsvCell(parent);
+                for (const auto& s : specs) out += "," + CsvCell(Gather(fields, s));
+                out += "\n";
+            } else {
+                Value obj = Value::Map();
+                if (manyPlugins) obj.Set("plugin", Value::Str(shown));
+                obj.Set("form", form);
+                obj.Set("type", Value::Str(r->type));
+                if (!parent.IsNull()) obj.Set("in", parent);
+                if (r->flags & 0x20) obj.Set("deleted", Value::Bool(true));
+                if (specs.empty()) {
+                    obj.Set("fields", AllFields(fields));
+                } else {
+                    Value sel = Value::Map();
+                    for (const auto& s : specs) sel.Set(s.text, Gather(fields, s));
+                    obj.Set("fields", std::move(sel));
+                }
+                if (!first) out += ",\n";
+                first = false;
+                WriteJson(obj, &out);
+            }
+        }
+    }
+    if (!csv) out += "\n]\n";
+    if (!outPath.empty()) {
+        std::ofstream o(WidenUtf8(outPath), std::ios::binary);
+        o << out;
+    } else {
+        _setmode(_fileno(stdout), _O_BINARY);
+        fwrite(out.data(), 1, out.size(), stdout);
+    }
+    return status;
+}
+
 int wmain(int argc, wchar_t** argv) {
     // spf help [cmd], spf --help, spf <cmd> --help
     std::string arg1 = argc > 1 ? Utf8(argv[1]) : "";
@@ -851,6 +1047,7 @@ int wmain(int argc, wchar_t** argv) {
     if (arg1 == "build-db") return BuildDbCommand(argc, argv);
     if (arg1 == "db") return DbCommand(argc, argv);
     if (arg1 == "build-assets") return BuildAssetsCommand(argc, argv);
+    if (arg1 == "export") return ExportCommand(argc, argv);
     if (argc < 3) return argc == 1 ? Help("") : Usage();
     std::string cmd = Utf8(argv[1]);
     std::wstring pluginPath = argv[2];
@@ -872,21 +1069,9 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == "--patterns" && i + 1 < argc) patternsPath = argv[++i];
         else positional = a;
     }
-    if (patternsPath.empty()) {
-        wchar_t exe[MAX_PATH];
-        GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        patternsPath = exe;
-        patternsPath = patternsPath.substr(0, patternsPath.find_last_of(L"\\/") + 1) + L"patterns.json";
-    }
-    std::ifstream pf(patternsPath, std::ios::binary);
-    std::stringstream ss;
-    ss << pf.rdbuf();
     PatternCatalog cat;
     std::string err;
-    if (!cat.Load(ss.str(), &err)) {
-        fprintf(stderr, "patterns: %s\n", err.empty() ? "cannot read patterns.json" : err.c_str());
-        return 2;
-    }
+    if (!LoadCatalog(patternsPath, &cat)) return 2;
     auto plugin = Plugin::Open(pluginPath, cat, &err);
     if (!plugin) {
         fprintf(stderr, "%s: %s\n", Utf8(pluginPath).c_str(), err.c_str());
@@ -916,62 +1101,6 @@ int wmain(int argc, wchar_t** argv) {
             for (const auto& s : info.second)
                 if (s != sig) out += "    " + s + "\n";
         }
-    } else if (cmd == "export") {
-        std::set<std::string> typeSet;
-        for (const auto& t : SplitList(types)) typeSet.insert(Upper(t));
-        std::vector<const Record*> recs;
-        if (!forms.empty()) {
-            for (const auto& spec : SplitList(forms)) {
-                uint32_t fid;
-                const Record* r = ParseFormSpec(*plugin, spec, &fid) ? plugin->Find(fid) : nullptr;
-                if (!r) fprintf(stderr, "no such form here: %s\n", spec.c_str());
-                else if (typeSet.empty() || typeSet.count(r->type)) recs.push_back(r);
-            }
-        } else {
-            for (const auto& r : plugin->records())
-                if (r.type != "TES4" && (typeSet.empty() || typeSet.count(r.type))) recs.push_back(&r);
-        }
-        std::vector<FieldSpec> specs = fieldList.empty() || fieldList == "*" ? std::vector<FieldSpec>{}
-                                                                              : ParseFields(fieldList);
-        if (csv) {
-            if (specs.empty()) {
-                fprintf(stderr, "--csv needs --fields (a fixed set of columns)\n");
-                return 2;
-            }
-            out += "form,type,in";
-            for (const auto& s : specs) out += "," + CsvCell(Value::Str(s.text));
-            out += "\n";
-        } else {
-            out += "[\n";
-        }
-        bool first = true;
-        for (const Record* r : recs) {
-            auto fields = plugin->Fields(*r);
-            Value form = Value::Str(plugin->FormKey(r->formId));
-            Value parent = r->parent ? Value::Str(plugin->FormKey(r->parent)) : Value();
-            if (csv) {
-                out += CsvCell(form) + "," + r->type + "," + CsvCell(parent);
-                for (const auto& s : specs) out += "," + CsvCell(Gather(fields, s));
-                out += "\n";
-            } else {
-                Value obj = Value::Map();
-                obj.Set("form", form);
-                obj.Set("type", Value::Str(r->type));
-                if (!parent.IsNull()) obj.Set("in", parent);
-                if (r->flags & 0x20) obj.Set("deleted", Value::Bool(true));
-                if (specs.empty()) {
-                    obj.Set("fields", AllFields(fields));
-                } else {
-                    Value sel = Value::Map();
-                    for (const auto& s : specs) sel.Set(s.text, Gather(fields, s));
-                    obj.Set("fields", std::move(sel));
-                }
-                if (!first) out += ",\n";
-                first = false;
-                WriteJson(obj, &out);
-            }
-        }
-        if (!csv) out += "\n]\n";
     } else {
         return Usage();
     }

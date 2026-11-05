@@ -14,7 +14,8 @@ mismatches).
 ```
 spf info   <plugin> [--json]              TES4 header facts, masters, record counts by type
 spf fields <plugin> <TYPE>                which fields that type has, with sub-fields
-spf export <plugin> [options]             chosen fields of chosen forms, as JSON or CSV
+spf export <plugin> [options]             chosen fields of chosen forms, as JSON or CSV;
+                                          several plugins, each with its own forms: `spf help export`
     --type WEAP[,ARMO...]                 only these record types
     --form 00012EB7[,Skyrim.esm:012EB7]   only these forms (as stored, or owner:objectID)
     --fields EDID,FULL,DATA.damage        only these fields; omitted or * = all
