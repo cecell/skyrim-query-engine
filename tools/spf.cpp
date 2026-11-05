@@ -225,16 +225,44 @@ OPTIONS FOR ALL COMMANDS
   --patterns <file>   use another pattern catalog
 )HELP";
 
+// " (ESM, Localized)", with any other bits in hex; empty when no bit is set.
+std::string HeaderFlagNames(uint32_t flags) {
+    std::string names;
+    auto add = [&](const std::string& n) { names += (names.empty() ? "" : ", ") + n; };
+    if (flags & 0x1) add("ESM");
+    if (flags & 0x80) add("Localized");
+    if (flags & 0x200) add("ESL");
+    if (uint32_t rest = flags & ~uint32_t{0x281}) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "0x%X", rest);
+        add(buf);
+    }
+    return names.empty() ? "" : " (" + names + ")";
+}
+
 const char kHelpInfo[] = R"HELP(spf info <plugin>
 
 Prints the plugin name (and "(localized)" when its strings live in separate
-files), its masters with their index - the first byte of a stored FormID - and
-the number of records of each type. Plain text.
+files), the facts from its TES4 header, its masters with their index - the
+first byte of a stored FormID - and the size stored for each, and the number
+of records of each type. Plain text.
+
+Header facts: version (HEDR: 0.94, 1.70, 1.71), form version, flags, next
+object id, header record count (as the CK counted them, groups included; the
+"records:" line below is what the file really holds), the number of overrides
+listed in ONAM, INTV and INCC when present, author and description when
+present. Flags are named for ESM, Localized and ESL; a .esl file loads light
+even without the ESL flag.
 
   spf info "D:\Games\Skyrim Special Edition\Data\Update.esm"
   plugin: Update.esm (localized)
-    [00] Skyrim.esm
-  records: 16011
+  version: 1.71
+  form version: 44
+  flags: 0x00000081 (ESM, Localized)
+  ...
+  masters: 1
+    [00] Skyrim.esm (size 0)
+  records: 16065
     ACHR 39
     ...
 )HELP";
@@ -777,11 +805,26 @@ int wmain(int argc, wchar_t** argv) {
     if (cmd == "info") {
         std::map<std::string, size_t> counts;
         for (const auto& r : plugin->records()) ++counts[r.type];
+        const PluginHeader& h = plugin->info();
+        char buf[64];
         out += "plugin: " + plugin->name() + (plugin->localized() ? " (localized)" : "") + "\n";
+        snprintf(buf, sizeof(buf), "version: %.2f\n", h.version);
+        out += buf;
+        out += "form version: " + std::to_string(plugin->header().formVersion) + "\n";
+        snprintf(buf, sizeof(buf), "flags: 0x%08X", h.flags);
+        out += buf + HeaderFlagNames(h.flags) + "\n";
+        snprintf(buf, sizeof(buf), "next object id: 0x%08X\n", h.nextObjectId);
+        out += buf;
+        out += "header record count: " + std::to_string(h.numRecords) + "\n";
+        out += "overrides listed (ONAM): " + std::to_string(h.overrideCount) + "\n";
+        if (h.intv) out += "INTV: " + std::to_string(*h.intv) + "\n";
+        if (h.incc) out += "INCC: " + std::to_string(*h.incc) + "\n";
+        if (!h.author.empty()) out += "author: " + h.author + "\n";
+        if (!h.description.empty()) out += "description: " + h.description + "\n";
+        out += "masters: " + std::to_string(plugin->masters().size()) + "\n";
         for (size_t i = 0; i < plugin->masters().size(); ++i) {
-            char buf[16];
             snprintf(buf, sizeof(buf), "  [%02zX] ", i);
-            out += buf + plugin->masters()[i] + "\n";
+            out += buf + plugin->masters()[i] + " (size " + std::to_string(h.masterSizes[i]) + ")\n";
         }
         out += "records: " + std::to_string(plugin->records().size() - 1) + "\n";
         for (const auto& [t, n] : counts)

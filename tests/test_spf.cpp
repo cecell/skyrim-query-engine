@@ -120,6 +120,45 @@ Bytes StoredZlib(const Bytes& data) {
     return z.u8(adler >> 24).u8((adler >> 16) & 0xFF).u8((adler >> 8) & 0xFF).u8(adler & 0xFF);
 }
 
+// TES4 header facts, including an ONAM too large for a 16-bit size (XXXX), with
+// INTV and INCC after it.
+void TestHeaderFacts(const PatternCatalog& cat) {
+    Bytes hedr;
+    hedr.f32(1.70f).u32(5).u32(0x1234);
+    Bytes onam;
+    for (uint32_t i = 0; i < 20000; ++i) onam.u32(i);
+    Bytes body = Sub("HEDR", hedr).add(Sub("CNAM", Zstring("Someone")));
+    body.add(Sub("MAST", Zstring("Skyrim.esm"))).add(Sub("DATA", Bytes().u32(0x89ABCDEF).u32(1)));
+    body.add(Sub("MAST", Zstring("Update.esm"))).add(Sub("DATA", Bytes().u32(0).u32(0)));
+    body.add(Sub("XXXX", Bytes().u32(static_cast<uint32_t>(onam.size()))));
+    body.sig("ONAM").u16(0).add(onam);
+    body.add(Sub("INTV", Bytes().u32(7))).add(Sub("INCC", Bytes().u32(9)));
+    std::string err;
+    auto plugin = Load(Rec("TES4", 0, body, 0x281), cat, &err);
+    CHECK(plugin != nullptr);
+    if (!plugin) return;
+    const PluginHeader& h = plugin->info();
+    CHECK(h.version > 1.69f && h.version < 1.71f);
+    CHECK(h.flags == 0x281 && h.esm && h.esl && h.localized);
+    CHECK(h.nextObjectId == 0x1234 && h.numRecords == 5);
+    CHECK(plugin->header().formVersion == 44);
+    CHECK(h.author == "Someone");
+    CHECK(plugin->masters().size() == 2 && h.masterSizes.size() == 2);
+    CHECK(h.masterSizes[0] == 0x189ABCDEFull && h.masterSizes[1] == 0);
+    CHECK(h.overrideCount == 20000);
+    CHECK(h.intv && *h.intv == 7);
+    CHECK(h.incc && *h.incc == 9);
+
+    // A header without them, and an XXXX claiming more than the header holds.
+    auto plain = Load(Header({}), cat, &err);
+    CHECK(plain != nullptr);
+    if (plain) CHECK(plain->info().overrideCount == 0 && !plain->info().intv && !plain->info().incc);
+    Bytes lie = Sub("HEDR", hedr).add(Sub("XXXX", Bytes().u32(0xFFFFFFFF)));
+    lie.sig("ONAM").u16(0);
+    auto bad = Load(Rec("TES4", 0, lie), cat, &err);
+    if (bad) CHECK(bad->info().overrideCount == 0);
+}
+
 void TestValidPlugin(const PatternCatalog& cat) {
     Bytes p = Header({"Skyrim.esm"});
     p.add(Group("WEAP", 0, Weapon(0x01000800, "TestSword", 7).add(Weapon(0x00012EB7, "IronSword", 9))));
@@ -770,6 +809,7 @@ int wmain(int argc, wchar_t** argv) {
         fprintf(stderr, "cannot load patterns: %s\n", err.c_str());
         return 2;
     }
+    TestHeaderFacts(cat);
     TestValidPlugin(cat);
     TestDamagedStructure(cat);
     TestDamagedFields(cat);
