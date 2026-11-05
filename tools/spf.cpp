@@ -20,6 +20,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -225,27 +226,117 @@ OPTIONS FOR ALL COMMANDS
   --patterns <file>   use another pattern catalog
 )HELP";
 
-// " (ESM, Localized)", with any other bits in hex; empty when no bit is set.
-std::string HeaderFlagNames(uint32_t flags) {
-    std::string names;
-    auto add = [&](const std::string& n) { names += (names.empty() ? "" : ", ") + n; };
-    if (flags & 0x1) add("ESM");
-    if (flags & 0x80) add("Localized");
-    if (flags & 0x200) add("ESL");
+// The named bits of the TES4 flags, with any other bits in hex.
+std::vector<std::string> HeaderFlagNames(uint32_t flags) {
+    std::vector<std::string> names;
+    if (flags & 0x1) names.push_back("ESM");
+    if (flags & 0x80) names.push_back("Localized");
+    if (flags & 0x200) names.push_back("ESL");
     if (uint32_t rest = flags & ~uint32_t{0x281}) {
         char buf[16];
         snprintf(buf, sizeof(buf), "0x%X", rest);
-        add(buf);
+        names.push_back(buf);
     }
-    return names.empty() ? "" : " (" + names + ")";
+    return names;
 }
 
-const char kHelpInfo[] = R"HELP(spf info <plugin>
+// spf info, plain text.
+std::string InfoText(const Plugin& plugin, const std::map<std::string, size_t>& counts) {
+    const PluginHeader& h = plugin.info();
+    std::string out;
+    char buf[64];
+    out += "plugin: " + plugin.name() + (plugin.localized() ? " (localized)" : "") + "\n";
+    snprintf(buf, sizeof(buf), "version: %.2f\n", h.version);
+    out += buf;
+    out += "form version: " + std::to_string(plugin.header().formVersion) + "\n";
+    snprintf(buf, sizeof(buf), "flags: 0x%08X", h.flags);
+    out += buf;
+    const auto flagNames = HeaderFlagNames(h.flags);
+    for (size_t i = 0; i < flagNames.size(); ++i) out += (i ? ", " : " (") + flagNames[i];
+    out += flagNames.empty() ? "\n" : ")\n";
+    snprintf(buf, sizeof(buf), "next object id: 0x%08X\n", h.nextObjectId);
+    out += buf;
+    out += "header record count: " + std::to_string(h.numRecords) + "\n";
+    out += "overrides listed (ONAM): " + std::to_string(h.overrideCount) + "\n";
+    if (h.intv) out += "INTV: " + std::to_string(*h.intv) + "\n";
+    if (h.incc) out += "INCC: " + std::to_string(*h.incc) + "\n";
+    if (!h.author.empty()) out += "author: " + h.author + "\n";
+    if (!h.description.empty()) out += "description: " + h.description + "\n";
+    out += "masters: " + std::to_string(plugin.masters().size()) + "\n";
+    for (size_t i = 0; i < plugin.masters().size(); ++i) {
+        snprintf(buf, sizeof(buf), "  [%02zX] ", i);
+        out += buf + plugin.masters()[i] + " (size " + std::to_string(h.masterSizes[i]) + ")\n";
+    }
+    out += "records: " + std::to_string(plugin.records().size() - 1) + "\n";
+    for (const auto& [t, n] : counts)
+        if (t != "TES4") out += "  " + t + " " + std::to_string(n) + "\n";
+    return out;
+}
+
+// spf info --json: one object on one line.
+std::string InfoJson(const Plugin& plugin, const std::map<std::string, size_t>& counts) {
+    const PluginHeader& h = plugin.info();
+    auto hex = [](uint32_t v) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "0x%08X", v);
+        return Value::Str(buf);
+    };
+    auto optional = [](const std::optional<uint32_t>& v) { return v ? Value::Int(*v) : Value(); };
+    Value flagNames = Value::List();
+    for (const auto& n : HeaderFlagNames(h.flags)) flagNames.Items().push_back(Value::Str(n));
+    Value masters = Value::List();
+    const auto names = plugin.mastersUtf8();
+    for (size_t i = 0; i < names.size(); ++i) {
+        Value m = Value::Map();
+        m.Set("index", Value::Int(static_cast<int64_t>(i)));
+        m.Set("name", Value::Str(names[i]));
+        m.Set("size", Value::Int(static_cast<int64_t>(h.masterSizes[i])));
+        masters.Items().push_back(std::move(m));
+    }
+    Value byType = Value::Map();
+    for (const auto& [t, n] : counts)
+        if (t != "TES4") byType.Set(t, Value::Int(static_cast<int64_t>(n)));
+    Value o = Value::Map();
+    o.Set("plugin", Value::Str(plugin.name()));
+    o.Set("version", Value::Float(std::round(h.version * 100.0) / 100.0));
+    o.Set("form_version", Value::Int(plugin.header().formVersion));
+    o.Set("flags", hex(h.flags));
+    o.Set("flag_names", std::move(flagNames));
+    o.Set("localized", Value::Bool(h.localized));
+    o.Set("loads_as_master", Value::Bool(h.master));
+    o.Set("loads_light", Value::Bool(h.light));
+    o.Set("next_object_id", hex(h.nextObjectId));
+    o.Set("header_record_count", Value::Int(h.numRecords));
+    o.Set("overrides_listed", Value::Int(h.overrideCount));
+    o.Set("intv", optional(h.intv));
+    o.Set("incc", optional(h.incc));
+    o.Set("author", Value::Str(h.author));
+    o.Set("description", Value::Str(h.description));
+    o.Set("masters", std::move(masters));
+    o.Set("records", Value::Int(static_cast<int64_t>(plugin.records().size() - 1)));
+    o.Set("records_by_type", std::move(byType));
+    std::string out;
+    WriteJson(o, &out);
+    return out + "\n";
+}
+
+const char kHelpInfo[] = R"HELP(spf info <plugin> [--json] [--out file]
 
 Prints the plugin name (and "(localized)" when its strings live in separate
 files), the facts from its TES4 header, its masters with their index - the
 first byte of a stored FormID - and the size stored for each, and the number
-of records of each type. Plain text.
+of records of each type. Plain text, or with --json one JSON object, the way
+a script or an agent should read it:
+
+  spf info Update.esm --json
+  {"plugin":"Update.esm","version":1.71,"form_version":44,"flags":"0x00000081",
+   "flag_names":["ESM","Localized"],"localized":true,"loads_as_master":true,
+   "loads_light":false,"next_object_id":"0xFF003289","header_record_count":20874,
+   "overrides_listed":2044,"intv":404,"incc":88,"author":"bnesmith","description":"",
+   "masters":[{"index":0,"name":"Skyrim.esm","size":0}],"records":16065,
+   "records_by_type":{"ACHR":39,...}}
+
+intv and incc are null when the plugin has none; author and description are "".
 
 Header facts: version (HEDR: 0.94, 1.70, 1.71), form version, flags, next
 object id, header record count (as the CK counted them, groups included; the
@@ -601,7 +692,7 @@ EXAMPLES
 int Usage() {
     fprintf(stderr,
             "usage:\n"
-            "  spf info   <plugin>\n"
+            "  spf info   <plugin> [--json] [--out file]\n"
             "  spf fields <plugin> <TYPE>\n"
             "  spf export <plugin> [--type T,..] [--form ID,..] [--fields F,..] [--csv|--json] [--out file]\n"
             "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..] [--skip e,..]\n"
@@ -766,6 +857,7 @@ int wmain(int argc, wchar_t** argv) {
     std::string types, forms, fieldList, outPath, positional;
     std::wstring patternsPath;
     bool csv = false;
+    bool json = false;  // spf info --json (export's default)
     for (int i = 3; i < argc; ++i) {
         std::string a = Utf8(argv[i]);
         auto next = [&](std::string* dst) {
@@ -776,7 +868,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == "--fields") next(&fieldList);
         else if (a == "--out") next(&outPath);
         else if (a == "--csv") csv = true;
-        else if (a == "--json") csv = false;
+        else if (a == "--json") { csv = false; json = true; }
         else if (a == "--patterns" && i + 1 < argc) patternsPath = argv[++i];
         else positional = a;
     }
@@ -805,30 +897,7 @@ int wmain(int argc, wchar_t** argv) {
     if (cmd == "info") {
         std::map<std::string, size_t> counts;
         for (const auto& r : plugin->records()) ++counts[r.type];
-        const PluginHeader& h = plugin->info();
-        char buf[64];
-        out += "plugin: " + plugin->name() + (plugin->localized() ? " (localized)" : "") + "\n";
-        snprintf(buf, sizeof(buf), "version: %.2f\n", h.version);
-        out += buf;
-        out += "form version: " + std::to_string(plugin->header().formVersion) + "\n";
-        snprintf(buf, sizeof(buf), "flags: 0x%08X", h.flags);
-        out += buf + HeaderFlagNames(h.flags) + "\n";
-        snprintf(buf, sizeof(buf), "next object id: 0x%08X\n", h.nextObjectId);
-        out += buf;
-        out += "header record count: " + std::to_string(h.numRecords) + "\n";
-        out += "overrides listed (ONAM): " + std::to_string(h.overrideCount) + "\n";
-        if (h.intv) out += "INTV: " + std::to_string(*h.intv) + "\n";
-        if (h.incc) out += "INCC: " + std::to_string(*h.incc) + "\n";
-        if (!h.author.empty()) out += "author: " + h.author + "\n";
-        if (!h.description.empty()) out += "description: " + h.description + "\n";
-        out += "masters: " + std::to_string(plugin->masters().size()) + "\n";
-        for (size_t i = 0; i < plugin->masters().size(); ++i) {
-            snprintf(buf, sizeof(buf), "  [%02zX] ", i);
-            out += buf + plugin->masters()[i] + " (size " + std::to_string(h.masterSizes[i]) + ")\n";
-        }
-        out += "records: " + std::to_string(plugin->records().size() - 1) + "\n";
-        for (const auto& [t, n] : counts)
-            if (t != "TES4") out += "  " + t + " " + std::to_string(n) + "\n";
+        out += json ? InfoJson(*plugin, counts) : InfoText(*plugin, counts);
     } else if (cmd == "fields") {
         std::string type = Upper(positional);
         if (type.empty()) return Usage();

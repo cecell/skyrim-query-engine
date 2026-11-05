@@ -12,7 +12,7 @@ mismatches).
 ## The `spf` tool
 
 ```
-spf info   <plugin>                       TES4 header facts, masters, record counts by type
+spf info   <plugin> [--json]              TES4 header facts, masters, record counts by type
 spf fields <plugin> <TYPE>                which fields that type has, with sub-fields
 spf export <plugin> [options]             chosen fields of chosen forms, as JSON or CSV
     --type WEAP[,ARMO...]                 only these record types
