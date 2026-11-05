@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,10 @@ struct PluginHeader {
     bool light = false;         // ESL flag or .esl extension (loads in the FE slot)
     std::string author;         // CNAM, UTF-8
     std::string description;    // SNAM, UTF-8
+    std::vector<uint64_t> masterSizes;  // DATA after each MAST, same order as masters()
+    uint32_t overrideCount = 0;         // ONAM: number of FormIDs listed
+    std::optional<uint32_t> intv;       // INTV, when present
+    std::optional<uint32_t> incc;       // INCC, when present
 };
 
 struct Field {

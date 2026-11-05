@@ -129,12 +129,25 @@ bool Plugin::Parse(std::string* error) {
     for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
     info.master = info.esm || ext == ".esm" || ext == ".esl";
     info.light = info.esl || ext == ".esl";
+    size_t bigSize = 0;  // from XXXX: the real size of the next subrecord (a large ONAM)
     for (size_t q = 24; q + 6 <= 24 + hdrSize;) {
-        size_t n = U16(d + q + 4);
+        size_t n = bigSize ? bigSize : U16(d + q + 4);
+        bigSize = 0;
         if (q + 6 + n > 24 + hdrSize) break;  // runs past the header
         const char* s = reinterpret_cast<const char*>(d + q + 6);
-        if (memcmp(d + q, "MAST", 4) == 0) {
+        if (memcmp(d + q, "XXXX", 4) == 0 && n == 4) {
+            bigSize = U32(d + q + 6);
+        } else if (memcmp(d + q, "MAST", 4) == 0) {
             p->masters_.emplace_back(s, strnlen(s, n));
+            info.masterSizes.push_back(0);
+        } else if (memcmp(d + q, "DATA", 4) == 0 && n >= 8 && !info.masterSizes.empty()) {
+            memcpy(&info.masterSizes.back(), s, 8);
+        } else if (memcmp(d + q, "ONAM", 4) == 0) {
+            info.overrideCount = static_cast<uint32_t>(n / 4);
+        } else if (memcmp(d + q, "INTV", 4) == 0 && n >= 4) {
+            info.intv = U32(d + q + 6);
+        } else if (memcmp(d + q, "INCC", 4) == 0 && n >= 4) {
+            info.incc = U32(d + q + 6);
         } else if (memcmp(d + q, "HEDR", 4) == 0 && n >= 12) {
             memcpy(&info.version, s, 4);
             info.numRecords = U32(d + q + 10);
