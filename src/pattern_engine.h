@@ -38,6 +38,8 @@ struct DecodeContext {
     int64_t formVersion = 0;
     bool localized = true;
     std::optional<int64_t> epft;  // PERK only: first byte of the last EPFT
+    std::string edidPrefix;       // GMST only: first letter of the EDID, lower case
+    std::string lastAnam;         // PACK only: text of the ANAM before this subrecord
 };
 
 // Compiles a pattern from its JSON form. Throws PatternError on a bad shape.

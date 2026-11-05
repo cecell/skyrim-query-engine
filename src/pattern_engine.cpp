@@ -23,6 +23,7 @@ enum class Prim : uint8_t {
     I32Div100, I16Div100, U16Div65535, U8Div100, F32Div100, U32Div100,
     FloatRad2Deg, FloatDefault, FloatDefaultRad2Deg, FloatColor255, Scaled, ValueRef,
     ColorRgb, ColorRgba, Zstring, Str8, Str16, Str32, EnumU8, EnumU16, EnumU32,
+    Fourcc, U16Div100,
 };
 
 struct Pattern {
@@ -49,6 +50,7 @@ struct Pattern {
 
     // Union
     std::string on;
+    std::optional<int64_t> mask;  // cases are looked up on (value & mask)
     std::map<std::string, std::shared_ptr<const Pattern>> cases;
     std::shared_ptr<const Pattern> deflt;
 
@@ -70,6 +72,7 @@ const std::map<std::string, Prim>& PrimNames() {
         {"lstring", Prim::Lstring}, {"formid", Prim::Formid},
         {"int32_div100", Prim::I32Div100}, {"int16_div100", Prim::I16Div100},
         {"uint16_div65535", Prim::U16Div65535}, {"uint8_div100", Prim::U8Div100},
+        {"uint16_div100", Prim::U16Div100}, {"fourcc", Prim::Fourcc},
         {"float32_div100", Prim::F32Div100}, {"uint32_div100", Prim::U32Div100},
         {"float_rad2deg", Prim::FloatRad2Deg}, {"float_default", Prim::FloatDefault},
         {"float_default_rad2deg", Prim::FloatDefaultRad2Deg}, {"float_color255", Prim::FloatColor255},
@@ -181,6 +184,11 @@ std::shared_ptr<const Pattern> Compile(const Value& j) {
         const Value* on = j.Find("on");
         if (!on || !on->IsString()) BadShape("union missing 'on'");
         p->on = on->AsString();
+        if (const Value* mask = j.Find("mask")) {
+            int64_t m;
+            if (!mask->ToInt(&m)) BadShape("union 'mask' must be an integer");
+            p->mask = m;
+        }
         if (const Value* cs = j.Find("cases"); cs && cs->kind() == Value::Kind::Map) {
             for (const auto& m : cs->Members()) p->cases[m.first] = Compile(m.second);
         }
@@ -260,6 +268,8 @@ public:
         root.emplace_back("@FormVersion", Value::Int(ctx.formVersion));
         root.emplace_back("@Localized", Value::Bool(ctx.localized));
         if (ctx.epft) root.emplace_back("@EPFT", Value::Int(*ctx.epft));
+        root.emplace_back("@EDID0", Value::Str(ctx.edidPrefix));
+        root.emplace_back("@ANAM", Value::Str(ctx.lastAnam));
     }
     void Bind(const std::string& name, Value v) { frames_.back().emplace_back(name, std::move(v)); }
     const Value* Lookup(std::string_view name) const {
@@ -413,6 +423,15 @@ Value ExecPrim(const Pattern& node, Cursor& cur, Scope& scope) {
         case Prim::I16Div100: v = Value::Float(static_cast<int16_t>(cur.U16()) / 100.0); break;
         case Prim::U16Div65535: v = Value::Float(cur.U16() / 65535.0); break;
         case Prim::U8Div100: v = Value::Float(cur.U8() / 100.0); break;
+        case Prim::U16Div100: v = Value::Float(cur.U16() / 100.0); break;
+        case Prim::Fourcc: {
+            // Four characters; all zero bytes read as "" (no code).
+            const uint8_t* b = cur.Read(4);
+            std::string code(reinterpret_cast<const char*>(b), 4);
+            if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0) code.clear();
+            v = Value::Str(code);
+            break;
+        }
         case Prim::F32Div100: v = Value::Float(static_cast<double>(cur.F32()) / 100.0); break;
         case Prim::U32Div100: v = Value::Float(cur.U32() / 100.0); break;
         case Prim::Scaled: {
@@ -559,7 +578,13 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
         }
 
         case PType::Union: {
-            std::string key = scope.Resolve(Value::Str(p.on), cur).LookupKey();
+            Value on = scope.Resolve(Value::Str(p.on), cur);
+            if (p.mask) {
+                int64_t i;
+                if (!on.ToInt(&i)) BadShape("union 'mask' on a value that is not an integer");
+                on = Value::Int(i & *p.mask);
+            }
+            std::string key = on.LookupKey();
             auto it = p.cases.find(key);
             const Pattern* c = it != p.cases.end() ? it->second.get() : p.deflt.get();
             if (!c) BadShape("union: no case for key " + key);
@@ -772,11 +797,11 @@ std::optional<Shape> Walk(const Pattern& p) {
                 case Prim::FloatColor255:
                     return Leaf(K::Int);
                 case Prim::F32: case Prim::FloatRad2Deg: case Prim::FloatDefault: case Prim::FloatDefaultRad2Deg:
-                case Prim::I32Div100: case Prim::I16Div100: case Prim::U16Div65535: case Prim::U8Div100:
+                case Prim::I32Div100: case Prim::I16Div100: case Prim::U16Div65535: case Prim::U8Div100: case Prim::U16Div100:
                 case Prim::F32Div100: case Prim::U32Div100: case Prim::Scaled:
                     return Leaf(K::Real);
                 case Prim::Bool: return Leaf(K::Bool);
-                case Prim::HexU8: case Prim::Zstring: case Prim::Str8: case Prim::Str16: case Prim::Str32:
+                case Prim::HexU8: case Prim::Zstring: case Prim::Str8: case Prim::Str16: case Prim::Str32: case Prim::Fourcc:
                     return Leaf(K::Text);
                 case Prim::EmptyMarker: return Leaf(K::Marker);
                 case Prim::Lstring: return Leaf(K::LString);
