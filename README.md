@@ -17,6 +17,7 @@ spf fields <plugin> <TYPE>                which fields that type has, with sub-f
 spf export <plugin> [options]             chosen fields of chosen forms, as JSON or CSV;
                                           several plugins, or every copy across a load order with the winner and
                                           what conflicts: `spf help export`
+spf diff   <copy> <copy>...               what differs between copies of a plugin, as JSON
     --type WEAP[,ARMO...]                 only these record types
     --form 00012EB7[,Skyrim.esm:012EB7]   only these forms (as stored, or owner:objectID)
     --fields EDID,FULL,DATA.damage        only these fields; omitted or * = all
