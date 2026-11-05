@@ -1,9 +1,11 @@
 // spf: look inside a Skyrim SE plugin and export fields.
 //
-//   spf info   <plugin>                         masters and record counts by type
+//   spf info   <plugin> [--json]                header facts, masters, record counts by type
 //   spf fields <plugin> <TYPE>                  which fields that type has here, with sub-fields
 //   spf export <plugin> [--form ..] [<plugin> [--form ..]]... [options]
 //   spf export --request <file|-> [options]     the chosen fields of the chosen forms
+//   spf export --load-order <plugins.txt> --data <folder> [--form ..] [--conflicts | --conflict-summary]
+//                                               every copy across a load order, winner marked
 //       --type WEAP[,ARMO...]     only these record types
 //       --form 00012EB7[,...]     only these forms (as stored, or Skyrim.esm:012EB7)
 //       --fields EDID,DATA.damage only these fields ("*" or omitted = all);
@@ -21,6 +23,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -28,9 +31,12 @@
 #include <fstream>
 #include <io.h>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "../src/asset_build.h"
@@ -167,9 +173,14 @@ localized strings, repeating subrecords, context-dependent unions (PERK
 effects, conditions), and IMAD's non-ASCII signatures.
 
 COMMANDS
-  spf info   <plugin>             the plugin's masters and record counts by type
+  spf info   <plugin> [--json]    the plugin's header, masters and record counts by type
   spf fields <plugin> <TYPE>      every field that record type has in this plugin
-  spf export <plugin> [options]   the fields you choose, of the forms you choose
+  spf export <plugin> [options]   the fields you choose, of the forms you choose. Also:
+                                  several plugins, each with its own forms (--request
+                                  for long lists); every copy of a form across a load
+                                  order with the winner marked (--load-order), and
+                                  only what differs (--conflicts, --conflict-summary)
+                                  Only the plugins named are opened, never their masters.
   spf build-db [options]          a SQLite database of a whole load order
   spf db add <module> --db x.db   add an optional module (navmesh, landscape...) later
   spf build-assets [options]      a SQLite database of every asset file (Data, mod
@@ -384,6 +395,8 @@ plugin may use more.
 
 const char kHelpExport[] = R"HELP(spf export <plugin> [--form F,..] [<plugin> [--form F,..]]... [options]
 spf export --request <file | -> [options]
+spf export --load-order <plugins.txt> --data <folder> [--form F,.. | --form-file <file | ->] [--type T,..]
+           [--conflicts | --conflict-summary] [--active-only | --all-plugins] [options]
 
 Exports fields of plugins' records. Only the plugins you name are opened: a
 plugin's masters are never needed, whatever its forms refer to, because a
@@ -405,6 +418,41 @@ is one list, and each row also says "plugin" (a leading plugin column in CSV).
                           the current folder). A path is used as it is.
 
   --type WEAP,ARMO        only records of these types (default: every type)
+  --load-order <file>     every copy of each form across a whole load order,
+  --plugins a.esm,b.esp   as build-db works it out: plugins.txt's active plugins
+                          after the base masters and Skyrim.ccc, or the explicit
+                          list; ESM-flagged plugins first either way. Needs
+                          --data, and --form, --form-file or --type. Forms must
+                          be Owner:ObjectID. Rows are grouped by form, in load
+                          order, and also say "plugin", "load_order" and
+                          "winner" (true on the last copy, the one that wins):
+                            {"plugin":"Update.esm","load_order":1,"winner":false,"form":...}
+                            {"plugin":"MyMod.esp","load_order":90,"winner":true,"form":...}
+                          CSV leads with plugin,load_order,winner. Plugins are
+                          only opened, never written; masters missing from
+                          the list don't matter.
+  --form-file <file>      forms for --load-order from a file ("-" = stdin),
+                          separated by commas, spaces or lines.
+  --conflicts             with a load order: the master and every override, with
+                          only the fields whose value differs between any two
+                          copies, and those fields on every copy (null where a
+                          copy lacks one). The values compared are literal, list
+                          order included: this is not xEdit's conflict status,
+                          which ignores some fields (see `spf conflict`).
+                          A form named with --form always answers, with empty
+                          "fields" if nothing differs; a --type sweep leaves
+                          out forms with no difference. --fields limits what
+                          is compared. JSON only.
+  --conflict-summary      the same comparison, one row per form, no values:
+                            {"form":"Skyrim.esm:013BB9","type":"NPC_",
+                             "plugins":["Skyrim.esm","MyMod.esp"],
+                             "conflicts":["ACBS","PNAM"]}
+                          or "conflicts":"no conflicts".
+  --active-only           plugins.txt's active plugins (the default for
+                          --load-order) after the base masters and Skyrim.ccc.
+  --all-plugins           every plugin plugins.txt lists, active or not, in its
+                          order, if its file is in Data. Rows also say "active".
+                          "winner" stays the game's winner: the last ACTIVE copy.
   --form F,F,...          only these forms. Each F is either the FormID as
                           stored in this plugin (00012EB7) or Owner:ObjectID
                           (Skyrim.esm:012EB7), which works in any plugin.
@@ -438,6 +486,7 @@ Examples
   spf export MyMod.esp --form Skyrim.esm:012EB7
   spf export Skyrim.esm --form Skyrim.esm:0132AA,Skyrim.esm:01367B Dawnguard.esm --form Dawnguard.esm:002B74 --fields EDID,PNAM
   spf export --request npcs.txt --data "D:\Skyrim\Data" --fields EDID,PNAM --out headparts.json
+  spf export --load-order "%LOCALAPPDATA%\Skyrim Special Edition\plugins.txt" --data "D:\Skyrim\Data" --form Skyrim.esm:013BB9 --fields EDID,PNAM
   spf export MyMod.esp --type LVLI --fields EDID,LVLO.reference,LVLO.level
   spf export MyMod.esp --type REFR --fields NAME,DATA.pos_x,DATA.pos_y,DATA.pos_z --out refs.json
 )HELP";
@@ -722,6 +771,7 @@ int Usage() {
             "  spf fields <plugin> <TYPE>\n"
             "  spf export <plugin> [--form ID,..] [<plugin> [--form ID,..]].. [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
             "  spf export --request <file|-> [--data <folder>] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
+            "  spf export --load-order <plugins.txt> --data <folder> [--form ID,..] [--form-file <file|->] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
             "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..] [--skip e,..]\n"
             "  spf db add <module>[,..] --db <db>\n"
             "  spf build-assets --out <db> --data <Data> [--staging <root> | --mo2 <dir> --profile <p>]\n"
@@ -891,12 +941,304 @@ std::wstring WidenUtf8(const std::string& s) {
     return w;
 }
 
+// One exported record: form, type, in, deleted, fields.
+void RowJson(const Plugin& plugin, const Record& r, const std::vector<FieldSpec>& specs, Value* obj) {
+    auto fields = plugin.Fields(r);
+    obj->Set("form", Value::Str(plugin.FormKey(r.formId)));
+    obj->Set("type", Value::Str(r.type));
+    if (r.parent) obj->Set("in", Value::Str(plugin.FormKey(r.parent)));
+    if (r.flags & 0x20) obj->Set("deleted", Value::Bool(true));
+    if (specs.empty()) {
+        obj->Set("fields", AllFields(fields));
+    } else {
+        Value sel = Value::Map();
+        for (const auto& s : specs) sel.Set(s.text, Gather(fields, s));
+        obj->Set("fields", std::move(sel));
+    }
+}
+
+// The same as CSV cells: form,type,in,<fields>, no line end.
+std::string RowCsv(const Plugin& plugin, const Record& r, const std::vector<FieldSpec>& specs) {
+    auto fields = plugin.Fields(r);
+    Value parent = r.parent ? Value::Str(plugin.FormKey(r.parent)) : Value();
+    std::string out = CsvCell(Value::Str(plugin.FormKey(r.formId))) + "," + r.type + "," + CsvCell(parent);
+    for (const auto& s : specs) out += "," + CsvCell(Gather(fields, s));
+    return out;
+}
+
+std::string LowerAscii(std::string s) {
+    for (auto& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// spf export --load-order / --plugins: every copy of each form across a load
+// order, grouped by form, in load order, the last copy marked as the winner.
+struct LoadOrderExport {
+    BuildOptions order;
+    std::vector<std::string> forms;  // Owner:ObjectID; empty = every form of `types`
+    std::set<std::string> types;
+    std::vector<FieldSpec> specs;
+    bool csv = false;
+    int threads = 0;
+    enum class Conflicts { Off, Values, Summary } conflicts = Conflicts::Off;
+    bool allPlugins = false;            // every plugin in plugins.txt, active or not
+    std::set<std::string> activeLower;  // with allPlugins: the plugins the game loads
+};
+
+// A value as compared between copies: its JSON, with the owner in FormIDs lower
+// case, since plugins spell a master's name differently in their headers, and
+// one spelling of zero.
+void CompareKey(const Value& v, std::string* out) {
+    switch (v.kind()) {
+        case Value::Kind::String: {
+            const std::string& t = v.AsString();
+            size_t n = t.size();
+            bool formKey = n > 11 && t[n - 7] == ':' && t[n - 11] == '.' &&
+                           t.find_first_not_of("0123456789ABCDEF", n - 6) == std::string::npos;
+            WriteJson(formKey ? Value::Str(LowerAscii(t)) : v, out);
+            break;
+        }
+        case Value::Kind::Float:  // -0.0 and 0.0 are the same value in different bytes
+            WriteJson(v.AsFloat() == 0 ? Value::Float(0.0) : v, out);
+            break;
+        case Value::Kind::List:
+            *out += '[';
+            for (const auto& item : v.Items()) {
+                CompareKey(item, out);
+                *out += ',';
+            }
+            *out += ']';
+            break;
+        case Value::Kind::Map:
+            *out += '{';
+            for (const auto& [k, item] : v.Members()) {
+                *out += k + '=';
+                CompareKey(item, out);
+                *out += ',';
+            }
+            *out += '}';
+            break;
+        default:
+            WriteJson(v, out);
+    }
+}
+
+int ExportLoadOrder(const LoadOrderExport& req, const PatternCatalog& cat, std::string* out) {
+    std::string err;
+    const std::vector<std::string> names = LoadOrder(req.order, nullptr, &err);
+    if (names.empty()) {
+        fprintf(stderr, "load order: %s\n", err.empty() ? "no plugins found" : err.c_str());
+        return 1;
+    }
+    // Requested forms: owner (lower case) and object ID. Repeats count once.
+    struct Wanted {
+        std::string spec, owner;
+        uint32_t local;
+    };
+    std::vector<Wanted> wanted;
+    std::set<std::string> seenSpec;
+    for (const auto& spec : req.forms) {
+        size_t colon = spec.rfind(':');
+        if (colon == std::string::npos) {
+            fprintf(stderr, "a load order needs forms as Owner:ObjectID, not %s\n", spec.c_str());
+            return 2;
+        }
+        uint32_t local = static_cast<uint32_t>(strtoul(spec.c_str() + colon + 1, nullptr, 16)) & 0xFFFFFF;
+        std::string owner = LowerAscii(spec.substr(0, colon));
+        char key[16];
+        snprintf(key, sizeof(key), ":%06X", local);
+        if (seenSpec.insert(owner + key).second) wanted.push_back({spec, owner, local});
+    }
+
+    // Each plugin is opened, searched and rendered by one worker, then closed.
+    struct Row {
+        std::string key;      // the form, lower case; no form list
+        size_t wantedNo = 0;  // the form; with a form list
+        Value json = Value::Map();
+        std::string csv;
+    };
+    std::vector<std::vector<Row>> rowsOf(names.size());
+    std::vector<std::string> shownOf(names.size());
+    std::atomic<size_t> next{0};
+    std::atomic<int> status{0};
+    std::mutex errMutex;
+    auto work = [&] {
+        for (size_t i; (i = next++) < names.size();) {
+            std::wstring path = req.order.data;
+            if (!path.empty() && path.back() != L'\\' && path.back() != L'/') path += L'\\';
+            path += WidenUtf8(names[i]);
+            std::string openErr;
+            auto plugin = Plugin::Open(path, cat, &openErr);
+            shownOf[i] = names[i];
+            if (!plugin) {
+                std::lock_guard<std::mutex> lock(errMutex);
+                fprintf(stderr, "%s: %s\n", names[i].c_str(), openErr.c_str());
+                status = 1;
+                continue;
+            }
+            auto add = [&](const Record& r, size_t wantedNo) {
+                Row row;
+                row.wantedNo = wantedNo;
+                if (req.forms.empty()) row.key = LowerAscii(plugin->FormKey(r.formId));
+                if (req.csv) row.csv = RowCsv(*plugin, r, req.specs);
+                else RowJson(*plugin, r, req.specs, &row.json);
+                rowsOf[i].push_back(std::move(row));
+            };
+            if (!req.forms.empty()) {
+                // A form's owner is this plugin or one of its masters; otherwise it can't have a copy.
+                std::map<std::string, uint32_t> indexOf;
+                const auto masters = plugin->mastersUtf8();
+                for (size_t m = 0; m < masters.size(); ++m) indexOf.emplace(LowerAscii(masters[m]), static_cast<uint32_t>(m));
+                indexOf.emplace(LowerAscii(plugin->nameUtf8()), static_cast<uint32_t>(masters.size()));
+                for (size_t w = 0; w < wanted.size(); ++w) {
+                    auto it = indexOf.find(wanted[w].owner);
+                    if (it == indexOf.end()) continue;
+                    const Record* r = plugin->Find((it->second << 24) | wanted[w].local);
+                    if (r && (req.types.empty() || req.types.count(r->type))) add(*r, w);
+                }
+            } else {
+                for (const auto& r : plugin->records())
+                    if (r.type != "TES4" && req.types.count(r.type)) add(r, 0);
+            }
+        }
+    };
+    int threads = req.threads > 0 ? req.threads : std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    threads = std::min<size_t>(threads, names.size());
+    std::vector<std::thread> pool;
+    for (int t = 0; t < threads; ++t) pool.emplace_back(work);
+    for (auto& t : pool) t.join();
+
+    const bool conflictMode = req.conflicts != LoadOrderExport::Conflicts::Off;
+    auto isActive = [&](size_t plugin) { return !req.allPlugins || req.activeLower.count(LowerAscii(names[plugin])) > 0; };
+
+    // Group by form, keeping load order inside each group. Requested forms come
+    // in the order asked; otherwise each form comes where it first appears.
+    struct Copy {
+        size_t plugin;
+        Row* row;
+    };
+    std::vector<std::vector<Copy>> groups(wanted.size());
+    std::unordered_map<std::string, size_t> groupOfKey;
+    for (size_t i = 0; i < names.size(); ++i) {
+        for (auto& row : rowsOf[i]) {
+            size_t g = row.wantedNo;
+            if (req.forms.empty()) {
+                auto [it, isNew] = groupOfKey.emplace(row.key, groups.size());
+                if (isNew) groups.emplace_back();
+                g = it->second;
+            }
+            groups[g].push_back({i, &row});
+        }
+    }
+    if (req.csv) {
+        *out += "plugin,load_order,winner,form,type,in";
+        for (const auto& s : req.specs) *out += "," + CsvCell(Value::Str(s.text));
+        *out += "\n";
+    } else {
+        *out += "[\n";
+    }
+    bool first = true;
+    for (size_t g = 0; g < groups.size(); ++g) {
+        if (groups[g].empty() && !req.forms.empty())
+            fprintf(stderr, "no such form in this load order: %s\n", wanted[g].spec.c_str());
+        // Only an active copy can win in game.
+        size_t winnerNo = groups[g].size();
+        for (size_t c = groups[g].size(); c-- > 0;) {
+            if (isActive(groups[g][c].plugin)) {
+                winnerNo = c;
+                break;
+            }
+        }
+        // Fields whose value differs between any two copies; a copy without the field counts as null.
+        std::vector<std::string> conflicting;
+        if (conflictMode && !groups[g].empty()) {
+            std::vector<std::string> keys;
+            std::set<std::string> known;
+            for (const Copy& copy : groups[g]) {
+                const Value* fields = copy.row->json.Find("fields");
+                if (!fields) continue;
+                for (const auto& [k, v] : fields->Members())
+                    if (known.insert(k).second) keys.push_back(k);
+            }
+            for (const auto& key : keys) {
+                std::string base;
+                bool differs = false;
+                for (size_t c = 0; c < groups[g].size() && !differs; ++c) {
+                    const Value* v = groups[g][c].row->json.Find("fields")->Find(key);
+                    std::string text;
+                    if (v) CompareKey(*v, &text);
+                    else text = "null";
+                    if (c == 0) base = std::move(text);
+                    else differs = text != base;
+                }
+                if (differs) conflicting.push_back(key);
+            }
+            // --type sweeps show only what conflicts; a form asked for by name always answers.
+            if (conflicting.empty() && req.forms.empty()) continue;
+        }
+        if (req.conflicts == LoadOrderExport::Conflicts::Summary) {
+            if (groups[g].empty()) continue;
+            const Value& head = groups[g][0].row->json;
+            Value obj = Value::Map();
+            obj.Set("form", *head.Find("form"));
+            obj.Set("type", *head.Find("type"));
+            Value plugins = Value::List();
+            for (const Copy& copy : groups[g]) plugins.Items().push_back(Value::Str(names[copy.plugin]));
+            obj.Set("plugins", std::move(plugins));
+            if (conflicting.empty()) {
+                obj.Set("conflicts", Value::Str("no conflicts"));
+            } else {
+                Value list = Value::List();
+                for (const auto& k : conflicting) list.Items().push_back(Value::Str(k));
+                obj.Set("conflicts", std::move(list));
+            }
+            if (!first) *out += ",\n";
+            first = false;
+            WriteJson(obj, out);
+            continue;
+        }
+        for (size_t c = 0; c < groups[g].size(); ++c) {
+            const Copy& copy = groups[g][c];
+            const bool winner = c == winnerNo;
+            if (req.csv) {
+                *out += CsvCell(Value::Str(shownOf[copy.plugin])) + "," + std::to_string(copy.plugin) + "," +
+                        (winner ? "true" : "false") + "," + copy.row->csv + "\n";
+            } else {
+                Value obj = Value::Map();
+                obj.Set("plugin", Value::Str(shownOf[copy.plugin]));
+                obj.Set("load_order", Value::Int(static_cast<int64_t>(copy.plugin)));
+                obj.Set("winner", Value::Bool(winner));
+                if (req.allPlugins) obj.Set("active", Value::Bool(isActive(copy.plugin)));
+                for (const auto& [k, v] : copy.row->json.Members()) {
+                    if (conflictMode && k == "fields") {
+                        Value only = Value::Map();
+                        for (const auto& key : conflicting) {
+                            const Value* field = v.Find(key);
+                            only.Set(key, field ? *field : Value());
+                        }
+                        obj.Set(k, std::move(only));
+                    } else {
+                        obj.Set(k, v);
+                    }
+                }
+                if (!first) *out += ",\n";
+                first = false;
+                WriteJson(obj, out);
+            }
+        }
+    }
+    if (!req.csv) *out += "\n]\n";
+    return status;
+}
+
 // spf export: one or many plugins, each with its own forms.
 int ExportCommand(int argc, wchar_t** argv) {
     std::vector<ExportTarget> targets;
-    std::string types, fieldList, outPath, requestPath;
-    std::wstring patternsPath, dataDir;
-    bool csv = false;
+    std::string types, fieldList, outPath, requestPath, formFile, explicitOrder;
+    std::vector<std::string> looseForms;  // --form with no plugin before it: for a load order
+    std::wstring patternsPath, dataDir, loadOrderFile;
+    bool csv = false, activeOnly = false, allPlugins = false;
+    auto conflicts = LoadOrderExport::Conflicts::Off;
     for (int i = 2; i < argc; ++i) {
         std::string a = Utf8(argv[i]);
         auto next = [&](std::string* dst) {
@@ -906,15 +1248,19 @@ int ExportCommand(int argc, wchar_t** argv) {
         else if (a == "--form") {
             std::string list;
             next(&list);
-            if (targets.empty()) {
-                fprintf(stderr, "--form needs a plugin before it\n");
-                return 2;
-            }
-            for (auto& spec : SplitList(list)) targets.back().forms.push_back(std::move(spec));
+            auto& dst = targets.empty() ? looseForms : targets.back().forms;
+            for (auto& spec : SplitList(list)) dst.push_back(std::move(spec));
         }
         else if (a == "--fields") next(&fieldList);
         else if (a == "--out") next(&outPath);
         else if (a == "--request") next(&requestPath);
+        else if (a == "--form-file") next(&formFile);
+        else if (a == "--conflicts") conflicts = LoadOrderExport::Conflicts::Values;
+        else if (a == "--conflict-summary") conflicts = LoadOrderExport::Conflicts::Summary;
+        else if (a == "--active-only") activeOnly = true;
+        else if (a == "--all-plugins") allPlugins = true;
+        else if (a == "--plugins") next(&explicitOrder);
+        else if (a == "--load-order" && i + 1 < argc) loadOrderFile = argv[++i];
         else if (a == "--csv") csv = true;
         else if (a == "--json") csv = false;
         else if (a == "--data" && i + 1 < argc) dataDir = argv[++i];
@@ -922,24 +1268,139 @@ int ExportCommand(int argc, wchar_t** argv) {
         else if (a.rfind("--", 0) == 0) return Usage();
         else targets.push_back({a, {}});
     }
-    const bool manyPlugins = !requestPath.empty() || targets.size() > 1;
-    if (!requestPath.empty()) {
-        std::string text;
-        if (requestPath == "-") {
+    auto readAll = [](const std::string& path, std::string* text) {
+        if (path == "-") {
             _setmode(_fileno(stdin), _O_BINARY);
             char buf[65536];
             size_t n;
-            while ((n = fread(buf, 1, sizeof(buf), stdin)) > 0) text.append(buf, n);
-        } else {
-            std::ifstream rf(WidenUtf8(requestPath), std::ios::binary);
-            if (!rf) {
-                fprintf(stderr, "cannot read %s\n", requestPath.c_str());
+            while ((n = fread(buf, 1, sizeof(buf), stdin)) > 0) text->append(buf, n);
+            return true;
+        }
+        std::ifstream rf(WidenUtf8(path), std::ios::binary);
+        if (!rf) {
+            fprintf(stderr, "cannot read %s\n", path.c_str());
+            return false;
+        }
+        std::stringstream rs;
+        rs << rf.rdbuf();
+        *text = rs.str();
+        return true;
+    };
+    if (loadOrderFile.empty() && explicitOrder.empty() &&
+        (conflicts != LoadOrderExport::Conflicts::Off || activeOnly || allPlugins)) {
+        fprintf(stderr, "--conflicts, --conflict-summary, --active-only and --all-plugins need --load-order\n");
+        return 2;
+    }
+    if (!loadOrderFile.empty() || !explicitOrder.empty()) {
+        if (activeOnly && allPlugins) {
+            fprintf(stderr, "--active-only and --all-plugins exclude each other\n");
+            return 2;
+        }
+        if ((activeOnly || allPlugins) && loadOrderFile.empty()) {
+            fprintf(stderr, "--active-only and --all-plugins read plugins.txt: they need --load-order\n");
+            return 2;
+        }
+        if (csv && conflicts != LoadOrderExport::Conflicts::Off) {
+            fprintf(stderr, "--conflicts and --conflict-summary are JSON only: each form has its own fields\n");
+            return 2;
+        }
+        if (!targets.empty() || !requestPath.empty()) {
+            fprintf(stderr, "--load-order / --plugins replace naming plugins and --request\n");
+            return 2;
+        }
+        if (dataDir.empty()) {
+            fprintf(stderr, "--load-order / --plugins need --data <folder>\n");
+            return 2;
+        }
+        LoadOrderExport req;
+        req.order.data = dataDir;
+        req.order.loadOrderFile = loadOrderFile;
+        req.order.plugins = SplitList(explicitOrder);
+        req.conflicts = conflicts;
+        if (allPlugins) {
+            // Base masters, Skyrim.ccc, then every line of plugins.txt with a file in Data.
+            req.allPlugins = true;
+            std::wstring dir = dataDir;
+            if (dir.back() != L'\\' && dir.back() != L'/') dir += L'\\';
+            std::vector<std::string> list;
+            auto present = [&](const std::string& n) {
+                return GetFileAttributesW((dir + WidenUtf8(n)).c_str()) != INVALID_FILE_ATTRIBUTES;
+            };
+            auto readLines = [](const std::wstring& path) {
+                std::vector<std::string> lines;
+                std::ifstream in(path, std::ios::binary);
+                std::string line;
+                while (std::getline(in, line)) {
+                    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+                    if (line.rfind("\xEF\xBB\xBF", 0) == 0) line.erase(0, 3);
+                    if (!line.empty() && line[0] != '#') lines.push_back(line);
+                }
+                return lines;
+            };
+            auto addActive = [&](const std::string& n) {
+                if (present(n) && req.activeLower.insert(LowerAscii(n)).second) list.push_back(n);
+            };
+            for (const char* n : {"Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"}) addActive(n);
+            for (const auto& n : readLines(dir + L"..\\Skyrim.ccc")) addActive(n);
+            std::ifstream check(loadOrderFile, std::ios::binary);
+            if (!check) {
+                fprintf(stderr, "cannot read %s\n", Utf8(loadOrderFile).c_str());
                 return 2;
             }
-            std::stringstream rs;
-            rs << rf.rdbuf();
-            text = rs.str();
+            std::set<std::string> listed(req.activeLower);
+            for (const auto& raw : readLines(loadOrderFile)) {
+                const bool on = raw[0] == '*';
+                std::string n = on ? raw.substr(1) : raw;
+                if (on) req.activeLower.insert(LowerAscii(n));
+                if (present(n) && listed.insert(LowerAscii(n)).second) list.push_back(n);
+            }
+            req.order.loadOrderFile.clear();
+            req.order.plugins = std::move(list);
         }
+        req.forms = std::move(looseForms);
+        if (!formFile.empty()) {
+            std::string text, reqErr;
+            if (!readAll(formFile, &text)) return 2;
+            std::vector<ExportTarget> one;
+            if (text.substr(0, 3) == "\xEF\xBB\xBF") text.erase(0, 3);
+            if (!ParseExportRequest("[forms]\n" + text, &one, &reqErr)) {
+                fprintf(stderr, "%s: %s\n", formFile.c_str(), reqErr.c_str());
+                return 2;
+            }
+            for (auto& spec : one[0].forms) req.forms.push_back(std::move(spec));
+        }
+        for (const auto& t : SplitList(types)) req.types.insert(Upper(t));
+        if (req.forms.empty() && req.types.empty()) {
+            fprintf(stderr, "a load order needs --form, --form-file or --type: every form of every plugin is too much\n");
+            return 2;
+        }
+        if (!(fieldList.empty() || fieldList == "*")) req.specs = ParseFields(fieldList);
+        req.csv = csv;
+        if (conflicts == LoadOrderExport::Conflicts::Off && csv && req.specs.empty()) {
+            fprintf(stderr, "--csv needs --fields (a fixed set of columns)\n");
+            return 2;
+        }
+        PatternCatalog cat;
+        if (!LoadCatalog(patternsPath, &cat)) return 2;
+        std::string out;
+        int rc = ExportLoadOrder(req, cat, &out);
+        if (!outPath.empty()) {
+            std::ofstream o(WidenUtf8(outPath), std::ios::binary);
+            o << out;
+        } else {
+            _setmode(_fileno(stdout), _O_BINARY);
+            fwrite(out.data(), 1, out.size(), stdout);
+        }
+        return rc;
+    }
+    if (!looseForms.empty()) {
+        fprintf(stderr, "--form needs a plugin before it, or --load-order\n");
+        return 2;
+    }
+    const bool manyPlugins = !requestPath.empty() || targets.size() > 1;
+    if (!requestPath.empty()) {
+        std::string text;
+        if (!readAll(requestPath, &text)) return 2;
         std::string reqErr;
         if (!ParseExportRequest(text, &targets, &reqErr)) {
             fprintf(stderr, "%s: %s\n", requestPath.c_str(), reqErr.c_str());
@@ -996,28 +1457,13 @@ int ExportCommand(int argc, wchar_t** argv) {
                 if (r.type != "TES4" && (typeSet.empty() || typeSet.count(r.type))) recs.push_back(&r);
         }
         for (const Record* r : recs) {
-            auto fields = plugin->Fields(*r);
-            Value form = Value::Str(plugin->FormKey(r->formId));
-            Value parent = r->parent ? Value::Str(plugin->FormKey(r->parent)) : Value();
             if (csv) {
                 if (manyPlugins) out += CsvCell(Value::Str(shown)) + ",";
-                out += CsvCell(form) + "," + r->type + "," + CsvCell(parent);
-                for (const auto& s : specs) out += "," + CsvCell(Gather(fields, s));
-                out += "\n";
+                out += RowCsv(*plugin, *r, specs) + "\n";
             } else {
                 Value obj = Value::Map();
                 if (manyPlugins) obj.Set("plugin", Value::Str(shown));
-                obj.Set("form", form);
-                obj.Set("type", Value::Str(r->type));
-                if (!parent.IsNull()) obj.Set("in", parent);
-                if (r->flags & 0x20) obj.Set("deleted", Value::Bool(true));
-                if (specs.empty()) {
-                    obj.Set("fields", AllFields(fields));
-                } else {
-                    Value sel = Value::Map();
-                    for (const auto& s : specs) sel.Set(s.text, Gather(fields, s));
-                    obj.Set("fields", std::move(sel));
-                }
+                RowJson(*plugin, *r, specs, &obj);
                 if (!first) out += ",\n";
                 first = false;
                 WriteJson(obj, &out);
