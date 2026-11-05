@@ -68,6 +68,7 @@ public:
     const std::string& name() const { return name_; }  // file name as given
     const std::vector<std::string>& masters() const { return masters_; }  // raw bytes (Windows-1252)
     std::vector<std::string> mastersUtf8() const;                         // the same names as UTF-8
+    const std::string& nameUtf8() const { return keyOwners_.back(); }     // name() as UTF-8
     const PluginHeader& info() const { return info_; }
     bool localized() const { return localized_; }
     const Record& header() const { return records_.front(); }  // TES4
@@ -108,6 +109,7 @@ private:
     std::wstring dir_;
     const PatternCatalog* catalog_ = nullptr;
     std::vector<std::string> masters_;
+    std::vector<std::string> keyOwners_;  // FormKey owners, UTF-8: the masters, then this plugin
     bool localized_ = false;
     PluginHeader info_;
     std::vector<Record> records_;
