@@ -570,6 +570,8 @@ bool ReadVersion(const PluginFile& f, size_t offset, const PatternCatalog& cat, 
             else if (fs == "EPFT" && len) lastEpft = data[0];
             ctx.epft = lastEpft;
         }
+        if (rt == "GMST" && fs == "EDID" && len) ctx.edidPrefix = std::string(1, static_cast<char>(tolower(data[0])));
+        if (rt == "PACK" && fs == "ANAM") ctx.lastAnam.assign(reinterpret_cast<const char*>(data), strnlen(reinterpret_cast<const char*>(data), len));
         if (InSet(kIgnoredSubrecords, rt, fs)) continue;
         std::string key;
         if (const Pattern* pat = cat.Find(rt, fs)) {

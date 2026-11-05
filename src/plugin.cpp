@@ -318,6 +318,8 @@ std::vector<Field> Plugin::Fields(const Record& r, const FormIdMap* formIds, con
             else if (fs == "EPFT" && len) lastEpft = data[0];
             ctx.epft = lastEpft;
         }
+        if (r.type == "GMST" && fs == "EDID" && len) ctx.edidPrefix = std::string(1, static_cast<char>(tolower(data[0])));
+        if (r.type == "PACK" && fs == "ANAM") ctx.lastAnam.assign(reinterpret_cast<const char*>(data), strnlen(reinterpret_cast<const char*>(data), len));
         if (wanted && !(*wanted)(fs)) continue;
         Field f;
         f.sig = fs;
