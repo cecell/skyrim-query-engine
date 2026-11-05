@@ -32,6 +32,7 @@
 #include <io.h>
 #include <map>
 #include <mutex>
+#include <random>
 #include <set>
 #include <sstream>
 #include <string>
@@ -393,7 +394,7 @@ Fields only appear if at least one record in THIS plugin has them; another
 plugin may use more.
 )HELP";
 
-const char kHelpExport[] = R"HELP(spf export <plugin> [--form F,..] [<plugin> [--form F,..]]... [options]
+const char kHelpExport[] = R"HELP(spf export <plugin> [--form F,..] [<plugin> [--form F,..]]... [--limit N [--random [--seed S]]] [options]
 spf export --request <file | -> [options]
 spf export --load-order <plugins.txt> --data <folder> [--form F,.. | --form-file <file | ->] [--type T,..]
            [--conflicts | --conflict-summary] [--active-only | --all-plugins] [options]
@@ -435,10 +436,16 @@ is one list, and each row also says "plugin" (a leading plugin column in CSV).
                           separated by commas, spaces or lines.
   --conflicts             with a load order: the master and every override, with
                           only the fields whose value differs between any two
-                          copies, and those fields on every copy (null where a
-                          copy lacks one). The values compared are literal, list
-                          order included: this is not xEdit's conflict status,
-                          which ignores some fields (see `spf conflict`).
+                          copies, and those fields on every copy, an ITM copy
+                          included (null where a copy lacks one). Left out:
+                          anything named unknown or unused, and whole subrecords
+                          xEdit labels so. Record Flags is compared and shown
+                          (hex, without Compressed, which is only how a record is
+                          stored); Data Size, Form Version and Version Control
+                          Info are not fields here. Everything else is compared
+                          as it reads, capitals and list order included. This is
+                          not xEdit's conflict status (see `spf conflict`), which
+                          has a longer list of ignored fields.
                           A form named with --form always answers, with empty
                           "fields" if nothing differs; a --type sweep leaves
                           out forms with no difference. --fields limits what
@@ -448,6 +455,14 @@ is one list, and each row also says "plugin" (a leading plugin column in CSV).
                              "plugins":["Skyrim.esm","MyMod.esp"],
                              "conflicts":["ACBS","PNAM"]}
                           or "conflicts":"no conflicts".
+  --limit N               at most N records of each plugin named, after --type and
+                          --form: the first N in the file, or with --random N
+                          picked at random, none twice, in random order. Not
+                          with a load order.
+  --random                pick with the operating system's random source, so
+                          every record is equally likely and each run differs.
+  --seed S                with --random: the same S and the same plugin give the
+                          same N records, to repeat a test.
   --active-only           plugins.txt's active plugins (the default for
                           --load-order) after the base masters and Skyrim.ccc.
   --all-plugins           every plugin plugins.txt lists, active or not, in its
@@ -487,6 +502,7 @@ Examples
   spf export Skyrim.esm --form Skyrim.esm:0132AA,Skyrim.esm:01367B Dawnguard.esm --form Dawnguard.esm:002B74 --fields EDID,PNAM
   spf export --request npcs.txt --data "D:\Skyrim\Data" --fields EDID,PNAM --out headparts.json
   spf export --load-order "%LOCALAPPDATA%\Skyrim Special Edition\plugins.txt" --data "D:\Skyrim\Data" --form Skyrim.esm:013BB9 --fields EDID,PNAM
+  spf export Skyrim.esm --type NPC_ --limit 25 --random --fields EDID,PNAM
   spf export MyMod.esp --type LVLI --fields EDID,LVLO.reference,LVLO.level
   spf export MyMod.esp --type REFR --fields NAME,DATA.pos_x,DATA.pos_y,DATA.pos_z --out refs.json
 )HELP";
@@ -769,7 +785,7 @@ int Usage() {
             "usage:\n"
             "  spf info   <plugin> [--json] [--out file]\n"
             "  spf fields <plugin> <TYPE>\n"
-            "  spf export <plugin> [--form ID,..] [<plugin> [--form ID,..]].. [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
+            "  spf export <plugin> [--form ID,..] [<plugin> [--form ID,..]].. [--type T,..] [--limit N [--random [--seed S]]] [--fields F,..] [--csv|--json] [--out file]\n"
             "  spf export --request <file|-> [--data <folder>] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
             "  spf export --load-order <plugins.txt> --data <folder> [--form ID,..] [--form-file <file|->] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
             "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..] [--skip e,..]\n"
@@ -985,6 +1001,71 @@ struct LoadOrderExport {
     std::set<std::string> activeLower;  // with allPlugins: the plugins the game loads
 };
 
+// Whole subrecords xEdit labels Unused or Unknown.
+const struct {
+    const char* record;
+    const char* sig;
+} kUnusedSubrecords[] = {
+#include "../src/unused_subrecords.inc"
+};
+
+bool IsUnusedSubrecord(const std::string& record, const std::string& sig) {
+    for (const auto& u : kUnusedSubrecords)
+        if (sig == u.sig && record == u.record) return true;
+    return false;
+}
+
+bool NamedUnknownOrUnused(const std::string& name) {
+    const std::string n = LowerAscii(name);
+    return n.find("unknown") != std::string::npos || n.find("unused") != std::string::npos;
+}
+
+// The value without anything named unknown or unused, at any depth. False when
+// that was all it held, so a subrecord of only those doesn't count as present.
+bool StripUnknown(const Value& v, Value* out) {
+    if (v.kind() == Value::Kind::Map) {
+        *out = Value::Map();
+        for (const auto& [k, item] : v.Members()) {
+            if (NamedUnknownOrUnused(k)) continue;
+            Value kept;
+            if (StripUnknown(item, &kept)) out->Set(k, std::move(kept));
+        }
+        return !out->Members().empty() || v.Members().empty();
+    }
+    if (v.kind() == Value::Kind::List) {
+        *out = Value::List();
+        for (const auto& item : v.Items()) {
+            Value kept;
+            if (StripUnknown(item, &kept)) out->Items().push_back(std::move(kept));
+        }
+        return true;
+    }
+    *out = v;
+    return true;
+}
+
+// Compressed is how a record is stored, not what it says.
+const uint32_t kStorageFlags = 0x00040000;
+
+// The fields a conflict is judged on: Record Flags, then what remains of each field.
+void ConflictFields(const Record& r, const std::vector<FieldSpec>& specs, Value* row) {
+    const Value* all = row->Find("fields");
+    Value kept = Value::Map();
+    bool wantFlags = specs.empty();
+    for (const auto& s : specs) wantFlags = wantFlags || s.text == "Record Flags";
+    if (wantFlags) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "0x%08X", r.flags & ~kStorageFlags);
+        kept.Set("Record Flags", Value::Str(buf));
+    }
+    for (const auto& [k, v] : all->Members()) {
+        if (k == "Record Flags" || IsUnusedSubrecord(r.type, k)) continue;
+        Value clean;
+        if (StripUnknown(v, &clean)) kept.Set(k, std::move(clean));
+    }
+    row->Set("fields", std::move(kept));
+}
+
 // A value as compared between copies: its JSON, with the owner in FormIDs lower
 // case, since plugins spell a master's name differently in their headers, and
 // one spelling of zero.
@@ -1082,6 +1163,7 @@ int ExportLoadOrder(const LoadOrderExport& req, const PatternCatalog& cat, std::
                 if (req.forms.empty()) row.key = LowerAscii(plugin->FormKey(r.formId));
                 if (req.csv) row.csv = RowCsv(*plugin, r, req.specs);
                 else RowJson(*plugin, r, req.specs, &row.json);
+                if (req.conflicts != LoadOrderExport::Conflicts::Off) ConflictFields(r, req.specs, &row.json);
                 rowsOf[i].push_back(std::move(row));
             };
             if (!req.forms.empty()) {
@@ -1237,7 +1319,9 @@ int ExportCommand(int argc, wchar_t** argv) {
     std::string types, fieldList, outPath, requestPath, formFile, explicitOrder;
     std::vector<std::string> looseForms;  // --form with no plugin before it: for a load order
     std::wstring patternsPath, dataDir, loadOrderFile;
-    bool csv = false, activeOnly = false, allPlugins = false;
+    bool csv = false, activeOnly = false, allPlugins = false, randomPick = false;
+    size_t limit = 0;
+    std::string limitText, seedText;
     auto conflicts = LoadOrderExport::Conflicts::Off;
     for (int i = 2; i < argc; ++i) {
         std::string a = Utf8(argv[i]);
@@ -1257,6 +1341,9 @@ int ExportCommand(int argc, wchar_t** argv) {
         else if (a == "--form-file") next(&formFile);
         else if (a == "--conflicts") conflicts = LoadOrderExport::Conflicts::Values;
         else if (a == "--conflict-summary") conflicts = LoadOrderExport::Conflicts::Summary;
+        else if (a == "--limit") next(&limitText);
+        else if (a == "--seed") next(&seedText);
+        else if (a == "--random") randomPick = true;
         else if (a == "--active-only") activeOnly = true;
         else if (a == "--all-plugins") allPlugins = true;
         else if (a == "--plugins") next(&explicitOrder);
@@ -1267,6 +1354,37 @@ int ExportCommand(int argc, wchar_t** argv) {
         else if (a == "--patterns" && i + 1 < argc) patternsPath = argv[++i];
         else if (a.rfind("--", 0) == 0) return Usage();
         else targets.push_back({a, {}});
+    }
+    if (!limitText.empty()) {
+        char* end = nullptr;
+        unsigned long long n = strtoull(limitText.c_str(), &end, 10);
+        if (*end || n == 0 || limitText[0] == '-') {
+            fprintf(stderr, "--limit needs a number above 0, not %s\n", limitText.c_str());
+            return 2;
+        }
+        limit = static_cast<size_t>(n);
+    }
+    if ((randomPick || !seedText.empty()) && !limit) {
+        fprintf(stderr, "--random and --seed need --limit\n");
+        return 2;
+    }
+    if (!seedText.empty() && !randomPick) {
+        fprintf(stderr, "--seed needs --random\n");
+        return 2;
+    }
+    if (limit && (!loadOrderFile.empty() || !explicitOrder.empty())) {
+        fprintf(stderr, "--limit picks records of one plugin: it doesn't combine with --load-order or --plugins\n");
+        return 2;
+    }
+    std::mt19937_64 rng;
+    if (randomPick) {
+        if (!seedText.empty()) {
+            rng.seed(std::strtoull(seedText.c_str(), nullptr, 10));
+        } else {
+            std::random_device device;  // the operating system's random source
+            std::seed_seq seq{device(), device(), device(), device(), device(), device(), device(), device()};
+            rng.seed(seq);
+        }
     }
     auto readAll = [](const std::string& path, std::string* text) {
         if (path == "-") {
@@ -1455,6 +1573,16 @@ int ExportCommand(int argc, wchar_t** argv) {
         } else {
             for (const auto& r : plugin->records())
                 if (r.type != "TES4" && (typeSet.empty() || typeSet.count(r.type))) recs.push_back(&r);
+        }
+        if (limit && recs.size() > limit) {
+            if (randomPick) {
+                // A partial shuffle: every record equally likely, none twice, in random order.
+                for (size_t i = 0; i < limit; ++i) {
+                    std::uniform_int_distribution<size_t> pick(i, recs.size() - 1);
+                    std::swap(recs[i], recs[pick(rng)]);
+                }
+            }
+            recs.resize(limit);
         }
         for (const Record* r : recs) {
             if (csv) {
