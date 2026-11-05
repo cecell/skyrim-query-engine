@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <io.h>
 #include <map>
@@ -182,6 +183,8 @@ COMMANDS
                                   order with the winner marked (--load-order), and
                                   only what differs (--conflicts, --conflict-summary)
                                   Only the plugins named are opened, never their masters.
+  spf diff   <copy> <copy>...     what differs between copies of a plugin (or
+                                  --name X.esp --in <folder>: every copy of a name)
   spf build-db [options]          a SQLite database of a whole load order
   spf db add <module> --db x.db   add an optional module (navmesh, landscape...) later
   spf build-assets [options]      a SQLite database of every asset file (Data, mod
@@ -507,6 +510,55 @@ Examples
   spf export MyMod.esp --type REFR --fields NAME,DATA.pos_x,DATA.pos_y,DATA.pos_z --out refs.json
 )HELP";
 
+const char kHelpDiff[] = R"HELP(spf diff <copy> <copy> [<copy>...] [options]
+spf diff --name <plugin> --in <folder> [--in <folder>...] [options]
+
+What differs between copies of a plugin: two versions of a mod, or the same
+plugin name in several staging folders. Prints one JSON object. Masters are never
+opened, and nothing is written except --out.
+
+  --name X.esp --in <f>   compare every file of that name below these folders
+                          (any depth), for example your mod staging folders.
+  --type T,T              only these record types.
+  --form F,F              only these forms, as Owner:ObjectID.
+  --form-file <file>      the same from a file ("-" = stdin): commas, spaces or lines.
+  --fields P,P            only these field paths.
+  --summary               name the fields that differ, without their values.
+  --include-unknown       also compare fields named unknown or unused, which are
+                          left out by default, as in export --conflicts.
+  --out <file>            write to a file instead of the console.
+
+Output
+  {"copies":[{"copy":0,"path":"...","size":1234,"identical_to":null},
+             {"copy":1,"path":"...","size":1240,"identical_to":null}],
+   "header":{"version":[1.7,1.71]},            header facts that differ, by copy
+   "summary":{"identical":false,"forms":50,"forms_with_different_fields":2,
+              "forms_not_in_every_copy":1,"by_type":{...},"by_field":{...}},
+   "forms":[
+    {"form":"X.esp:000800","type":"WEAP","edid":"MySword",
+     "fields":{"DATA":[{"damage":7},{"damage":9}]}},
+    {"form":"X.esp:000801","type":"ARMO","edid":"MyArmor","in_copies":[1],
+     "fields":{}}
+   ]}
+
+  Each value list has one entry per copy, in the order of "copies". null means
+  that copy lacks the field, or lacks the form. "in_copies" appears when a form
+  isn't in every copy; fields are compared only among the copies that have it.
+  "identical_to" names an earlier copy with exactly the same bytes.
+
+What counts
+  Text is compared with capitals, and lists with their order. Left out: anything
+  named unknown or unused, and whole subrecords xEdit labels so (see
+  --include-unknown). Record Flags is compared, without Compressed, which is only
+  how a record is stored. "Parent" is the WRLD, CELL or DIAL a record sits in.
+  Forms are matched by owner and object ID, so a reordered master list on its own
+  is not a difference, but it does appear under "header".
+
+Examples
+  spf diff "D:\Mods\A\X.esp" "D:\Mods\B\X.esp" --summary
+  spf diff --name X.esp --in D:\Mods\Staging --in D:\OtherMods --out x_diff.json
+)HELP";
+
 const char kHelpBuildDb[] = R"HELP(spf build-db --out <file.db> --data <Data folder> [options]
 
 Builds one SQLite database of a whole load order, for any app or script to
@@ -788,6 +840,7 @@ int Usage() {
             "  spf export <plugin> [--form ID,..] [<plugin> [--form ID,..]].. [--type T,..] [--limit N [--random [--seed S]]] [--fields F,..] [--csv|--json] [--out file]\n"
             "  spf export --request <file|-> [--data <folder>] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
             "  spf export --load-order <plugins.txt> --data <folder> [--form ID,..] [--form-file <file|->] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
+            "  spf diff <copy> <copy>.. | --name X.esp --in <folder>.. [--type T,..] [--form ID,..] [--fields F,..] [--summary] [--include-unknown] [--out file]\n"
             "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..] [--skip e,..]\n"
             "  spf db add <module>[,..] --db <db>\n"
             "  spf build-assets --out <db> --data <Data> [--staging <root> | --mo2 <dir> --profile <p>]\n"
@@ -797,7 +850,7 @@ int Usage() {
 
 int Help(const std::string& topic) {
     const char* text = topic == "info" ? kHelpInfo : topic == "fields" ? kHelpFields
-                     : topic == "export" ? kHelpExport : topic == "build-db" ? kHelpBuildDb
+                     : topic == "export" ? kHelpExport : topic == "diff" ? kHelpDiff : topic == "build-db" ? kHelpBuildDb
                      : topic == "db" ? kHelpDb : topic == "build-assets" ? kHelpBuildAssets : kHelp;
     _setmode(_fileno(stdout), _O_BINARY);
     fwrite(text, 1, strlen(text), stdout);
@@ -1048,7 +1101,7 @@ bool StripUnknown(const Value& v, Value* out) {
 const uint32_t kStorageFlags = 0x00040000;
 
 // The fields a conflict is judged on: Record Flags, then what remains of each field.
-void ConflictFields(const Record& r, const std::vector<FieldSpec>& specs, Value* row) {
+void ConflictFields(const Record& r, const std::vector<FieldSpec>& specs, Value* row, bool keepUnknown = false) {
     const Value* all = row->Find("fields");
     Value kept = Value::Map();
     bool wantFlags = specs.empty();
@@ -1059,7 +1112,12 @@ void ConflictFields(const Record& r, const std::vector<FieldSpec>& specs, Value*
         kept.Set("Record Flags", Value::Str(buf));
     }
     for (const auto& [k, v] : all->Members()) {
-        if (k == "Record Flags" || IsUnusedSubrecord(r.type, k)) continue;
+        if (k == "Record Flags") continue;
+        if (keepUnknown) {
+            kept.Set(k, v);
+            continue;
+        }
+        if (IsUnusedSubrecord(r.type, k)) continue;
         Value clean;
         if (StripUnknown(v, &clean)) kept.Set(k, std::move(clean));
     }
@@ -1609,6 +1667,363 @@ int ExportCommand(int argc, wchar_t** argv) {
     return status;
 }
 
+// spf diff: what differs between copies of a plugin.
+int DiffCommand(int argc, wchar_t** argv) {
+    std::vector<std::wstring> paths, roots;
+    std::string nameWanted, types, fieldList, outPath, formList, formFile;
+    std::wstring patternsPath;
+    bool summaryOnly = false, keepUnknown = false;
+    for (int i = 2; i < argc; ++i) {
+        std::string a = Utf8(argv[i]);
+        auto next = [&](std::string* dst) {
+            if (i + 1 < argc) *dst = Utf8(argv[++i]);
+        };
+        if (a == "--name") next(&nameWanted);
+        else if (a == "--in" && i + 1 < argc) roots.push_back(argv[++i]);
+        else if (a == "--type") next(&types);
+        else if (a == "--form") {
+            std::string more;
+            next(&more);
+            formList += (formList.empty() ? "" : ",") + more;
+        }
+        else if (a == "--form-file") next(&formFile);
+        else if (a == "--fields") next(&fieldList);
+        else if (a == "--out") next(&outPath);
+        else if (a == "--summary") summaryOnly = true;
+        else if (a == "--include-unknown") keepUnknown = true;
+        else if (a == "--patterns" && i + 1 < argc) patternsPath = argv[++i];
+        else if (a.rfind("--", 0) == 0) return Usage();
+        else paths.push_back(argv[i]);
+    }
+    // --name X --in root: every file of that name below the roots.
+    if (nameWanted.empty() != roots.empty()) {
+        fprintf(stderr, "--name and --in go together\n");
+        return 2;
+    }
+    if (!nameWanted.empty()) {
+        const std::string lower = LowerAscii(nameWanted);
+        std::vector<std::wstring> found;
+        for (const auto& r : roots) {
+            std::error_code ec;
+            for (std::filesystem::recursive_directory_iterator it(r, std::filesystem::directory_options::skip_permission_denied, ec), end;
+                 !ec && it != end; it.increment(ec)) {
+                if (it->is_regular_file(ec) && LowerAscii(Utf8(it->path().filename().wstring())) == lower)
+                    found.push_back(it->path().wstring());
+            }
+            if (ec) fprintf(stderr, "%s: %s\n", Utf8(r).c_str(), ec.message().c_str());
+        }
+        std::sort(found.begin(), found.end());
+        paths.insert(paths.end(), found.begin(), found.end());
+    }
+    if (paths.size() < 2) {
+        fprintf(stderr, "spf diff needs at least 2 copies; found %zu\n", paths.size());
+        return 2;
+    }
+    PatternCatalog cat;
+    if (!LoadCatalog(patternsPath, &cat)) return 2;
+
+    std::vector<std::unique_ptr<Plugin>> plugins;
+    std::vector<std::wstring> opened;
+    int status = 0;
+    for (const auto& p : paths) {
+        std::string err;
+        auto plugin = Plugin::Open(p, cat, &err);
+        if (!plugin) {
+            fprintf(stderr, "%s: %s\n", Utf8(p).c_str(), err.c_str());
+            status = 1;
+            continue;
+        }
+        plugins.push_back(std::move(plugin));
+        opened.push_back(p);
+    }
+    if (plugins.size() < 2) {
+        fprintf(stderr, "spf diff needs at least 2 readable copies\n");
+        return 1;
+    }
+    const size_t n = plugins.size();
+    for (size_t i = 1; i < n; ++i)
+        if (LowerAscii(plugins[i]->nameUtf8()) != LowerAscii(plugins[0]->nameUtf8())) {
+            fprintf(stderr, "note: the file names differ, so FormIDs naming the plugin itself will differ too\n");
+            break;
+        }
+
+    // Byte-identical copies are compared once.
+    std::vector<std::string> bytes(n);
+    std::vector<size_t> sameAs(n);
+    for (size_t i = 0; i < n; ++i) {
+        std::ifstream in(opened[i], std::ios::binary);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        bytes[i] = ss.str();
+        sameAs[i] = i;
+        for (size_t j = 0; j < i; ++j)
+            if (bytes[j] == bytes[i]) {
+                sameAs[i] = j;
+                break;
+            }
+    }
+    std::vector<size_t> distinct;
+    for (size_t i = 0; i < n; ++i)
+        if (sameAs[i] == i) distinct.push_back(i);
+
+    Value copies = Value::List();
+    for (size_t i = 0; i < n; ++i) {
+        Value c = Value::Map();
+        c.Set("copy", Value::Int(static_cast<int64_t>(i)));
+        c.Set("path", Value::Str(Utf8(opened[i])));
+        c.Set("size", Value::Int(static_cast<int64_t>(bytes[i].size())));
+        c.Set("identical_to", sameAs[i] == i ? Value() : Value::Int(static_cast<int64_t>(sameAs[i])));
+        copies.Items().push_back(std::move(c));
+    }
+    bytes.clear();
+
+    // Header facts that differ.
+    std::vector<Value> heads(n);
+    for (size_t i = 0; i < n; ++i) {
+        std::map<std::string, size_t> counts;
+        for (const auto& r : plugins[i]->records()) ++counts[r.type];
+        std::string text, err;
+        text = InfoJson(*plugins[i], counts);
+        ParseJson(text, &heads[i], &err);
+        Value flat = Value::Map();
+        for (const auto& [k, v] : heads[i].Members()) {
+            if (k == "plugin" || k == "records_by_type" || k == "flag_names") continue;
+            if (k == "masters") {
+                Value names = Value::List();
+                for (const auto& m : plugins[i]->mastersUtf8()) names.Items().push_back(Value::Str(m));
+                flat.Set(k, std::move(names));
+            } else {
+                flat.Set(k, v);
+            }
+        }
+        heads[i] = std::move(flat);
+    }
+    Value headDiff = Value::Map();
+    for (const auto& [k, v] : heads[0].Members()) {
+        std::string base;
+        bool differs = false;
+        for (size_t i = 0; i < n; ++i) {
+            std::string text;
+            CompareKey(*heads[i].Find(k), &text);
+            if (i == 0) base = text;
+            else differs = differs || text != base;
+        }
+        if (!differs) continue;
+        Value list = Value::List();
+        for (size_t i = 0; i < n; ++i) list.Items().push_back(*heads[i].Find(k));
+        headDiff.Set(k, std::move(list));
+    }
+
+    // Every form of every distinct copy; a master's name may differ in case, and
+    // the plugin itself counts as one owner whatever its file is called.
+    std::set<std::string> typeSet, formSet;
+    for (const auto& t : SplitList(types)) typeSet.insert(Upper(t));
+    auto keyOf = [](const Plugin& p, uint32_t formId) {
+        std::string k = LowerAscii(p.FormKey(formId));
+        const std::string self = LowerAscii(p.nameUtf8());
+        if (k.rfind(self + ":", 0) == 0) k = "<self>" + k.substr(self.size());
+        return k;
+    };
+    std::vector<std::string> forms = SplitList(formList);
+    if (!formFile.empty()) {
+        std::string text;
+        if (formFile == "-") {
+            _setmode(_fileno(stdin), _O_BINARY);
+            char buf[65536];
+            size_t got;
+            while ((got = fread(buf, 1, sizeof(buf), stdin)) > 0) text.append(buf, got);
+        } else {
+            std::ifstream in(WidenUtf8(formFile), std::ios::binary);
+            if (!in) {
+                fprintf(stderr, "cannot read %s\n", formFile.c_str());
+                return 2;
+            }
+            std::stringstream ss;
+            ss << in.rdbuf();
+            text = ss.str();
+        }
+        if (text.substr(0, 3) == "\xEF\xBB\xBF") text.erase(0, 3);
+        std::vector<ExportTarget> one;
+        std::string err;
+        ParseExportRequest("[forms]\n" + text, &one, &err);
+        forms.insert(forms.end(), one[0].forms.begin(), one[0].forms.end());
+    }
+    const std::string selfLower = LowerAscii(plugins[0]->nameUtf8());
+    for (const auto& spec : forms) {
+        size_t colon = spec.rfind(':');
+        if (colon == std::string::npos) {
+            fprintf(stderr, "spf diff needs forms as Owner:ObjectID, not %s\n", spec.c_str());
+            return 2;
+        }
+        std::string owner = LowerAscii(spec.substr(0, colon));
+        char id[16];
+        snprintf(id, sizeof(id), ":%06x", static_cast<uint32_t>(strtoul(spec.c_str() + colon + 1, nullptr, 16)) & 0xFFFFFF);
+        formSet.insert((owner == selfLower ? std::string("<self>") : owner) + id);
+    }
+    struct Entry {
+        std::vector<const Record*> copy;  // by distinct copy
+    };
+    std::vector<Entry> entries;
+    std::unordered_map<std::string, size_t> entryOf;
+    for (size_t d = 0; d < distinct.size(); ++d) {
+        const Plugin& p = *plugins[distinct[d]];
+        for (const auto& r : p.records()) {
+            if (r.type == "TES4" || (!typeSet.empty() && !typeSet.count(r.type))) continue;
+            std::string key = keyOf(p, r.formId);
+            if (!formSet.empty() && !formSet.count(key)) continue;
+            auto [it, isNew] = entryOf.emplace(std::move(key), entries.size());
+            if (isNew) entries.push_back({std::vector<const Record*>(distinct.size(), nullptr)});
+            entries[it->second].copy[d] = &r;
+        }
+    }
+
+    const std::vector<FieldSpec> specs = fieldList.empty() || fieldList == "*" ? std::vector<FieldSpec>{} : ParseFields(fieldList);
+    struct Outcome {
+        std::string json, type;
+        bool partial = false;
+        std::vector<std::string> fields;
+    };
+    std::vector<Outcome> outcomes(entries.size());
+    std::atomic<size_t> nextEntry{0};
+    auto work = [&] {
+        for (size_t e; (e = nextEntry++) < entries.size();) {
+            const Entry& entry = entries[e];
+            std::vector<Value> rows(distinct.size(), Value::Map());
+            std::vector<std::string> keys;
+            std::set<std::string> known;
+            size_t present = 0, firstPresent = distinct.size();
+            for (size_t d = 0; d < distinct.size(); ++d) {
+                if (!entry.copy[d]) continue;
+                ++present;
+                if (firstPresent == distinct.size()) firstPresent = d;
+                const Plugin& p = *plugins[distinct[d]];
+                RowJson(p, *entry.copy[d], specs, &rows[d]);
+                ConflictFields(*entry.copy[d], specs, &rows[d], keepUnknown);
+                const Value* fields = rows[d].Find("fields");
+                for (const auto& [k, v] : fields->Members())
+                    if (known.insert(k).second) keys.push_back(k);
+                if (const Value* parent = rows[d].Find("in"); parent && specs.empty() && known.insert("Parent").second)
+                    keys.push_back("Parent");
+            }
+            auto valueOf = [&](size_t d, const std::string& key) -> const Value* {
+                if (key == "Parent") return rows[d].Find("in");
+                return rows[d].Find("fields")->Find(key);
+            };
+            Outcome& out = outcomes[e];
+            out.type = entry.copy[firstPresent]->type;
+            out.partial = present < distinct.size();
+            for (const auto& key : keys) {
+                std::string base;
+                bool started = false, differs = false;
+                for (size_t d = 0; d < distinct.size() && !differs; ++d) {
+                    if (!entry.copy[d]) continue;
+                    std::string text;
+                    if (const Value* v = valueOf(d, key)) CompareKey(*v, &text);
+                    else text = "null";
+                    if (!started) {
+                        base = std::move(text);
+                        started = true;
+                    } else {
+                        differs = text != base;
+                    }
+                }
+                if (differs) out.fields.push_back(key);
+            }
+            if (out.fields.empty() && !out.partial) continue;
+            Value obj = Value::Map();
+            obj.Set("form", *rows[firstPresent].Find("form"));
+            obj.Set("type", Value::Str(out.type));
+            if (const Value* edid = rows[firstPresent].Find("fields")->Find("EDID")) obj.Set("edid", *edid);
+            if (out.partial) {
+                Value in = Value::List();
+                for (size_t i = 0; i < n; ++i) {
+                    size_t d = std::find(distinct.begin(), distinct.end(), sameAs[i]) - distinct.begin();
+                    if (entry.copy[d]) in.Items().push_back(Value::Int(static_cast<int64_t>(i)));
+                }
+                obj.Set("in_copies", std::move(in));
+            }
+            if (summaryOnly) {
+                Value names = Value::List();
+                for (const auto& k : out.fields) names.Items().push_back(Value::Str(k));
+                obj.Set("fields", std::move(names));
+            } else {
+                Value values = Value::Map();
+                for (const auto& k : out.fields) {
+                    Value perCopy = Value::List();
+                    for (size_t i = 0; i < n; ++i) {
+                        size_t d = std::find(distinct.begin(), distinct.end(), sameAs[i]) - distinct.begin();
+                        const Value* v = entry.copy[d] ? valueOf(d, k) : nullptr;
+                        perCopy.Items().push_back(v ? *v : Value());
+                    }
+                    values.Set(k, std::move(perCopy));
+                }
+                obj.Set("fields", std::move(values));
+            }
+            WriteJson(obj, &out.json);
+        }
+    };
+    int threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    std::vector<std::thread> pool;
+    for (int t = 0; t < threads; ++t) pool.emplace_back(work);
+    for (auto& t : pool) t.join();
+
+    size_t different = 0, partial = 0;
+    std::map<std::string, std::pair<size_t, size_t>> byType;
+    std::map<std::string, size_t> byField;
+    for (const auto& o : outcomes) {
+        if (o.json.empty()) continue;
+        if (!o.fields.empty()) {
+            ++different;
+            ++byType[o.type].first;
+        }
+        if (o.partial) {
+            ++partial;
+            ++byType[o.type].second;
+        }
+        for (const auto& k : o.fields) ++byField[k];
+    }
+    Value summary = Value::Map();
+    summary.Set("identical", Value::Bool(distinct.size() == 1));
+    summary.Set("forms", Value::Int(static_cast<int64_t>(entries.size())));
+    summary.Set("forms_with_different_fields", Value::Int(static_cast<int64_t>(different)));
+    summary.Set("forms_not_in_every_copy", Value::Int(static_cast<int64_t>(partial)));
+    Value typeCounts = Value::Map();
+    for (const auto& [t, c] : byType) {
+        Value one = Value::Map();
+        one.Set("different", Value::Int(static_cast<int64_t>(c.first)));
+        one.Set("not_in_every_copy", Value::Int(static_cast<int64_t>(c.second)));
+        typeCounts.Set(t, std::move(one));
+    }
+    summary.Set("by_type", std::move(typeCounts));
+    Value fieldCounts = Value::Map();
+    for (const auto& [k, c] : byField) fieldCounts.Set(k, Value::Int(static_cast<int64_t>(c)));
+    summary.Set("by_field", std::move(fieldCounts));
+
+    std::string out = "{\"copies\":";
+    WriteJson(copies, &out);
+    out += ",\n\"header\":";
+    WriteJson(headDiff, &out);
+    out += ",\n\"summary\":";
+    WriteJson(summary, &out);
+    out += ",\n\"forms\":[";
+    bool first = true;
+    for (const auto& o : outcomes) {
+        if (o.json.empty()) continue;
+        out += first ? "\n" : ",\n";
+        first = false;
+        out += o.json;
+    }
+    out += "\n]}\n";
+    if (!outPath.empty()) {
+        std::ofstream o(WidenUtf8(outPath), std::ios::binary);
+        o << out;
+    } else {
+        _setmode(_fileno(stdout), _O_BINARY);
+        fwrite(out.data(), 1, out.size(), stdout);
+    }
+    return status;
+}
+
 int wmain(int argc, wchar_t** argv) {
     // spf help [cmd], spf --help, spf <cmd> --help
     std::string arg1 = argc > 1 ? Utf8(argv[1]) : "";
@@ -1622,6 +2037,7 @@ int wmain(int argc, wchar_t** argv) {
     if (arg1 == "db") return DbCommand(argc, argv);
     if (arg1 == "build-assets") return BuildAssetsCommand(argc, argv);
     if (arg1 == "export") return ExportCommand(argc, argv);
+    if (arg1 == "diff") return DiffCommand(argc, argv);
     if (argc < 3) return argc == 1 ? Help("") : Usage();
     std::string cmd = Utf8(argv[1]);
     std::wstring pluginPath = argv[2];
