@@ -49,7 +49,7 @@ struct Cursor {
         if (!Has(len)) return {};
         const uint8_t* p = d + pos;
         pos += len;
-        return Utf8Lossy(p, strnlen(reinterpret_cast<const char*>(p), len));
+        return TextToUtf8(p, strnlen(reinterpret_cast<const char*>(p), len));
     }
 };
 
@@ -261,7 +261,7 @@ bool ReadHkx(const uint8_t* d, size_t n, HkxInfo* out, std::string* error) {
         }
         out->pointerSize = d[16];
         const bool little = d[17] == 1;
-        out->havokVersion = Utf8Lossy(d + 40, strnlen(reinterpret_cast<const char*>(d + 40), 16));
+        out->havokVersion = TextToUtf8(d + 40, strnlen(reinterpret_cast<const char*>(d + 40), 16));
         out->valid = little && (out->pointerSize == 4 || out->pointerSize == 8) && !out->havokVersion.empty();
         if (!out->valid) *error = "hkx: unexpected packfile layout";
         return true;

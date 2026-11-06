@@ -64,7 +64,7 @@ bool StringTables::Parse(int c, const uint8_t* data, size_t size) {
             if (off + 4 + static_cast<uint64_t>(len) > dataSize) continue;
             while (len && s[len - 1] == 0) --len;
         }
-        tables_[c][id] = Utf8Lossy(s, len);
+        tables_[c][id] = TextToUtf8(s, len);
     }
     return true;
 }

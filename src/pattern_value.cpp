@@ -314,15 +314,14 @@ void WriteJson(const Value& v, std::string* out) {
     }
 }
 
-std::string Utf8Lossy(const uint8_t* p, size_t n) {
-    static const char kRepl[] = "\xEF\xBF\xBD";
-    std::string out;
-    out.reserve(n);
-    size_t i = 0;
-    while (i < n) {
+const uint16_t kCp1252High[32] = {0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+                                  0x2039, 0x0152, 0x008D, 0x017D, 0x008F, 0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+                                  0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178};
+
+bool IsValidUtf8(const uint8_t* p, size_t n) {
+    for (size_t i = 0; i < n;) {
         uint8_t b = p[i];
         if (b < 0x80) {
-            out.push_back(static_cast<char>(b));
             ++i;
             continue;
         }
@@ -335,24 +334,33 @@ std::string Utf8Lossy(const uint8_t* p, size_t n) {
         else if (b == 0xF0) { len = 4; lo = 0x90; }
         else if (b >= 0xF1 && b <= 0xF3) len = 4;
         else if (b == 0xF4) { len = 4; hi = 0x8F; }
-        else {
-            out += kRepl;
-            ++i;
-            continue;
-        }
-        size_t k = 1;
-        for (; k < len; ++k) {
-            if (i + k >= n) break;
+        else return false;
+        if (i + len > n) return false;
+        for (size_t k = 1; k < len; ++k) {
             uint8_t c = p[i + k];
-            uint8_t l = k == 1 ? lo : 0x80, h = k == 1 ? hi : 0xBF;
-            if (c < l || c > h) break;
+            if (c < (k == 1 ? lo : 0x80) || c > (k == 1 ? hi : 0xBF)) return false;
         }
-        if (k == len) {
-            out.append(reinterpret_cast<const char*>(p + i), len);
+        i += len;
+    }
+    return true;
+}
+
+std::string TextToUtf8(const uint8_t* p, size_t n) {
+    if (IsValidUtf8(p, n)) return std::string(reinterpret_cast<const char*>(p), n);
+    std::string out;
+    out.reserve(n + n / 8);
+    for (size_t i = 0; i < n; ++i) {
+        uint32_t cp = p[i] >= 0x80 && p[i] <= 0x9F ? kCp1252High[p[i] - 0x80] : p[i];
+        if (cp < 0x80) {
+            out.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | cp >> 6));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
         } else {
-            out += kRepl;  // the valid prefix becomes one replacement
+            out.push_back(static_cast<char>(0xE0 | cp >> 12));
+            out.push_back(static_cast<char>(0x80 | (cp >> 6 & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
         }
-        i += k;
     }
     return out;
 }

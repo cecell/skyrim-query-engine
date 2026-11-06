@@ -250,7 +250,7 @@ struct PluginFile {
                     if (off + 4 + len > dataSize) continue;
                     while (len && s[len - 1] == 0) --len;
                 }
-                strings[c][id] = Utf8Lossy(s, len);
+                strings[c][id] = TextToUtf8(s, len);
             }
         }
     }

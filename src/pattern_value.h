@@ -64,8 +64,16 @@ bool ParseJson(std::string_view text, Value* out, std::string* error);
 // serde_json does.
 void WriteJson(const Value& v, std::string* out);
 
-// Bytes -> UTF-8, replacing invalid sequences with U+FFFD the way Rust's
-// String::from_utf8_lossy does (one replacement per maximal invalid prefix).
-std::string Utf8Lossy(const uint8_t* p, size_t n);
+bool IsValidUtf8(const uint8_t* p, size_t n);
+
+// Text as a plugin stores it -> UTF-8. Text that is valid UTF-8 stays as it is;
+// anything else is read as Windows-1252, one whole string at a time. Every byte
+// maps to a character, so nothing is lost and it can be written back. Text in
+// another code page (Russian, say) reads as the wrong letters, not as damage.
+std::string TextToUtf8(const uint8_t* p, size_t n);
+
+// Unicode for bytes 0x80..0x9F of Windows-1252. The 5 bytes it leaves undefined
+// map to the control characters of the same number, as Windows does.
+extern const uint16_t kCp1252High[32];
 
 }  // namespace skqe
