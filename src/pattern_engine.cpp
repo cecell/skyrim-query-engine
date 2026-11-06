@@ -289,6 +289,7 @@ public:
     void Pop() {
         if (frames_.size() > 1) frames_.pop_back();
     }
+    std::vector<TraceLeaf>* trace = nullptr;  // set by TraceSubrecord: also report where each leaf's bytes are
 
     // A literal, a "$name" / "$@KEY" lookup, or one of the meta-refs.
     Value Resolve(const Value& raw, const Cursor& cur) const {
@@ -503,21 +504,46 @@ Value ExecPrim(const Pattern& node, Cursor& cur, Scope& scope) {
     return v;
 }
 
+// Puts a seq's or repeat's segment in front of the paths of the leaves its item
+// reported, the way spf's Select walks the decoded value.
+void PrefixLeaves(std::vector<TraceLeaf>* leaves, size_t from, size_t to, const std::string& seg) {
+    for (size_t i = from; i < to; ++i) {
+        std::string& path = (*leaves)[i].path;
+        if (path.empty()) path = seg;
+        else if (path[0] == '[') path = seg + path;
+        else path = seg + "." + path;
+    }
+}
+
 // nullopt = a skip, which an enclosing seq drops.
 std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
     switch (p.type) {
-        case PType::Prim: return ExecPrim(p, cur, scope);
+        case PType::Prim: {
+            size_t start = cur.pos;
+            Value v = ExecPrim(p, cur, scope);
+            if (scope.trace) scope.trace->push_back({"", start, cur.pos - start, &p, v, p.bindAs.has_value()});
+            return v;
+        }
 
         case PType::Seq: {
             std::vector<Value> results;
             std::vector<const std::optional<std::string>*> ids;
             bool labeled = false;
+            std::vector<std::pair<size_t, size_t>> ranges;  // leaves each result reported
             for (const auto& item : p.items) {
+                size_t mark = scope.trace ? scope.trace->size() : 0;
                 std::optional<Value> r = Exec(*item.first, cur, scope);
                 if (!r) continue;
                 results.push_back(std::move(*r));
                 ids.push_back(&item.second);
                 if (item.second) labeled = true;
+                if (scope.trace) ranges.emplace_back(mark, scope.trace->size());
+            }
+            if (scope.trace && (labeled || !p.unwrap || results.size() != 1)) {
+                for (size_t i = 0; i < ranges.size(); ++i) {
+                    std::string seg = labeled ? (*ids[i] ? **ids[i] : "_" + std::to_string(i)) : "[" + std::to_string(i) + "]";
+                    PrefixLeaves(scope.trace, ranges[i].first, ranges[i].second, seg);
+                }
             }
             if (labeled) {
                 Value m = Value::Map();
@@ -532,8 +558,12 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
 
         case PType::Repeat: {
             std::optional<int64_t> count;
-            if (p.nPfx) count = cur.ReadUint(p.nPfx);
-            else if (p.n) count = ResolveCount(*p.n, scope, cur, "repeat");
+            if (p.nPfx) {
+                size_t start = cur.pos;
+                count = cur.ReadUint(p.nPfx);
+                // Not part of the decoded value, but an edit of the list must know it.
+                if (scope.trace) scope.trace->push_back({"#count", start, cur.pos - start, nullptr, Value::Int(*count), true});
+            } else if (p.n) count = ResolveCount(*p.n, scope, cur, "repeat");
             std::vector<Value> items;
             if (count) {
                 // The count comes from the data. Far more items than bytes
@@ -545,6 +575,7 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
                 for (int64_t k = 0; k < *count; ++k) {
                     scope.Push();
                     std::optional<Value> v;
+                    size_t mark = scope.trace ? scope.trace->size() : 0;
                     try {
                         v = Exec(*p.body, cur, scope);
                     } catch (...) {
@@ -552,6 +583,7 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
                         throw;
                     }
                     scope.Pop();
+                    if (scope.trace) PrefixLeaves(scope.trace, mark, scope.trace->size(), "[" + std::to_string(k) + "]");
                     items.push_back(v ? std::move(*v) : Value());
                 }
             } else {
@@ -561,15 +593,20 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
                     size_t start = cur.pos;
                     scope.Push();
                     std::optional<Value> v;
+                    size_t mark = scope.trace ? scope.trace->size() : 0;
                     try {
                         v = Exec(*p.body, cur, scope);
                     } catch (const PatternError& e) {
                         scope.Pop();
                         if (!e.overread()) throw;
                         cur.pos = start;
+                        if (scope.trace) scope.trace->resize(mark);  // rolled back
                         break;
                     }
                     scope.Pop();
+                    if (scope.trace) {
+                        PrefixLeaves(scope.trace, mark, scope.trace->size(), "[" + std::to_string(items.size()) + "]");
+                    }
                     items.push_back(v ? std::move(*v) : Value());
                     if (cur.pos == start) break;
                 }
@@ -603,8 +640,11 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
 
         case PType::Bytes: {
             size_t n = p.n ? static_cast<size_t>(ResolveCount(*p.n, scope, cur, "bytes")) : cur.Remaining();
+            size_t start = cur.pos;
             const uint8_t* b = cur.Read(n);
-            return Value::Str(HexBytes(b, n));
+            Value v = Value::Str(HexBytes(b, n));
+            if (scope.trace) scope.trace->push_back({"", start, n, &p, v, false});
+            return v;
         }
 
         case PType::Window: {
@@ -630,13 +670,16 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
         }
 
         case PType::Bitfield: {
+            size_t start = cur.pos;
             uint32_t raw = cur.ReadUint(p.size);
             std::vector<Value> flags;
             for (const auto& [bit, name] : p.bits) {
                 if (bit < 32 && (raw & (1u << bit))) flags.push_back(Value::Str(name));
             }
             if (p.bindAs) scope.Bind(*p.bindAs, Value::Int(raw));
-            return Value::List(std::move(flags));
+            Value v = Value::List(std::move(flags));
+            if (scope.trace) scope.trace->push_back({"", start, cur.pos - start, &p, v, p.bindAs.has_value()});
+            return v;
         }
     }
     return Value();
@@ -652,6 +695,313 @@ Value DecodeSubrecord(const Pattern& pattern, const uint8_t* data, size_t size, 
     std::optional<Value> v = Exec(pattern, cur, scope);
     return v ? std::move(*v) : Value();
 }
+
+Value TraceSubrecord(const Pattern& pattern, const uint8_t* data, size_t size, const DecodeContext& ctx,
+                     std::vector<TraceLeaf>* leaves) {
+    Cursor cur{data, 0, size};
+    Scope scope(ctx);
+    scope.trace = leaves;
+    std::optional<Value> v = Exec(pattern, cur, scope);
+    return v ? std::move(*v) : Value();
+}
+
+// ---- encoding one leaf -------------------------------------------------------
+
+namespace {
+
+bool Fail(std::string* err, std::string why) {
+    *err = std::move(why);
+    return false;
+}
+
+bool ToDouble(const Value& v, double* out) {
+    switch (v.kind()) {
+        case Value::Kind::Int: *out = static_cast<double>(v.AsInt()); return true;
+        case Value::Kind::Float: *out = v.AsFloat(); return true;
+        case Value::Kind::Bool: *out = v.AsBool() ? 1 : 0; return true;
+        case Value::Kind::String: {
+            char* end = nullptr;
+            const std::string& s = v.AsString();
+            double d = strtod(s.c_str(), &end);
+            if (s.empty() || *end) return false;
+            *out = d;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+bool ToInteger(const Value& v, int64_t* out) {
+    if (v.ToInt(out)) return true;
+    if (v.IsString()) {
+        const std::string& s = v.AsString();
+        char* end = nullptr;
+        long long i = strtoll(s.c_str(), &end, 0);  // decimal or 0x...
+        if (s.empty() || *end) return false;
+        *out = i;
+        return true;
+    }
+    return false;
+}
+
+void PutLE(uint64_t v, int width, std::vector<uint8_t>* out) {
+    for (int i = 0; i < width; ++i) out->push_back(static_cast<uint8_t>(v >> (8 * i)));
+}
+
+bool PutInt(const Value& in, int width, bool isSigned, std::vector<uint8_t>* out, std::string* err) {
+    int64_t i;
+    if (!ToInteger(in, &i)) return Fail(err, "expected an integer");
+    int64_t lo = isSigned ? -(int64_t{1} << (width * 8 - 1)) : 0;
+    int64_t hi = isSigned ? (int64_t{1} << (width * 8 - 1)) - 1 : (int64_t{1} << (width * 8)) - 1;
+    if (i < lo || i > hi) return Fail(err, std::to_string(i) + " does not fit " + std::to_string(width) + " bytes");
+    PutLE(static_cast<uint64_t>(i), width, out);
+    return true;
+}
+
+bool PutRounded(double d, int width, bool isSigned, std::vector<uint8_t>* out, std::string* err) {
+    if (std::isnan(d) || std::isinf(d)) return Fail(err, "not a finite number");
+    return PutInt(Value::Int(static_cast<int64_t>(std::llround(d))), width, isSigned, out, err);
+}
+
+void PutFloat(double d, std::vector<uint8_t>* out) {
+    float f = static_cast<float>(d);
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    PutLE(u, 4, out);
+}
+
+// UTF-8 -> what a plugin stores: the encoding the old text was in when that
+// shows (non-ASCII bytes that are valid UTF-8 stay UTF-8), otherwise
+// Windows-1252 when every character has a place there (what the game's English
+// text uses), otherwise UTF-8.
+std::string TextToFile(const std::string& utf8, const uint8_t* old, size_t oldSize) {
+    if (std::all_of(utf8.begin(), utf8.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80; })) return utf8;
+    if (old && std::any_of(old, old + oldSize, [](uint8_t b) { return b >= 0x80; }) &&
+        Utf8Lossy(old, oldSize).find("\xEF\xBF\xBD") == std::string::npos) {
+        return utf8;
+    }
+    static const uint16_t k80[32] = {0x20AC, 0, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+                                     0x2039, 0x0152, 0, 0x017D, 0, 0, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+                                     0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0, 0x017E, 0x0178};
+    std::string out;
+    for (size_t i = 0; i < utf8.size();) {
+        unsigned char c = static_cast<unsigned char>(utf8[i]);
+        size_t n = c < 0x80 ? 1 : c >> 5 == 6 ? 2 : c >> 4 == 14 ? 3 : c >> 3 == 30 ? 4 : 0;
+        if (!n || i + n > utf8.size()) return utf8;
+        uint32_t cp = n == 1 ? c : n == 2 ? c & 0x1Fu : n == 3 ? c & 0x0Fu : c & 0x07u;
+        for (size_t k = 1; k < n; ++k) cp = (cp << 6) | (static_cast<unsigned char>(utf8[i + k]) & 0x3Fu);
+        i += n;
+        if (cp < 0x80 || (cp >= 0xA0 && cp <= 0xFF)) {
+            out.push_back(static_cast<char>(cp));
+            continue;
+        }
+        size_t slot = 32;
+        for (size_t k = 0; k < 32; ++k)
+            if (k80[k] == cp) slot = k;
+        if (slot == 32) return utf8;
+        out.push_back(static_cast<char>(0x80 + slot));
+    }
+    return out;
+}
+
+bool FromHex(const std::string& s, std::vector<uint8_t>* out) {
+    if (s.size() % 2) return false;
+    auto nib = [](char c) {
+        return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+    };
+    for (size_t i = 0; i < s.size(); i += 2) {
+        int a = nib(s[i]), b = nib(s[i + 1]);
+        if (a < 0 || b < 0) return false;
+        out->push_back(static_cast<uint8_t>(a << 4 | b));
+    }
+    return true;
+}
+
+}  // namespace
+
+bool EncodeLeaf(const Pattern& p, const Value& in, const uint8_t* cur, size_t curSize, bool localized,
+                std::vector<uint8_t>* out, std::string* err) {
+    out->clear();
+    if (in.IsString() && in.AsString().rfind("raw:", 0) == 0) {
+        if (!FromHex(in.AsString().substr(4), out)) return Fail(err, "raw: needs hex digits");
+        return true;
+    }
+    if (p.type == PType::Bytes) {
+        if (!in.IsString() || !FromHex(in.AsString(), out)) return Fail(err, "expected hex digits");
+        return true;
+    }
+    if (p.type == PType::Bitfield) {
+        uint32_t raw = 0;
+        for (size_t i = 0; i < curSize && i < 4; ++i) raw |= static_cast<uint32_t>(cur[i]) << (8 * i);
+        auto bitOf = [&p](const std::string& name, uint32_t* bit) {
+            for (const auto& b : p.bits) {
+                if (b.second == name && b.first < 32) {
+                    *bit = 1u << b.first;
+                    return true;
+                }
+            }
+            return false;
+        };
+        auto apply = [&](const Value& list, bool set) {
+            for (const auto& n : list.Items()) {
+                uint32_t bit = 0;
+                if (!n.IsString() || !bitOf(n.AsString(), &bit)) {
+                    return Fail(err, "no flag named " + (n.IsString() ? n.AsString() : std::string("?")));
+                }
+                raw = set ? raw | bit : raw & ~bit;
+            }
+            return true;
+        };
+        if (in.kind() == Value::Kind::Map) {  // {"add":[...], "remove":[...]}
+            if (const Value* a = in.Find("add"); a && !apply(*a, true)) return false;
+            if (const Value* r = in.Find("remove"); r && !apply(*r, false)) return false;
+        } else if (in.kind() == Value::Kind::List) {  // the named bits become exactly these; unnamed bits stay
+            for (const auto& b : p.bits)
+                if (b.first < 32) raw &= ~(1u << b.first);
+            if (!apply(in, true)) return false;
+        } else {
+            int64_t i;
+            if (!ToInteger(in, &i)) return Fail(err, "expected flag names or an integer");
+            if (i < 0 || i >= (int64_t{1} << (p.size * 8))) return Fail(err, "value does not fit the flags");
+            raw = static_cast<uint32_t>(i);
+        }
+        PutLE(raw, p.size, out);
+        return true;
+    }
+    if (p.type != PType::Prim) return Fail(err, "not a single value");
+    double d = 0;
+    auto needNumber = [&]() { return ToDouble(in, &d) || Fail(err, "expected a number"); };
+    auto putText = [&](bool zero) {
+        if (!in.IsString()) return Fail(err, "expected text");
+        std::string t = TextToFile(in.AsString(), cur, curSize);
+        out->insert(out->end(), t.begin(), t.end());
+        if (zero) out->push_back(0);
+        return true;
+    };
+    const float kRadToDeg = 180.0f / 3.14159265358979323846f;
+    switch (p.prim) {
+        case Prim::U8: return PutInt(in, 1, false, out, err);
+        case Prim::U16: return PutInt(in, 2, false, out, err);
+        case Prim::U32: return PutInt(in, 4, false, out, err);
+        case Prim::I8: return PutInt(in, 1, true, out, err);
+        case Prim::I16: return PutInt(in, 2, true, out, err);
+        case Prim::I32: return PutInt(in, 4, true, out, err);
+        case Prim::F32:
+            if (!needNumber()) return false;
+            PutFloat(d, out);
+            return true;
+        case Prim::FloatRad2Deg:
+            if (!needNumber()) return false;
+            PutFloat(static_cast<float>(d) / kRadToDeg, out);
+            return true;
+        case Prim::FloatDefault:
+        case Prim::FloatDefaultRad2Deg:
+            if (in.IsString() && in.AsString() == "Default") {
+                PutLE(0x7F7FFFFF, 4, out);
+                return true;
+            }
+            if (!needNumber()) return false;
+            PutFloat(p.prim == Prim::FloatDefault ? d : static_cast<float>(d) / kRadToDeg, out);
+            return true;
+        case Prim::FloatColor255:
+            if (!needNumber()) return false;
+            PutFloat(d / 255.0, out);
+            return true;
+        case Prim::Bool:
+            if (!needNumber()) return false;
+            out->push_back(d != 0 ? 1 : 0);
+            return true;
+        case Prim::HexU8: return PutInt(in, 1, false, out, err);
+        case Prim::EmptyMarker: return true;
+        case Prim::Lstring:
+            if (!localized) return putText(true);
+            if (in.IsString() && in.AsString().rfind("[LSTRING:0x", 0) == 0) {
+                PutLE(strtoul(in.AsString().c_str() + 11, nullptr, 16), 4, out);
+                return true;
+            }
+            if (in.IsString() && !ToDouble(in, &d)) return Fail(err, "this plugin is localized: give a string ID, not text");
+            return PutInt(in, 4, false, out, err);
+        case Prim::Formid:
+            if (in.IsString() && in.AsString().size() == 10 && in.AsString()[0] == '[') {
+                PutLE(strtoul(in.AsString().c_str() + 1, nullptr, 16), 4, out);
+                return true;
+            }
+            return PutInt(in, 4, false, out, err);
+        case Prim::I32Div100: return needNumber() && PutRounded(d * 100, 4, true, out, err);
+        case Prim::I16Div100: return needNumber() && PutRounded(d * 100, 2, true, out, err);
+        case Prim::U16Div65535: return needNumber() && PutRounded(d * 65535, 2, false, out, err);
+        case Prim::U8Div100: return needNumber() && PutRounded(d * 100, 1, false, out, err);
+        case Prim::U16Div100: return needNumber() && PutRounded(d * 100, 2, false, out, err);
+        case Prim::U32Div100: return needNumber() && PutRounded(d * 100, 4, false, out, err);
+        case Prim::F32Div100:
+            if (!needNumber()) return false;
+            PutFloat(d * 100, out);
+            return true;
+        case Prim::Fourcc: {
+            if (!in.IsString()) return Fail(err, "expected four characters");
+            std::string c = in.AsString();
+            if (!c.empty() && c.size() != 4) return Fail(err, "expected four characters");
+            c.resize(4, '\0');
+            out->insert(out->end(), c.begin(), c.end());
+            return true;
+        }
+        case Prim::Scaled: {
+            if (!needNumber()) return false;
+            double raw = d * (p.scaledDivisor != 0.0 ? p.scaledDivisor : 1.0) + p.scaledOffset;
+            const std::string& r = p.scaledRead;
+            if (r == "float32") {
+                PutFloat(raw, out);
+                return true;
+            }
+            int width = r == "uint8" || r == "int8" ? 1 : r == "uint16" || r == "int16" ? 2 : 4;
+            return PutRounded(raw, width, r[0] == 'i', out, err);
+        }
+        case Prim::ColorRgb:
+        case Prim::ColorRgba: {
+            size_t n = p.prim == Prim::ColorRgb ? 3 : 4;
+            if (in.kind() != Value::Kind::List || in.Items().size() != n) return Fail(err, "expected " + std::to_string(n) + " numbers");
+            for (const auto& c : in.Items())
+                if (!PutInt(c, 1, false, out, err)) return false;
+            return true;
+        }
+        case Prim::Zstring: return putText(true);
+        case Prim::Str8:
+        case Prim::Str16:
+        case Prim::Str32: {
+            if (!in.IsString()) return Fail(err, "expected text");
+            std::string t = TextToFile(in.AsString(), cur, curSize);
+            int width = p.prim == Prim::Str8 ? 1 : p.prim == Prim::Str16 ? 2 : 4;
+            if (width < 4 && t.size() >= (size_t{1} << (width * 8))) return Fail(err, "text too long for its length prefix");
+            PutLE(t.size(), width, out);
+            out->insert(out->end(), t.begin(), t.end());
+            return true;
+        }
+        case Prim::EnumU8:
+        case Prim::EnumU16:
+        case Prim::EnumU32: {
+            int width = p.prim == Prim::EnumU8 ? 1 : p.prim == Prim::EnumU16 ? 2 : 4;
+            if (in.IsString() && p.enumMap) {
+                for (const auto& e : *p.enumMap)
+                    if (e.second == in.AsString()) return PutInt(Value::Str(e.first), width, false, out, err);
+            }
+            return PutInt(in, width, false, out, err);
+        }
+        case Prim::ValueRef: return Fail(err, "a computed value has no bytes of its own");
+    }
+    return Fail(err, "unknown type");
+}
+
+bool LeafIsFormId(const Pattern& p) { return p.type == PType::Prim && p.prim == Prim::Formid; }
+bool LeafIsByteRun(const Pattern& p) { return p.type == PType::Bytes; }
+std::string LeafTypeName(const Pattern& p) {
+    if (p.type == PType::Bytes) return "bytes";
+    if (p.type == PType::Bitfield) return "flags";
+    if (p.type != PType::Prim) return "structure";
+    for (const auto& e : PrimNames())
+        if (e.second == p.prim && e.first != "float32_disp_rad2deg") return e.first;
+    return "?";
+}
+bool PatternIsLeaf(const Pattern& p) { return p.type == PType::Prim || p.type == PType::Bytes || p.type == PType::Bitfield; }
 
 bool PatternCatalog::Load(const std::string& jsonText, std::string* error) {
     Value root;

@@ -49,6 +49,38 @@ std::shared_ptr<const Pattern> CompilePattern(const Value& json);
 // fit the pattern.
 Value DecodeSubrecord(const Pattern& pattern, const uint8_t* data, size_t size, const DecodeContext& ctx);
 
+// One decoded value and where its bytes are. `path` follows the decoded value
+// the way Select does ("damage", "[2].level", "" for the value itself).
+struct TraceLeaf {
+    std::string path;
+    size_t offset = 0;
+    size_t size = 0;
+    const Pattern* pattern = nullptr;  // null for a list's count prefix ("#count")
+    Value value;
+    bool bound = false;  // kept under a name later nodes can read: changing it can change their layout
+};
+
+// DecodeSubrecord, also reporting every value's byte range. The same code does
+// both, so the two cannot disagree. Bytes a `skip` passes and bytes past the
+// end of the pattern belong to no leaf.
+Value TraceSubrecord(const Pattern& pattern, const uint8_t* data, size_t size, const DecodeContext& ctx,
+                     std::vector<TraceLeaf>* leaves);
+
+// The bytes for a new value of one leaf. `cur` is what the leaf holds now
+// (flags keep the bits nobody named). Inputs, by type: numbers (also in a
+// string, decimal or 0x...), text as UTF-8, enum names, flag names as a list or
+// {"add":[...],"remove":[...]}, hex for byte runs; any type takes "raw:<hex>"
+// for exact bytes. False with *err when the value does not fit. A FormID is the
+// stored number: resolving Owner.esm:XXXXXX is the caller's.
+bool EncodeLeaf(const Pattern& leaf, const Value& input, const uint8_t* cur, size_t curSize, bool localized,
+                std::vector<uint8_t>* out, std::string* err);
+bool LeafIsFormId(const Pattern& leaf);
+bool LeafIsByteRun(const Pattern& leaf);
+// The leaf's type, as the catalog names it: "uint32", "formid", "flags", "bytes"...
+std::string LeafTypeName(const Pattern& leaf);
+// The pattern is one value, not a structure: a whole subrecord can be encoded from it.
+bool PatternIsLeaf(const Pattern& pattern);
+
 // The shape of what a pattern decodes to, worked out from the pattern alone
 // (the decoder's output rules applied statically). build-db generates its
 // tables from it.

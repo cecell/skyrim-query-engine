@@ -68,6 +68,50 @@ add_executable(spf_tests tests/test_spf.cpp)
 target_link_libraries(spf_tests PRIVATE spf)
 add_test(NAME unit COMMAND spf_tests ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json)
 
+# The plugin writer: an editable model over a plugin's bytes, field edits, and
+# spfedit.exe. A separate library and exe, so spf.exe stays read-only and
+# whoever links `spf` gets neither it nor zlib. Built when this is the top-level
+# project, or on request (-DSPF_EDIT=ON).
+option(SPF_EDIT "Build the plugin writer" ${PROJECT_IS_TOP_LEVEL})
+if(SPF_EDIT)
+    # zlib for deflate (spf's own inflate covers reading). Only the sources
+    # deflate needs, pinned to v1.3.1.
+    FetchContent_Declare(zlib_src
+        GIT_REPOSITORY https://github.com/madler/zlib.git
+        GIT_TAG 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf  # v1.3.1
+        SOURCE_SUBDIR do-not-configure)
+    FetchContent_MakeAvailable(zlib_src)
+    add_library(spf_zlib STATIC
+        ${zlib_src_SOURCE_DIR}/adler32.c ${zlib_src_SOURCE_DIR}/compress.c ${zlib_src_SOURCE_DIR}/crc32.c
+        ${zlib_src_SOURCE_DIR}/deflate.c ${zlib_src_SOURCE_DIR}/trees.c ${zlib_src_SOURCE_DIR}/zutil.c)
+    target_include_directories(spf_zlib PUBLIC ${zlib_src_SOURCE_DIR})
+    target_compile_definitions(spf_zlib PRIVATE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
+    target_compile_options(spf_zlib PRIVATE /W0)
+
+    add_library(spf_edit STATIC
+        src/edit/record_body.cpp
+        src/edit/document.cpp
+        src/edit/roundtrip.cpp
+        src/edit/ops.cpp)
+    target_link_libraries(spf_edit PUBLIC spf PRIVATE spf_zlib)
+
+    add_executable(spfedit tools/spfedit.cpp)
+    target_link_libraries(spfedit PRIVATE spf_edit)
+    add_dependencies(spfedit spf_patterns)
+    # spfedit.exe also reads these next to itself.
+    foreach(f field_order.csv catalog_open.csv)
+        add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${f}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/${f} ${CMAKE_CURRENT_BINARY_DIR}/${f}
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data/${f})
+        list(APPEND SPF_EDIT_DATA ${CMAKE_CURRENT_BINARY_DIR}/${f})
+    endforeach()
+    add_custom_target(spf_edit_data ALL DEPENDS ${SPF_EDIT_DATA})
+
+    add_executable(spfedit_tests tests/test_edit.cpp)
+    target_link_libraries(spfedit_tests PRIVATE spf_edit)
+    add_test(NAME edit COMMAND spfedit_tests ${CMAKE_CURRENT_SOURCE_DIR}/data)
+endif()
+
 # Fuzzing (separate build dir): cmake -B build-fuzz -DSPF_FUZZ=ON ...
 # The library gets coverage + AddressSanitizer instrumentation; spf_fuzz links
 # libFuzzer's main. Needs MSVC's clang_rt.asan_dynamic DLL on PATH (vcvars).
