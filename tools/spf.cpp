@@ -2028,7 +2028,7 @@ int wmain(int argc, wchar_t** argv) {
     // spf help [cmd], spf --help, spf <cmd> --help
     std::string arg1 = argc > 1 ? Utf8(argv[1]) : "";
     if (arg1 == "--version" || arg1 == "version") {
-        printf("spf %s\n", SPF_VERSION);
+        printf("spf %s\nGPL-3.0. Credits and third-party notices: THIRD_PARTY_NOTICES.md\n", SPF_VERSION);
         return 0;
     }
     if (arg1 == "help" || arg1 == "--help" || arg1 == "-h" || arg1 == "/?")
