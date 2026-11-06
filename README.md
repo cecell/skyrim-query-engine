@@ -319,9 +319,24 @@ Running the workflow by hand from the Actions page does everything except publis
 To check a download, compare it with `SHA256SUMS.txt` on the release: `sha256sum -c SHA256SUMS.txt`,
 or `Get-FileHash <file>` in PowerShell. The release notes link each file's VirusTotal report.
 
+## Credits
+
+`spf` wouldn't exist in this form without these:
+
+- **xEdit**, by ElminsterAU with Hlp, Zilav and Sharlikran: `spf` uses its names, condition function
+  table and comparison rules, and was checked against its output. MPL 2.0.
+- **puff**, by Mark Adler: the inflate code is altered from it.
+- **SQLite**, by D. Richard Hipp and the SQLite developers: public domain.
+- **zlib**, by Jean-loup Gailly and Mark Adler: `spfedit`'s compression.
+
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) has the full notices and says which files each one
+covers. The Elder Scrolls and Skyrim are trademarks of ZeniMax Media Inc. or its affiliates; this
+project isn't affiliated with or endorsed by Bethesda Softworks or ZeniMax Media.
+
 ## Licence
 
-GNU General Public License v3.0: see [`LICENSE`](LICENSE).
+GNU General Public License v3.0: see [`LICENSE`](LICENSE). Parts that came from other projects keep
+their own terms, listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Building
 
@@ -357,7 +372,7 @@ first configure downloads bsa-reader and beth-asset-metadata from GitHub
 
 - `src/plugin.*`: the Plugin / Record / Field objects and path selection
 - `src/pattern_engine.*`, `src/pattern_value.*`: the pattern decoder and its value type
-- `src/inflate.*`: zlib for compressed records
+- `src/inflate.*`: zlib for compressed records, altered from Mark Adler's puff
 - `src/strings.*`: localized strings, from loose files or BSAs
 - `src/db_build.*`: `spf build-db`
 - `src/db_schema.*`: build-db's per-record-type tables, generated from the catalog
