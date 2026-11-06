@@ -176,7 +176,8 @@ effects, conditions), and IMAD's non-ASCII signatures.
 
 COMMANDS
   skqe info   <plugin> [--json]    the plugin's header, masters and record counts by type
-  skqe fields <plugin> <TYPE>      every field that record type has in this plugin
+  skqe fields <plugin> <TYPE>      every field that record type has in this plugin;
+                                  --names adds xEdit's name for each
   skqe export <plugin> [options]   the fields you choose, of the forms you choose. Also:
                                   several plugins, each with its own forms (--request
                                   for long lists); every copy of a form across a load
@@ -377,7 +378,7 @@ even without the ESL flag.
     ...
 )HELP";
 
-const char kHelpFields[] = R"HELP(skqe fields <plugin> <TYPE>
+const char kHelpFields[] = R"HELP(skqe fields <plugin> <TYPE> [--names]
 
 Lists every field (subrecord) that records of TYPE have in this plugin, how
 many records have it, and the sub-fields inside it: exactly the paths you can
@@ -391,6 +392,14 @@ WEAP, ARMO, NPC_, LVLI, CELL, REFR (case does not matter).
       DATA.value
       DATA.weight
     KWDA  (in 2470)
+    ...
+
+--names adds xEdit's name for each field, when the catalog has one:
+
+  skqe fields Skyrim.esm BOOK --names
+  BOOK: 821 records
+    CNAM - Description (in 821)
+    DATA - Data (in 821)
     ...
 
 Fields only appear if at least one record in THIS plugin has them; another
@@ -2049,6 +2058,7 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring patternsPath;
     bool csv = false;
     bool json = false;  // skqe info --json (export's default)
+    bool names = false;  // skqe fields --names
     for (int i = 3; i < argc; ++i) {
         std::string a = Utf8(argv[i]);
         auto next = [&](std::string* dst) {
@@ -2060,6 +2070,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == "--out") next(&outPath);
         else if (a == "--csv") csv = true;
         else if (a == "--json") { csv = false; json = true; }
+        else if (a == "--names") names = true;
         else if (a == "--patterns" && i + 1 < argc) patternsPath = argv[++i];
         else positional = a;
     }
@@ -2091,7 +2102,8 @@ int wmain(int argc, wchar_t** argv) {
         }
         out += type + ": " + std::to_string(recs.size()) + " records\n";
         for (const auto& [sig, info] : seen) {
-            out += "  " + sig + "  (in " + std::to_string(info.first) + ")\n";
+            std::string name = names ? cat.Display(type, sig) : std::string();
+            out += "  " + sig + (name.empty() ? "  " : " - " + name + " ") + "(in " + std::to_string(info.first) + ")\n";
             for (const auto& s : info.second)
                 if (s != sig) out += "    " + s + "\n";
         }

@@ -47,7 +47,8 @@ a few layouts are incomplete.
 
 ```
 skqe info   <plugin> [--json]              TES4 header facts, masters, record counts by type
-skqe fields <plugin> <TYPE>                which fields that type has, with sub-fields
+skqe fields <plugin> <TYPE> [--names]      which fields that type has, with sub-fields;
+                                          --names adds xEdit's name for each
 skqe export <plugin> [options]             chosen fields of chosen forms, as JSON or CSV;
                                           several plugins, or every copy across a load order with the winner and
                                           what conflicts: `skqe help export`
