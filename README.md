@@ -56,7 +56,7 @@ skqe diff   <copy> <copy>...               what differs between copies of a plug
     --type WEAP[,ARMO...]                 only these record types
     --form 00012EB7[,Skyrim.esm:012EB7]   only these forms (as stored, or owner:objectID)
     --fields EDID,FULL,DATA.damage        only these fields; omitted or * = all
-    --csv | --json                        default json
+    --csv | --psv | --json                default json; --psv separates with | and suits long text
     --out <file>
 ```
 
