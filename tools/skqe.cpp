@@ -10,7 +10,7 @@
 //       --form 00012EB7[,...]     only these forms (as stored, or Skyrim.esm:012EB7)
 //       --fields EDID,DATA.damage only these fields ("*" or omitted = all);
 //                                 a field is a subrecord, then a dotted path inside it
-//       --csv | --json            output format (default json)
+//       --csv | --psv | --json    output format (default json)
 //       --out <file>              write there instead of the console
 //   --patterns <file>             pattern catalog (default: patterns.json next to skqe.exe)
 //   skqe build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..]
@@ -148,12 +148,16 @@ Value AllFields(const std::vector<Field>& fields) {
     return out;
 }
 
+// The column separator of --csv and --psv, set once before any output. Both
+// quote the standard way, which is what Excel and Google Sheets read.
+std::string gSep = ",";
+
 std::string CsvCell(const Value& v) {
     std::string s;
     if (v.IsNull()) return "";
     if (v.IsString()) s = v.AsString();
     else WriteJson(v, &s);
-    if (s.find_first_of(",\"\r\n") != std::string::npos) {
+    if (s.find_first_of(gSep + "\"\r\n") != std::string::npos) {
         std::string q = "\"";
         for (char c : s) {
             if (c == '"') q += '"';
@@ -495,6 +499,9 @@ is one list, and each row also says "plugin" (a leading plugin column in CSV).
                               "fields":{"EDID":"IronSword","DATA.damage":7}}]
                           With --fields, "fields" is keyed by the paths you
                           asked for; with all fields, by subrecord signature.
+  --psv                   the same as --csv, separated by | instead of commas.
+                          Text with a |, a " or a line break is quoted, the
+                          standard way. For long text such as book pages.
   --csv                   one row per record: form,type,in,<your fields>.
                           Needs --fields. Lists and objects are written as
                           JSON text inside the cell.
@@ -1039,8 +1046,8 @@ void RowJson(const Plugin& plugin, const Record& r, const std::vector<FieldSpec>
 std::string RowCsv(const Plugin& plugin, const Record& r, const std::vector<FieldSpec>& specs) {
     auto fields = plugin.Fields(r);
     Value parent = r.parent ? Value::Str(plugin.FormKey(r.parent)) : Value();
-    std::string out = CsvCell(Value::Str(plugin.FormKey(r.formId))) + "," + r.type + "," + CsvCell(parent);
-    for (const auto& s : specs) out += "," + CsvCell(Gather(fields, s));
+    std::string out = CsvCell(Value::Str(plugin.FormKey(r.formId))) + gSep + r.type + gSep + CsvCell(parent);
+    for (const auto& s : specs) out += gSep + CsvCell(Gather(fields, s));
     return out;
 }
 
@@ -1280,8 +1287,9 @@ int ExportLoadOrder(const LoadOrderExport& req, const PatternCatalog& cat, std::
         }
     }
     if (req.csv) {
-        *out += "plugin,load_order,winner,form,type,in";
-        for (const auto& s : req.specs) *out += "," + CsvCell(Value::Str(s.text));
+        for (const char* name : {"plugin", "load_order", "winner", "form", "type"}) *out += name + gSep;
+        *out += "in";
+        for (const auto& s : req.specs) *out += gSep + CsvCell(Value::Str(s.text));
         *out += "\n";
     } else {
         *out += "[\n";
@@ -1350,8 +1358,8 @@ int ExportLoadOrder(const LoadOrderExport& req, const PatternCatalog& cat, std::
             const Copy& copy = groups[g][c];
             const bool winner = c == winnerNo;
             if (req.csv) {
-                *out += CsvCell(Value::Str(shownOf[copy.plugin])) + "," + std::to_string(copy.plugin) + "," +
-                        (winner ? "true" : "false") + "," + copy.row->csv + "\n";
+                *out += CsvCell(Value::Str(shownOf[copy.plugin])) + gSep + std::to_string(copy.plugin) + gSep +
+                        (winner ? "true" : "false") + gSep + copy.row->csv + "\n";
             } else {
                 Value obj = Value::Map();
                 obj.Set("plugin", Value::Str(shownOf[copy.plugin]));
@@ -1415,7 +1423,8 @@ int ExportCommand(int argc, wchar_t** argv) {
         else if (a == "--all-plugins") allPlugins = true;
         else if (a == "--plugins") next(&explicitOrder);
         else if (a == "--load-order" && i + 1 < argc) loadOrderFile = argv[++i];
-        else if (a == "--csv") csv = true;
+        else if (a == "--csv") { csv = true; gSep = ","; }
+        else if (a == "--psv") { csv = true; gSep = "|"; }
         else if (a == "--json") csv = false;
         else if (a == "--data" && i + 1 < argc) dataDir = argv[++i];
         else if (a == "--patterns" && i + 1 < argc) patternsPath = argv[++i];
@@ -1562,7 +1571,7 @@ int ExportCommand(int argc, wchar_t** argv) {
         if (!(fieldList.empty() || fieldList == "*")) req.specs = ParseFields(fieldList);
         req.csv = csv;
         if (conflicts == LoadOrderExport::Conflicts::Off && csv && req.specs.empty()) {
-            fprintf(stderr, "--csv needs --fields (a fixed set of columns)\n");
+            fprintf(stderr, "--csv and --psv need --fields (a fixed set of columns)\n");
             return 2;
         }
         PatternCatalog cat;
@@ -1597,7 +1606,7 @@ int ExportCommand(int argc, wchar_t** argv) {
     std::vector<FieldSpec> specs = fieldList.empty() || fieldList == "*" ? std::vector<FieldSpec>{}
                                                                           : ParseFields(fieldList);
     if (csv && specs.empty()) {
-        fprintf(stderr, "--csv needs --fields (a fixed set of columns)\n");
+        fprintf(stderr, "--csv and --psv need --fields (a fixed set of columns)\n");
         return 2;
     }
     std::set<std::string> typeSet;
@@ -1608,9 +1617,9 @@ int ExportCommand(int argc, wchar_t** argv) {
 
     std::string out;
     if (csv) {
-        if (manyPlugins) out += "plugin,";
-        out += "form,type,in";
-        for (const auto& s : specs) out += "," + CsvCell(Value::Str(s.text));
+        if (manyPlugins) out += "plugin" + gSep;
+        out += "form" + gSep + "type" + gSep + "in";
+        for (const auto& s : specs) out += gSep + CsvCell(Value::Str(s.text));
         out += "\n";
     } else {
         out += "[\n";
@@ -1653,7 +1662,7 @@ int ExportCommand(int argc, wchar_t** argv) {
         }
         for (const Record* r : recs) {
             if (csv) {
-                if (manyPlugins) out += CsvCell(Value::Str(shown)) + ",";
+                if (manyPlugins) out += CsvCell(Value::Str(shown)) + gSep;
                 out += RowCsv(*plugin, *r, specs) + "\n";
             } else {
                 Value obj = Value::Map();
