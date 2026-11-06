@@ -228,6 +228,135 @@ int CmdSelfCheck(const std::vector<std::wstring>& args) {
     return sum.traceDiffers || sum.leafOutOfRange || sum.leafPathWrong ? 1 : 0;
 }
 
+// add-master on every plugin, in memory: afterwards every record must decode to
+// the same values, FormIDs compared by what they point at. Writes nothing.
+int CmdMasterCheck(const std::vector<std::wstring>& args) {
+    std::vector<std::wstring> files;
+    std::wstring csvPath;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == L"--csv" && i + 1 < args.size()) csvPath = args[++i];
+        else Collect(args[i], &files);
+    }
+    spf::PatternCatalog cat;
+    EditData data;
+    std::string text, err;
+    if (!ReadFileText(ExeFolder() + L"patterns.json", &text) || !cat.Load(text, &err) || !LoadEditData(ExeFolder(), &cat, &data, &err)) {
+        fprintf(stderr, "data files: %s\n", err.c_str());
+        return 2;
+    }
+    struct Row {
+        std::string refused, firstDiff, firstMiss;
+        uint64_t records = 0, differs = 0, misses = 0;
+        bool remapped = false;
+    };
+    std::vector<Row> rows(files.size());
+    std::atomic<size_t> next{0};
+    std::atomic<size_t> finished{0};
+    auto work = [&]() {
+        for (size_t i; (i = next++) < files.size();) {
+            Row& row = rows[i];
+            std::string why;
+            auto doc = Document::Open(files[i], &why);
+            if (!doc) {
+                row.refused = why;
+                continue;
+            }
+            std::string name = doc->name();
+            auto before = spf::Plugin::FromMemory(doc->input(), doc->inputSize(), name, cat, &why);
+            if (!before) {
+                row.refused = why;
+                continue;
+            }
+            Editor ed(doc.get(), &data);
+            spf::Value op = spf::Value::Map();
+            op.Set("op", spf::Value::Str("add-master"));
+            op.Set("name", spf::Value::Str("SpfEditCheckMaster.esm"));
+            op.Set("force", spf::Value::Bool(true));
+            OpResult r = ed.Apply(op);
+            row.misses = r.possibleMisses.size();
+            if (!r.possibleMisses.empty()) row.firstMiss = r.possibleMisses[0];
+            if (!r.ok) {
+                row.refused = r.message;
+                continue;
+            }
+            Bytes out;
+            doc->Serialize(&out);
+            auto after = spf::Plugin::FromMemory(out.data(), out.size(), name, cat, &why);
+            if (!after) {
+                row.refused = "output does not read: " + why;
+                continue;
+            }
+            row.remapped = true;
+            const auto& a = before->records();
+            const auto& b = after->records();
+            if (a.size() != b.size()) {
+                row.firstDiff = "record count changed";
+                ++row.differs;
+                continue;
+            }
+            // Bytes below 0x800 under index 00 are the engine's own forms in any
+            // plugin (the Creation Kit: IsHardcoded). spf would name their owner
+            // differently before and after, for the same form.
+            spf::Plugin::FormIdMap beforeIds = [&](uint32_t v, const std::string&) {
+                return spf::Value::Str(v < 0x800 ? "engine:" + std::to_string(v) : before->FormKey(v));
+            };
+            spf::Plugin::FormIdMap afterIds = [&](uint32_t v, const std::string&) {
+                return spf::Value::Str(v < 0x800 ? "engine:" + std::to_string(v) : after->FormKey(v));
+            };
+            auto json = [](const std::vector<spf::Field>& fields) {
+                std::string s;
+                for (const auto& f : fields) {
+                    s += f.sig;
+                    spf::WriteJson(f.value, &s);
+                }
+                return s;
+            };
+            for (size_t k = 1; k < a.size(); ++k) {
+                ++row.records;
+                auto key = [](const spf::Plugin& p, uint32_t v) { return v < 0x800 ? "engine:" + std::to_string(v) : p.FormKey(v); };
+                bool same = a[k].type == b[k].type && key(*before, a[k].formId) == key(*after, b[k].formId) && a[k].formVersion == b[k].formVersion &&
+                            (a[k].parent == 0) == (b[k].parent == 0) && (a[k].parent == 0 || key(*before, a[k].parent) == key(*after, b[k].parent));
+                if (same) same = json(before->Fields(a[k], &beforeIds)) == json(after->Fields(b[k], &afterIds));
+                if (!same) {
+                    ++row.differs;
+                    if (row.firstDiff.empty()) row.firstDiff = a[k].type + " " + before->FormKey(a[k].formId);
+                }
+            }
+            ++finished;
+        }
+    };
+    LARGE_INTEGER start, stop, freq;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
+    std::vector<std::thread> pool;
+    for (unsigned t = 1; t < std::thread::hardware_concurrency(); ++t) pool.emplace_back(work);
+    work();
+    for (auto& t : pool) t.join();
+    QueryPerformanceCounter(&stop);
+    uint64_t refused = 0, records = 0, differs = 0, withDiffs = 0, misses = 0, withMisses = 0;
+    std::ofstream csv;
+    if (!csvPath.empty()) {
+        csv.open(fs::path(csvPath), std::ios::binary);
+        csv << "path,records,differs,first_diff,possible_misses,first_miss,refused\n";
+    }
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const Row& r = rows[i];
+        refused += !r.refused.empty();
+        records += r.records;
+        differs += r.differs;
+        withDiffs += r.differs != 0;
+        misses += r.misses;
+        withMisses += r.misses != 0;
+        if (r.differs) printf("DIFFERS  %s: %llu, first %s\n", Narrow(files[i]).c_str(), r.differs, r.firstDiff.c_str());
+        if (!r.refused.empty()) printf("REFUSED  %s: %s\n", Narrow(files[i]).c_str(), r.refused.c_str());
+        if (csv) csv << CsvField(Narrow(files[i])) << ',' << r.records << ',' << r.differs << ',' << CsvField(r.firstDiff) << ',' << r.misses << ',' << CsvField(r.firstMiss) << ',' << CsvField(r.refused) << '\n';
+    }
+    printf("plugins %zu, refused %llu, records compared %llu, records that read differently %llu in %llu plugins\n", files.size(), refused, records, differs, withDiffs);
+    printf("possible FormIDs flagged %llu in %llu plugins\n", misses, withMisses);
+    printf("%.2f s\n", double(stop.QuadPart - start.QuadPart) / freq.QuadPart);
+    return differs ? 1 : 0;
+}
+
 std::wstring ExeFolder() {
     wchar_t buf[4096];
     GetModuleFileNameW(nullptr, buf, 4096);
@@ -434,6 +563,9 @@ was not asked to change as it was.
       A record (default TES4): every value, its path, byte offset and size.
   spfedit ops
       The ops and their arguments.
+  spfedit mastercheck <plugin|folder>... [--csv out.csv]
+      Read-only. add-master on each plugin in memory, then every record compared
+      with the original by decoded values and what its FormIDs point at.
   spfedit selfcheck <plugin|folder>... [--threads n]
       Read-only. The tracer against the decoder on every subrecord, every value
       encoded back and compared, group placement against the writer's rules.
@@ -455,6 +587,7 @@ int wmain(int argc, wchar_t** argv) {
     std::vector<std::wstring> args(argv + 2, argv + argc);
     if (cmd == L"roundtrip") return CmdRoundTrip(args);
     if (cmd == L"selfcheck") return CmdSelfCheck(args);
+    if (cmd == L"mastercheck") return CmdMasterCheck(args);
     if (cmd == L"apply") return CmdApply(args);
     if (cmd == L"show") return CmdShow(args);
     if (cmd == L"ops") {

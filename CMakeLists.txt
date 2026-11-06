@@ -120,13 +120,13 @@ if(SPF_FUZZ)
     # Everything linked into spf_fuzz must agree on ASan (container
     # annotations). Coverage-instrumented code needs libFuzzer's runtime, so
     # in a fuzz build only spf_fuzz links: build that target alone.
-    foreach(t spf bsa_reader asset_metadata)
+    foreach(t spf spf_edit bsa_reader asset_metadata)
         target_compile_options(${t} PRIVATE /Zi /fsanitize=address /fsanitize-coverage=inline-8bit-counters
             /fsanitize-coverage=edge /fsanitize-coverage=trace-cmp)
     endforeach()
     add_executable(spf_fuzz tests/fuzz_plugin.cpp)
     target_compile_options(spf_fuzz PRIVATE /Zi /fsanitize=address /fsanitize=fuzzer)
-    target_link_libraries(spf_fuzz PRIVATE spf)
+    target_link_libraries(spf_fuzz PRIVATE spf spf_edit)
     target_link_options(spf_fuzz PRIVATE /INCREMENTAL:NO /DEBUG)
     add_custom_command(TARGET spf_fuzz POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json

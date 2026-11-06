@@ -8,10 +8,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
 #include "inflate.h"
+#include "edit/document.h"
 #include "plugin.h"
 #include "strings.h"
 
@@ -50,6 +52,14 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
                 WriteJson(f.value, &json);
             }
         }
+    }
+    // The writer's model: anything it reads must write back as it came, and a
+    // record it can't split must only be reported.
+    if (auto doc = edit::Document::FromMemory(data, size, "Fuzz.esp", &err)) {
+        edit::Bytes out;
+        edit::WriteOptions rebuild;
+        rebuild.rebuildGroups = rebuild.rebuildRecords = true;
+        if (doc->Serialize(&out, rebuild) && (out.size() != size || memcmp(out.data(), data, size) != 0)) abort();
     }
     if (size > 1) {
         StringTables t;
