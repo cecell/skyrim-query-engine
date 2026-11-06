@@ -123,6 +123,25 @@ Bytes StoredZlib(const Bytes& data) {
 
 // TES4 header facts, including an ONAM too large for a 16-bit size (XXXX), with
 // INTV and INCC after it.
+void TestTextDecoding() {
+    auto text = [](const std::string& s) {
+        return TextToUtf8(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+    };
+    CHECK(text("") == "");
+    CHECK(text("Iron Sword") == "Iron Sword");
+    CHECK(text("T\xC3\xA9st \xE2\x82\xAC") == "T\xC3\xA9st \xE2\x82\xAC");  // valid UTF-8 stays
+    CHECK(text("\xDCnicode \xC4\xD6") == "\xC3\x9Cnicode \xC3\x84\xC3\x96");  // Windows-1252
+    CHECK(text("\x80 \x93hi\x94 \x85") == "\xE2\x82\xAC \xE2\x80\x9Chi\xE2\x80\x9D \xE2\x80\xA6");
+    CHECK(text("\x81") == "\xC2\x81");  // undefined in Windows-1252, but not lost
+    CHECK(text("caf\xC3") == "caf\xC3\x83");  // cut off UTF-8 isn't UTF-8
+    CHECK(text("\xC3\xA9 \xE9") == "\xC3\x83\xC2\xA9 \xC3\xA9");  // one bad byte: the whole string is 1252
+    CHECK(text("\xED\xA0\x80").find("\xEF\xBF\xBD") == std::string::npos);  // no replacement characters
+    for (int b = 0x80; b <= 0xFF; ++b) {
+        const std::string one(1, static_cast<char>(b));
+        CHECK(IsValidUtf8(reinterpret_cast<const uint8_t*>(text(one).data()), text(one).size()));
+    }
+}
+
 void TestHeaderFacts(const PatternCatalog& cat) {
     Bytes hedr;
     hedr.f32(1.70f).u32(5).u32(0x1234);
@@ -844,6 +863,7 @@ int wmain(int argc, wchar_t** argv) {
         fprintf(stderr, "cannot load patterns: %s\n", err.c_str());
         return 2;
     }
+    TestTextDecoding();
     TestHeaderFacts(cat);
     TestExportRequest();
     TestValidPlugin(cat);

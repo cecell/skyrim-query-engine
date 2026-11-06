@@ -351,7 +351,7 @@ std::string ReadZ(Cursor& cur) {
     size_t start = cur.pos;
     size_t z = start;
     while (z < cur.end && cur.data[z] != 0) ++z;
-    std::string s = Utf8Lossy(cur.data + start, z - start);
+    std::string s = TextToUtf8(cur.data + start, z - start);
     cur.pos = z < cur.end ? z + 1 : z;
     return s;
 }
@@ -477,7 +477,7 @@ Value ExecPrim(const Pattern& node, Cursor& cur, Scope& scope) {
         case Prim::Str32: {
             size_t n = cur.ReadUint(node.prim == Prim::Str8 ? 1 : node.prim == Prim::Str16 ? 2 : 4);
             const uint8_t* b = cur.Read(n);
-            v = Value::Str(Utf8Lossy(b, n));
+            v = Value::Str(TextToUtf8(b, n));
             break;
         }
         case Prim::EnumU8:
@@ -777,12 +777,9 @@ void PutFloat(double d, std::vector<uint8_t>* out) {
 std::string TextToFile(const std::string& utf8, const uint8_t* old, size_t oldSize) {
     if (std::all_of(utf8.begin(), utf8.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80; })) return utf8;
     if (old && std::any_of(old, old + oldSize, [](uint8_t b) { return b >= 0x80; }) &&
-        Utf8Lossy(old, oldSize).find("\xEF\xBF\xBD") == std::string::npos) {
+        IsValidUtf8(old, oldSize)) {
         return utf8;
     }
-    static const uint16_t k80[32] = {0x20AC, 0, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
-                                     0x2039, 0x0152, 0, 0x017D, 0, 0, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
-                                     0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0, 0x017E, 0x0178};
     std::string out;
     for (size_t i = 0; i < utf8.size();) {
         unsigned char c = static_cast<unsigned char>(utf8[i]);
@@ -797,7 +794,7 @@ std::string TextToFile(const std::string& utf8, const uint8_t* old, size_t oldSi
         }
         size_t slot = 32;
         for (size_t k = 0; k < 32; ++k)
-            if (k80[k] == cp) slot = k;
+            if (kCp1252High[k] == cp) slot = k;
         if (slot == 32) return utf8;
         out.push_back(static_cast<char>(0x80 + slot));
     }

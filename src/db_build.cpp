@@ -144,7 +144,7 @@ bool ReadHeader(PluginInfo* p) {
         size_t n = U16(body.data() + q + 4);
         const uint8_t* d = body.data() + q + 6;
         if (q + 6 + n > body.size()) break;
-        auto text = [&] { return Utf8Lossy(d, strnlen(reinterpret_cast<const char*>(d), n)); };
+        auto text = [&] { return TextToUtf8(d, strnlen(reinterpret_cast<const char*>(d), n)); };
         if (memcmp(body.data() + q, "HEDR", 4) == 0 && n >= 12) {
             memcpy(&p->hedrVersion, d, 4);
             p->numRecords = U32(d + 4);
@@ -496,7 +496,7 @@ void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
             // EDID, when present, is the first subrecord.
             if (size >= 6 && memcmp(body, "EDID", 4) == 0) {
                 size_t n = std::min<size_t>(U16(body + 4), size - 6);
-                row.edid = Utf8Lossy(body + 6, strnlen(reinterpret_cast<const char*>(body + 6), n));
+                row.edid = TextToUtf8(body + 6, strnlen(reinterpret_cast<const char*>(body + 6), n));
             }
         }
         const int64_t key = row.key;

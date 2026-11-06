@@ -35,6 +35,11 @@ Skyrim.esm:012EB7,WEAP,,IronSword,Iron Sword,7
 Point it at a plugin in your `Data` folder. Plugins and their strings need to be in the same folder
 structure the game uses, so that localized text can be found.
 
+## Accented text
+
+Output is always UTF-8. A plugin's text that isn't valid UTF-8 is read as Windows-1252, what Skyrim's
+English text uses. Text in another code page, such as a Russian mod's, reads as the wrong letters.
+
 ## How far to trust it
 
 The decoder was checked value for value against an xEdit dump of the 80 Bethesda plugins: 1,251,209

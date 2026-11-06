@@ -360,7 +360,7 @@ std::string ReadFacts(int64_t id, const std::string& ext, const uint8_t* d, size
             for (const auto& t : body.textures) {
                 // Stored as Windows-1252 or UTF-8.
                 std::string norm = assets::NormalizeTexturePath(
-                    Utf8Lossy(reinterpret_cast<const uint8_t*>(t.path.data()), t.path.size()));
+                    TextToUtf8(reinterpret_cast<const uint8_t*>(t.path.data()), t.path.size()));
                 if (norm.empty()) continue;
                 rows->push_back({kNifTextures,
                                  {Cell::Int(id), Cell::Int(idx++), Cell::Text(t.block), Cell::Int(t.slot),
@@ -586,7 +586,7 @@ void ProcessArchive(const Shared& sh, size_t index, AssetBatch* batch, AssetQueu
         std::string rel(folder);
         if (!rel.empty()) rel += '\\';
         rel.append(name);
-        p.path = assets::NormalizePath(Utf8Lossy(reinterpret_cast<const uint8_t*>(rel.data()), rel.size()));
+        p.path = assets::NormalizePath(TextToUtf8(reinterpret_cast<const uint8_t*>(rel.data()), rel.size()));
         p.root = r.id;
         p.archive = f.dbId;
         p.inData = f.inData;
