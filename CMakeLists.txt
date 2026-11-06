@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SkyrimPluginFormat VERSION 0.1 LANGUAGES C CXX)
+project(SkyrimPluginFormat VERSION 0.90 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -54,6 +54,7 @@ target_link_libraries(spf PUBLIC sqlite3 PRIVATE bsa::reader asset::metadata bcr
 add_executable(spf_cli tools/spf.cpp)
 set_target_properties(spf_cli PROPERTIES OUTPUT_NAME spf)
 target_link_libraries(spf_cli PRIVATE spf)
+target_compile_definitions(spf_cli PRIVATE SPF_VERSION="${PROJECT_VERSION}")
 # spf.exe looks for patterns.json next to itself. Copied whenever the catalog
 # changes, not only when spf.exe relinks.
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/patterns.json

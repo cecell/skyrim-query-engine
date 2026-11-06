@@ -2027,6 +2027,10 @@ int DiffCommand(int argc, wchar_t** argv) {
 int wmain(int argc, wchar_t** argv) {
     // spf help [cmd], spf --help, spf <cmd> --help
     std::string arg1 = argc > 1 ? Utf8(argv[1]) : "";
+    if (arg1 == "--version" || arg1 == "version") {
+        printf("spf %s\n", SPF_VERSION);
+        return 0;
+    }
     if (arg1 == "help" || arg1 == "--help" || arg1 == "-h" || arg1 == "/?")
         return Help(argc > 2 ? Utf8(argv[2]) : "");
     for (int i = 2; i < argc; ++i) {

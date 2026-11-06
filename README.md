@@ -1,13 +1,47 @@
-# skyrim-plugin-format
+# Skyrim Plugin Output (`spf`)
 
-A complete parsing system utilizing a pattern based system loosely based on kaitai patterns.
+Reads Skyrim SE plugins (`.esm`, `.esp`, `.esl`) and gives you any field of any record as JSON or
+CSV, or a whole load order and every asset file as SQLite databases. It's a command-line tool for
+people and for AI assistants, so nobody has to parse plugin bytes by hand.
 
-Reads Skyrim SE plugins (`.esm` / `.esp` / `.esl`) and decodes every
-subrecord into named fields using `data/patterns.json` (1,893 patterns, 134
-record types). The decoder is a C++ port of the pattern engine the reference
-database is built with, and was checked against that database value for value
-on the 80 Bethesda plugins (1,251,209 records, 5,763,688 values, 0
-mismatches).
+It only reads: `spf` never changes a plugin. It decodes every subrecord with a catalog of 1,893
+patterns across 134 record types, and it handles compressed records, master-relative FormIDs,
+localized strings (loose or in BSAs) and fields whose layout depends on context.
+
+## Download
+
+Get `spf-<version>.zip` from [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/198184)
+or the [releases page](https://github.com/cecell/skyrim-plugin-format/releases), and unzip it
+anywhere. Keep `spf.exe` and `patterns.json` together. It needs 64-bit Windows and nothing else.
+
+`spf.exe` runs in a terminal. Double-clicking it only flashes a window, so open Command Prompt or
+PowerShell in its folder.
+
+## Quick start
+
+Run `spf help` for an overview and `spf help <command>` for any command. Then:
+
+```
+spf info Skyrim.esm
+spf fields Skyrim.esm WEAP
+spf export Skyrim.esm --type WEAP --fields EDID,FULL,DATA.damage --csv
+```
+
+```
+form,type,in,EDID,FULL,DATA.damage
+Skyrim.esm:012EB7,WEAP,,IronSword,Iron Sword,7
+```
+
+Point it at a plugin in your `Data` folder. Plugins and their strings need to be in the same folder
+structure the game uses, so that localized text can be found.
+
+## How far to trust it
+
+The decoder was checked value for value against an xEdit dump of the 80 Bethesda plugins: 1,251,209
+records and 5,763,688 values, with 0 mismatches. That shows it agrees with xEdit, not that it's right.
+Evidence from a decompiled Creation Kit has since found errors in both, and those corrections are being
+applied to the catalog in batches, so some fields called `unknown` or `unused` have a known meaning and
+a few layouts are incomplete.
 
 ## The `spf` tool
 
@@ -194,6 +228,8 @@ builds in about 100 seconds (1.3 GB).
 
 ## `spfedit`: writing and editing plugins
 
+`spfedit` isn't in the release zip yet; build it from source.
+
 `spf` only reads. `spfedit` is a separate exe and library (`spf_edit`, not linked
 by anything that links `spf`) that writes `.esm`, `.esp` and `.esl`.
 
@@ -268,6 +304,24 @@ table.
 - A subrecord whose bytes do not fit its pattern is kept raw
   (`subrecord_raw.bytes` BLOB in the database, `"#0A1B..."` in exports); the rest of the
   record still decodes.
+
+## Releases
+
+A version tag runs `.github/workflows/release.yml`, which builds, tests, packages, hashes and scans on
+GitHub's runners, publishes the release, and uploads the same zip to Nexus Mods. To release:
+
+1. Set the version in `CMakeLists.txt`.
+2. Add `release_notes/<version>.md`. Its first line and `## ` sections become the Nexus changelog.
+3. Push the commit, then the tag: `git tag v<version>` and `git push origin v<version>`.
+
+Running the workflow by hand from the Actions page does everything except publish.
+
+To check a download, compare it with `SHA256SUMS.txt` on the release: `sha256sum -c SHA256SUMS.txt`,
+or `Get-FileHash <file>` in PowerShell. The release notes link each file's VirusTotal report.
+
+## Licence
+
+GNU General Public License v3.0: see [`LICENSE`](LICENSE).
 
 ## Building
 
