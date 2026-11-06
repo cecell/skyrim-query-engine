@@ -1441,10 +1441,10 @@ struct Editor::Impl {
                 } else {
                     for (const TraceLeaf& l : st.leaves) {
                         if (!l.pattern || formOffsets.count(l.offset)) continue;
-                        if (l.size == 4) {
+                        if (l.size == 4 && rt != "TES4" && LeafTypeName(*l.pattern) != "lstring") {  // a string ID is no FormID
                             uint32_t v = U32(s.data + l.offset);
                             if (looksLikeSelf(v)) note(l.offset, v, "not marked as a FormID");
-                        } else if (l.size > 4 && LeafIsByteRun(*l.pattern)) {
+                        } else if (l.size > 4 && LeafIsByteRun(*l.pattern) && !GeometryRun(rt, s.sig)) {
                             for (size_t off = 0; off + 4 <= l.size; off += 4) {
                                 uint32_t v = U32(s.data + l.offset + off);
                                 if (looksLikeSelf(v)) note(l.offset + off, v, "raw bytes");
@@ -1468,6 +1468,13 @@ struct Editor::Impl {
             c->owned.reset();
         }
         return c;
+    }
+
+    // Raw runs known to hold heights, normals, vertices or offsets, never a FormID.
+    // (A navmesh's FormIDs are marked as such: only its vertex and triangle
+    // arrays are raw.)
+    static bool GeometryRun(const std::string& rt, const Sig& sig) {
+        return rt == "LAND" || rt == "NAVM" || SigIs(sig, "MHDT") || SigIs(sig, "TVDT") || SigIs(sig, "OFST");
     }
 
     static bool GroupLabelIsForm(uint32_t type) { return type == 1 || type == 6 || type == 7 || type == 8 || type == 9 || type == 10; }
