@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-namespace spf {
+namespace skqe {
 
 class Value {
 public:
@@ -68,4 +68,4 @@ void WriteJson(const Value& v, std::string* out);
 // String::from_utf8_lossy does (one replacement per maximal invalid prefix).
 std::string Utf8Lossy(const uint8_t* p, size_t n);
 
-}  // namespace spf
+}  // namespace skqe

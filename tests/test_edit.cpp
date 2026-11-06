@@ -1,6 +1,6 @@
 // Unit tests for the plugin writer, on hand-built plugins.
 //
-//   spfedit_tests <data folder>   (holds patterns.json, field_order.csv, catalog_open.csv)
+//   skqeedit_tests <data folder>   (holds patterns.json, field_order.csv, catalog_open.csv)
 #include <windows.h>
 
 #include <algorithm>
@@ -17,8 +17,8 @@
 #include "edit/ops.h"
 #include "plugin.h"
 
-using namespace spf;
-using namespace spf::edit;
+using namespace skqe;
+using namespace skqe::edit;
 
 namespace {
 
@@ -508,7 +508,7 @@ void TestCopyAsOverride() {
     Bytes srcBytes = Join({Rec("TES4", 1, 0, Join({Sub("HEDR", Hedr(0.94f, 7, 0x3000))})),
                            Group(Label("NPC_"), 0, Rec("NPC_", kFlagCompressed, 0x00002002, npcBody)),
                            Group(Label("CELL"), 0, Group(0, 2, Group(0, 3, Join({Rec("CELL", 0, cellId, cell), kids}))))});
-    auto temp = std::filesystem::temp_directory_path() / L"spfedit_tests";
+    auto temp = std::filesystem::temp_directory_path() / L"skqeedit_tests";
     std::filesystem::create_directories(temp);
     auto srcPath = temp / L"Skyrim.esm";
     {
@@ -582,7 +582,7 @@ void TestCopyConvertsText() {
     Bytes weap = Join({Sub("EDID", Str("S")), Sub("FULL", Bytes{9, 0, 0, 0}), Sub("DESC", Bytes{0, 0, 0, 0})});
     Bytes srcBytes = Join({Rec("TES4", 0x81, 0, Sub("HEDR", Hedr(1.71f, 2, 0x900))),
                            Group(Label("WEAP"), 0, Rec("WEAP", 0, 0x00000800, weap))});
-    auto temp = std::filesystem::temp_directory_path() / L"spfedit_tests_text";
+    auto temp = std::filesystem::temp_directory_path() / L"skqeedit_tests_text";
     std::filesystem::create_directories(temp / L"Strings");
     auto srcPath = temp / L"Loc.esm";
     {
@@ -763,7 +763,7 @@ void TestEncodeRoundTrip() {
 }
 
 void TestSaveGuards() {
-    auto temp = std::filesystem::temp_directory_path() / L"spfedit_tests_save";
+    auto temp = std::filesystem::temp_directory_path() / L"skqeedit_tests_save";
     std::filesystem::create_directories(temp);
     auto input = temp / L"In.esp";
     Bytes in = SamplePlugin();
@@ -800,7 +800,7 @@ void TestSaveGuards() {
         CHECK(!ed.Save(out.wstring(), plain, &why));  // exists now
         back.close();
         CHECK(ed.Save(out.wstring(), so, &why));
-        CHECK(!std::filesystem::exists(temp / L"Out.esp.spfedit.tmp"));
+        CHECK(!std::filesystem::exists(temp / L"Out.esp.skqeedit.tmp"));
     }
     std::error_code ec;
     std::filesystem::remove_all(temp, ec);

@@ -17,7 +17,7 @@
 
 #include "pattern_engine.h"
 
-namespace spf {
+namespace skqe {
 
 struct PathStep {
     bool index = false;
@@ -29,7 +29,7 @@ struct ColumnDef {
     std::string name;     // SQL column name
     std::string sqlType;  // INTEGER / REAL / TEXT / BLOB, empty = any
     std::string kind;     // int real text bool formid lstring marker flags bytes json any
-    std::string path;     // spf export path: "DATA.damage", "SNAM.Faction"
+    std::string path;     // skqe export path: "DATA.damage", "SNAM.Faction"
     std::vector<PathStep> steps;  // from the subrecord's value (or the list element)
 };
 
@@ -70,4 +70,4 @@ private:
     std::unordered_map<std::string, int> typeTables_;
 };
 
-}  // namespace spf
+}  // namespace skqe

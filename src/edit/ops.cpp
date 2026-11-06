@@ -16,7 +16,7 @@
 #include <sstream>
 #include <thread>
 
-namespace spf::edit {
+namespace skqe::edit {
 namespace {
 
 uint32_t U32(const uint8_t* p) {
@@ -2304,7 +2304,7 @@ bool Editor::Save(const std::wstring& path, const SaveOptions& opt, std::string*
         *error = "internal: the result does not read back: " + reread;
         return false;
     }
-    std::wstring temp = full + L".spfedit.tmp";
+    std::wstring temp = full + L".skqeedit.tmp";
     {
         std::ofstream f(temp.c_str(), std::ios::binary | std::ios::trunc);
         if (!f) {
@@ -2535,11 +2535,11 @@ SelfCheck RunSelfCheck(const std::wstring& path, const PatternCatalog& cat) {
 }
 
 const char* OpHelp() {
-    return R"(Ops (JSON objects; `spfedit apply` takes a list of them):
+    return R"(Ops (JSON objects; `skqeedit apply` takes a list of them):
 
   {"op":"set","form":F,"field":"DATA.damage","value":9}
-      One value. Field paths are spf's: DATA.damage, CTDA[2].func_idx, EDID, KWDA[0]
-      ("spfedit show" lists every path of a record with its bytes). A FormID value
+      One value. Field paths are skqe's: DATA.damage, CTDA[2].func_idx, EDID, KWDA[0]
+      ("skqeedit show" lists every path of a record with its bytes). A FormID value
       is Owner.esm:XXXXXX. Flags: a list of names, or {"add":[..],"remove":[..]}.
       Any value: "raw:<hex>" for exact bytes. Asking for the value it already
       shows changes nothing. Refused: a value later data depends on, a catalog
@@ -2610,4 +2610,4 @@ std::string ResultJson(const OpResult& r) {
     return JsonOf(v);
 }
 
-}  // namespace spf::edit
+}  // namespace skqe::edit

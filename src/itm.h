@@ -12,7 +12,7 @@
 
 #include "pattern_engine.h"
 
-namespace spf {
+namespace skqe {
 
 struct ItmRecord {
     uint32_t formId = 0;     // as stored in the plugin
@@ -36,4 +36,4 @@ void SetItmMastersFolder(const std::wstring& folder);
 // Debug aid: why a single override is or is not ITM (one line per finding).
 std::vector<std::string> ExplainItm(const std::wstring& pluginPath, const PatternCatalog& catalog, uint32_t formId);
 
-}  // namespace spf
+}  // namespace skqe

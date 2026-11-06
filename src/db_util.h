@@ -16,7 +16,7 @@
 
 #include "sqlite3.h"
 
-namespace spf {
+namespace skqe {
 
 class Db {
 public:
@@ -185,4 +185,4 @@ inline std::string NowIso() {
     return buf;
 }
 
-}  // namespace spf
+}  // namespace skqe

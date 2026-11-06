@@ -18,7 +18,7 @@
 
 #include "inflate.h"
 
-namespace spf {
+namespace skqe {
 namespace {
 
 // ---- xEdit's rules (Core\wbDefinitionsTES5.pas / wbDefinitionsCommon.pas,
@@ -900,4 +900,4 @@ std::vector<std::string> ExplainItm(const std::wstring& pluginPath, const Patter
     return why;
 }
 
-}  // namespace spf
+}  // namespace skqe

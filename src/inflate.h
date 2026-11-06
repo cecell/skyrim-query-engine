@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace spf {
+namespace skqe {
 
 // The largest record body inflated (the biggest in the Bethesda plugins is a
 // few MB).
@@ -16,4 +16,4 @@ constexpr size_t kMaxInflated = size_t{256} << 20;
 // most deflate can expand `srcLen` bytes to.
 bool ZlibInflate(const uint8_t* src, size_t srcLen, size_t expectedSize, std::vector<uint8_t>* out);
 
-}  // namespace spf
+}  // namespace skqe

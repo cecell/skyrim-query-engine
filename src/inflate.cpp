@@ -26,7 +26,7 @@
 
 #include <cstring>
 
-namespace spf {
+namespace skqe {
 namespace {
 
 constexpr int kMaxBits = 15;
@@ -223,4 +223,4 @@ bool ZlibInflate(const uint8_t* src, size_t srcLen, size_t expectedSize, std::ve
     return out->size() == expectedSize;
 }
 
-}  // namespace spf
+}  // namespace skqe

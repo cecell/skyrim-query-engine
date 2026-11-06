@@ -1,8 +1,8 @@
 // libFuzzer target: every input is tried as a plugin (index + decode every
 // field of every record), a strings file, and a zlib stream. Built only with
-// -DSPF_FUZZ=ON (MSVC /fsanitize=fuzzer,address); see README.
+// -DSKQE_FUZZ=ON (MSVC /fsanitize=fuzzer,address); see README.
 //
-//   spf_fuzz corpus_dir [-max_total_time=600]
+//   skqe_fuzz corpus_dir [-max_total_time=600]
 // patterns.json is read from next to the exe.
 #include <windows.h>
 
@@ -17,7 +17,7 @@
 #include "plugin.h"
 #include "strings.h"
 
-using namespace spf;
+using namespace skqe;
 
 namespace {
 

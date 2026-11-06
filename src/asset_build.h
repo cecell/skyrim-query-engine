@@ -1,4 +1,4 @@
-// `spf build-assets`: catalogues every asset file of a Skyrim SE install (the
+// `skqe build-assets`: catalogues every asset file of a Skyrim SE install (the
 // Data folder, mod staging folders, MO2 instances, and the files packed in
 // their BSAs) into its own SQLite database, assets.db. Design: ASSETS_DDL.md.
 //
@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace spf {
+namespace skqe {
 
 struct AssetOptions {
     std::wstring out;            // the .db to write (replaced when the build succeeds)
@@ -49,4 +49,4 @@ std::vector<ArchiveLoad> PlanArchives(const std::vector<std::string>& archivesIn
                                       const std::vector<std::string>& loadOrder);
 
 }  // namespace assets
-}  // namespace spf
+}  // namespace skqe

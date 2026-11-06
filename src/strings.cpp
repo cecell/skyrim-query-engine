@@ -9,7 +9,7 @@
 
 #include "pattern_value.h"
 
-namespace spf {
+namespace skqe {
 namespace {
 
 // Bethesda's largest strings file is a few MB; anything this size is damage.
@@ -97,4 +97,4 @@ const std::string* StringTables::Find(uint32_t id, const std::string& cls) const
     return nullptr;
 }
 
-}  // namespace spf
+}  // namespace skqe

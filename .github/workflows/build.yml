@@ -1,4 +1,4 @@
-# Builds spf.exe and runs the unit tests (valid and damaged plugins, strings
+# Builds skqe.exe and runs the unit tests (valid and damaged plugins, strings
 # files, zlib streams) on a clean runner, with the same MSVC toolset as local
 # builds. The decoder's reference checks need the Bethesda corpus and run
 # locally (tools/verify_tables.py).
@@ -31,13 +31,13 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
           cmake --build build || exit /b 1
           ctest --test-dir build --output-on-failure || exit /b 1
-          build\spf.exe --help > nul || exit /b 1
+          build\skqe.exe --help > nul || exit /b 1
 
       - uses: actions/upload-artifact@v4
         with:
-          name: spf
+          name: skqe
           path: |
-            build/spf.exe
+            build/skqe.exe
             build/patterns.json
 
   # libFuzzer + AddressSanitizer for 5 minutes on GitHub's runner (local
@@ -58,13 +58,13 @@ jobs:
           call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=%MSVC_TOOLSET% || exit /b 1
           rem Seeds come from a normal build of the unit tests.
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
-          cmake --build build --target spf_tests || exit /b 1
+          cmake --build build --target skqe_tests || exit /b 1
           mkdir build-fuzz\corpus
-          build\spf_tests.exe --seeds build-fuzz\corpus || exit /b 1
-          cmake -S . -B build-fuzz -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPF_FUZZ=ON || exit /b 1
-          cmake --build build-fuzz --target spf_fuzz || exit /b 1
+          build\skqe_tests.exe --seeds build-fuzz\corpus || exit /b 1
+          cmake -S . -B build-fuzz -G Ninja -DCMAKE_BUILD_TYPE=Release -DSKQE_FUZZ=ON || exit /b 1
+          cmake --build build-fuzz --target skqe_fuzz || exit /b 1
           mkdir build-fuzz\crashes
-          build-fuzz\spf_fuzz.exe build-fuzz\corpus -max_total_time=300 -timeout=10 -rss_limit_mb=2048 -max_len=262144 -artifact_prefix=build-fuzz\crashes\ -print_final_stats=1
+          build-fuzz\skqe_fuzz.exe build-fuzz\corpus -max_total_time=300 -timeout=10 -rss_limit_mb=2048 -max_len=262144 -artifact_prefix=build-fuzz\crashes\ -print_final_stats=1
 
       - uses: actions/upload-artifact@v4
         if: failure()

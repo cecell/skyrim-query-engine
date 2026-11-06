@@ -1,30 +1,30 @@
-# Skyrim Plugin Output (`spf`)
+# Skyrim Query Engine (`skqe`)
 
 Reads Skyrim SE plugins (`.esm`, `.esp`, `.esl`) and gives you any field of any record as JSON or
 CSV, or a whole load order and every asset file as SQLite databases. It's a command-line tool for
 people and for AI assistants, so nobody has to parse plugin bytes by hand.
 
-It only reads: `spf` never changes a plugin. It decodes every subrecord with a catalog of 1,893
+It only reads: `skqe` never changes a plugin. It decodes every subrecord with a catalog of 1,893
 patterns across 134 record types, and it handles compressed records, master-relative FormIDs,
 localized strings (loose or in BSAs) and fields whose layout depends on context.
 
 ## Download
 
-Get `spf-<version>.zip` from [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/198184)
-or the [releases page](https://github.com/cecell/skyrim-plugin-format/releases), and unzip it
-anywhere. Keep `spf.exe` and `patterns.json` together. It needs 64-bit Windows and nothing else.
+Get `skqe-<version>.zip` from [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/198184)
+or the [releases page](https://github.com/cecell/skyrim-query-engine/releases), and unzip it
+anywhere. Keep `skqe.exe` and `patterns.json` together. It needs 64-bit Windows and nothing else.
 
-`spf.exe` runs in a terminal. Double-clicking it only flashes a window, so open Command Prompt or
+`skqe.exe` runs in a terminal. Double-clicking it only flashes a window, so open Command Prompt or
 PowerShell in its folder.
 
 ## Quick start
 
-Run `spf help` for an overview and `spf help <command>` for any command. Then:
+Run `skqe help` for an overview and `skqe help <command>` for any command. Then:
 
 ```
-spf info Skyrim.esm
-spf fields Skyrim.esm WEAP
-spf export Skyrim.esm --type WEAP --fields EDID,FULL,DATA.damage --csv
+skqe info Skyrim.esm
+skqe fields Skyrim.esm WEAP
+skqe export Skyrim.esm --type WEAP --fields EDID,FULL,DATA.damage --csv
 ```
 
 ```
@@ -43,15 +43,15 @@ Evidence from a decompiled Creation Kit has since found errors in both, and thos
 applied to the catalog in batches, so some fields called `unknown` or `unused` have a known meaning and
 a few layouts are incomplete.
 
-## The `spf` tool
+## The `skqe` tool
 
 ```
-spf info   <plugin> [--json]              TES4 header facts, masters, record counts by type
-spf fields <plugin> <TYPE>                which fields that type has, with sub-fields
-spf export <plugin> [options]             chosen fields of chosen forms, as JSON or CSV;
+skqe info   <plugin> [--json]              TES4 header facts, masters, record counts by type
+skqe fields <plugin> <TYPE>                which fields that type has, with sub-fields
+skqe export <plugin> [options]             chosen fields of chosen forms, as JSON or CSV;
                                           several plugins, or every copy across a load order with the winner and
-                                          what conflicts: `spf help export`
-spf diff   <copy> <copy>...               what differs between copies of a plugin, as JSON
+                                          what conflicts: `skqe help export`
+skqe diff   <copy> <copy>...               what differs between copies of a plugin, as JSON
     --type WEAP[,ARMO...]                 only these record types
     --form 00012EB7[,Skyrim.esm:012EB7]   only these forms (as stored, or owner:objectID)
     --fields EDID,FULL,DATA.damage        only these fields; omitted or * = all
@@ -73,15 +73,15 @@ In the output:
   is deleted.
 
 ```
-spf export Skyrim.esm --type WEAP --fields EDID,FULL,DATA.damage --csv
+skqe export Skyrim.esm --type WEAP --fields EDID,FULL,DATA.damage --csv
 form,type,in,EDID,FULL,DATA.damage
 Skyrim.esm:012EB7,WEAP,,IronSword,Iron Sword,7
 ```
 
-## `spf build-db`: a whole load order as one SQLite database
+## `skqe build-db`: a whole load order as one SQLite database
 
 ```
-spf build-db --out skyrim.db --data "<Skyrim>\Data" [--load-order plugins.txt | --plugins a.esm,b.esp]
+skqe build-db --out skyrim.db --data "<Skyrim>\Data" [--load-order plugins.txt | --plugins a.esm,b.esp]
 ```
 
 Plugins are decoded in parallel and one thread writes. The Bethesda plugins
@@ -112,7 +112,7 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
 - `form_names` with full-text indexes `fts_names` (words, prefixes) and
   `fts_names_tri` (substrings): search every form occurrence by editor ID or
   name. An extra, on by default: `--skip fts_names` leaves it out,
-  `spf db add fts_names` adds it later.
+  `skqe db add fts_names` adds it later.
 - Plugin facts (extras, each on by default, `--skip` any): `plugin_facts`
   holds per plugin the master form count and ESLable verdict, deleted
   placed objects and navmeshes, missing masters (view `missing_masters`) and
@@ -121,7 +121,7 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
   form references, since most others sit in leftovers nothing uses.
 - Every index is optional: each is an extra (`idx_forms_key`,
   `idx_refs_to`, `idx_table_keys`, ...), on by default, `--skip` to leave it
-  out and `spf db add` to build it later. On a 192-plugin load order the
+  out and `skqe db add` to build it later. On a 192-plugin load order the
   indexes are 29% of the file (about 320 MB of 1.16 GB) and about 10 s of
   build time; without them a lookup scans its table (about 100 ms instead of
   under 1 ms at 2.3M forms).
@@ -133,8 +133,8 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
   fields name `.wav`, the game also plays `.xwm` / `.fuz`).
 - `plugin_facts_v`: the shell extension's columns per plugin by name (master
   forms, ESLable, deleted, ITM, dirty, missing masters, invalid references).
-- `spf db drop <extra>` removes a built extra (drops an index, empties a fact
-  table); `spf db add` builds it again. Predesigned indexes ship off by
+- `skqe db drop <extra>` removes a built extra (drops an index, empties a fact
+  table); `skqe db add` builds it again. Predesigned indexes ship off by
   default for queries that need them: `idx_ref_base` (references by their
   base object: 221 ms -> 5 ms on a 192-plugin load order) and
   `idx_persistent_type` (persistent forms by type).
@@ -143,7 +143,7 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
   Compared the way xEdit's Quick Auto Clean does, without its known false
   positives (an added INFO PNAM or a DIAL subtype fix is a real change).
 - Raw byte runs are stored as BLOBs (`kind` = `bytes`); `SELECT hex(col)`
-  gives the hex text `spf export` shows. Inside JSON values they stay hex text.
+  gives the hex text `skqe export` shows. Inside JSON values they stay hex text.
 - `subrecord_overflow` / `subrecord_raw`: whatever did not fit, so nothing
   is lost silently.
 - Views `forms_v` (readable `Skyrim.esm:012EB7` keys, in-game FormIDs) and
@@ -162,26 +162,26 @@ and stay empty until the module is built:
 | `wrld_large_refs` | WRLD.RNAM large-reference lists | small |
 
 ```
-spf build-db ... --with navmesh,landscape       build them with the core
-spf db add navmesh --db skyrim.db               or add one later
+skqe build-db ... --with navmesh,landscape       build them with the core
+skqe db add navmesh --db skyrim.db               or add one later
 ```
 
 `db add` re-reads only that module's subrecords, fills only its tables (plus
 xref rows), runs in one transaction, and refuses if a plugin changed since the
 build. Building with `--with` and adding later give identical databases.
 
-The tables were checked cell for cell against `spf export` on 21 record
+The tables were checked cell for cell against `skqe export` on 21 record
 types of Skyrim.esm and Dawnguard.esm (12.8 million values, 0 mismatches).
 
 Every form has one integer key, `form_key = owner plugin_no * 16777216 +
 object ID`, computed from the bytes. It is the same whichever plugin a
-reference is read from, so joins are plain integer joins. `spf build-db
+reference is read from, so joins are plain integer joins. `skqe build-db
 --help` has the details.
 
-## `spf build-assets`: every asset file as one SQLite database
+## `skqe build-assets`: every asset file as one SQLite database
 
 ```
-spf build-assets --out assets.db --data "<Skyrim>\Data"
+skqe build-assets --out assets.db --data "<Skyrim>\Data"
                  [--staging <root> | --mo2 <instance> --profile <name>]
                  [--load-order plugins.txt] [--hash] [--skip e,..] [--threads n] [--quiet]
 ```
@@ -226,12 +226,12 @@ overwrite highest, real Data lowest) decides `in_data`.
 The real Data folder (870,401 loose files, 892 BSAs, 1.53 million rows)
 builds in about 100 seconds (1.3 GB).
 
-## `spfedit`: writing and editing plugins
+## `skqeedit`: writing and editing plugins
 
-`spfedit` isn't in the release zip yet; build it from source.
+`skqeedit` isn't in the release zip yet; build it from source.
 
-`spf` only reads. `spfedit` is a separate exe and library (`spf_edit`, not linked
-by anything that links `spf`) that writes `.esm`, `.esp` and `.esl`.
+`skqe` only reads. `skqeedit` is a separate exe and library (`skqe_edit`, not linked
+by anything that links `skqe`) that writes `.esm`, `.esp` and `.esl`.
 
 **Bytes are the truth.** A plugin is a tree over its original bytes. Nothing is
 rebuilt from decoded values: an unedited group or record is copied from the input,
@@ -240,11 +240,11 @@ Creation Kit save loses (`REFR.XLOC` lock counts, `WRLD.OFST`, `RNAM`, `NAM0`/`N
 `TES4.ONAM`, `XCLW` fractions) can't be lost here: there is no code path that rewrites them.
 
 ```
-spfedit set X.esp --form X.esp:000800 --field DATA.damage --value 9 --out Y.esp
-spfedit apply X.esp --ops ops.json --out Y.esp        a list of ops; the first failure saves nothing
-spfedit apply X.esp --ops ops.json --dry-run
-spfedit show X.esp --form X.esp:000800                every value: path, byte offset, size
-spfedit ops                                           the ops and their arguments
+skqeedit set X.esp --form X.esp:000800 --field DATA.damage --value 9 --out Y.esp
+skqeedit apply X.esp --ops ops.json --out Y.esp        a list of ops; the first failure saves nothing
+skqeedit apply X.esp --ops ops.json --dry-run
+skqeedit show X.esp --form X.esp:000800                every value: path, byte offset, size
+skqeedit ops                                           the ops and their arguments
 ```
 
 Ops: `set`, `add-sub`, `remove-sub`, `add-item`, `remove-item`, `add-record`,
@@ -279,17 +279,17 @@ in `src/edit/ops.h`, with undo, redo and structured results).
 Checks, all read-only:
 
 ```
-spfedit roundtrip <plugin|folder>... [--csv out.csv] [--recompress]   writes each plugin back in memory, compares
-spfedit selfcheck <plugin|folder>...     tracer vs decoder, every value encoded back, group placement rules
-spfedit mastercheck <plugin|folder>...   add-master, then every record compared by values and FormID targets
-python -I tools\check_edits.py build <work dir>      real edits, each checked with spf diff --include-unknown
+skqeedit roundtrip <plugin|folder>... [--csv out.csv] [--recompress]   writes each plugin back in memory, compares
+skqeedit selfcheck <plugin|folder>...     tracer vs decoder, every value encoded back, group placement rules
+skqeedit mastercheck <plugin|folder>...   add-master, then every record compared by values and FormID targets
+python -I tools\check_edits.py build <work dir>      real edits, each checked with skqe diff --include-unknown
 ```
 
 `data/field_order.csv` and `data/catalog_open.csv` are generated by `tools/gen_edit_data.py`.
 
 ## Damaged and hostile files
 
-Every size and count spf reads from a file is checked before it is used:
+Every size and count skqe reads from a file is checked before it is used:
 group and record sizes against their parent group and the file, a
 compressed record's claimed size against what deflate can produce (and 256
 MB), list counts against the bytes left, strings files and plugin headers
@@ -321,13 +321,13 @@ or `Get-FileHash <file>` in PowerShell. The release notes link each file's Virus
 
 ## Credits
 
-`spf` wouldn't exist in this form without these:
+`skqe` wouldn't exist in this form without these:
 
-- **xEdit**, by ElminsterAU with Hlp, Zilav and Sharlikran: `spf` uses its names, condition function
+- **xEdit**, by ElminsterAU with Hlp, Zilav and Sharlikran: `skqe` uses its names, condition function
   table and comparison rules, and was checked against its output. MPL 2.0.
 - **puff**, by Mark Adler: the inflate code is altered from it.
 - **SQLite**, by D. Richard Hipp and the SQLite developers: public domain.
-- **zlib**, by Jean-loup Gailly and Mark Adler: `spfedit`'s compression.
+- **zlib**, by Jean-loup Gailly and Mark Adler: `skqeedit`'s compression.
 
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) has the full notices and says which files each one
 covers. The Elder Scrolls and Skyrim are trademarks of ZeniMax Media Inc. or its affiliates; this
@@ -341,31 +341,31 @@ their own terms, listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 ## Building
 
 Visual Studio 2026 with the MSVC 14.44 toolset, CMake and Ninja: run
-`build.cmd`. Output: `build\spf.exe` with `patterns.json` next to it. The
+`build.cmd`. Output: `build\skqe.exe` with `patterns.json` next to it. The
 first configure downloads bsa-reader and beth-asset-metadata from GitHub
 (pinned to commits in `CMakeLists.txt`).
 
 ## Testing
 
-- `ctest --test-dir build` (or `build\spf_tests.exe`): unit tests with
+- `ctest --test-dir build` (or `build\skqe_tests.exe`): unit tests with
   hand-built valid and damaged plugins, strings files and zlib streams, the
   asset readers on synthetic bytes, and build-assets' winners on a fixture
-  tree (hardlinks, BSAs, an MO2 instance) written to `%TEMP%\spf_tests_assets`.
+  tree (hardlinks, BSAs, an MO2 instance) written to `%TEMP%\skqe_tests_assets`.
   CI runs them on every push.
-- `tools/verify_tables.py <db> build/spf.exe <data dir> <plugin> <TYPE>...`:
-  checks a database cell for cell against `spf export`.
+- `tools/verify_tables.py <db> build/skqe.exe <data dir> <plugin> <TYPE>...`:
+  checks a database cell for cell against `skqe export`.
 - Fuzzing, with MSVC's libFuzzer and AddressSanitizer:
 
   ```
-  cmake -S . -B build-fuzz -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPF_FUZZ=ON
-  cmake --build build-fuzz --target spf_fuzz
-  build-fuzz\spf_fuzz.exe <corpus dir> -max_total_time=600 -max_len=262144
+  cmake -S . -B build-fuzz -G Ninja -DCMAKE_BUILD_TYPE=Release -DSKQE_FUZZ=ON
+  cmake --build build-fuzz --target skqe_fuzz
+  build-fuzz\skqe_fuzz.exe <corpus dir> -max_total_time=600 -max_len=262144
   ```
 
   Every input is tried as a plugin (every field of every record decoded), a
   strings file and a zlib stream. Seed the corpus with small plugins (or
-  `spf_tests --seeds <dir>` from a normal build); run it from a vcvars prompt
-  so the ASan runtime DLL is found. A fuzz build only builds `spf_fuzz`. CI
+  `skqe_tests --seeds <dir>` from a normal build); run it from a vcvars prompt
+  so the ASan runtime DLL is found. A fuzz build only builds `skqe_fuzz`. CI
   fuzzes for 5 minutes on every push.
 
 ## Layout
@@ -374,16 +374,16 @@ first configure downloads bsa-reader and beth-asset-metadata from GitHub
 - `src/pattern_engine.*`, `src/pattern_value.*`: the pattern decoder and its value type
 - `src/inflate.*`: zlib for compressed records, altered from Mark Adler's puff
 - `src/strings.*`: localized strings, from loose files or BSAs
-- `src/db_build.*`: `spf build-db`
+- `src/db_build.*`: `skqe build-db`
 - `src/db_schema.*`: build-db's per-record-type tables, generated from the catalog
 - `src/db_util.h`: SQLite / queue helpers shared by the builders
-- `src/asset_build.*`: `spf build-assets`
+- `src/asset_build.*`: `skqe build-assets`
 - `src/asset_readers.*`: PEX, HKX, TRI and NIF-texture readers; asset path rules
 - `tools/export_catalog_meta.py`: adds `_multi` (repeating subrecords) and
   `_display` (xEdit names) to the catalog
-- `tools/verify_tables.py`: checks a built database against `spf export`
-- `tests/test_spf.cpp`: unit tests; `tests/fuzz_plugin.cpp`: the libFuzzer target
+- `tools/verify_tables.py`: checks a built database against `skqe export`
+- `tests/test_skqe.cpp`: unit tests; `tests/fuzz_plugin.cpp`: the libFuzzer target
 - `third_party/sqlite`: the SQLite amalgamation (3.54.1, public domain)
-- `tools/spf.cpp`: the command-line tool
-- `src/edit/`, `tools/spfedit.cpp`, `tests/test_edit.cpp`: the plugin writer
+- `tools/skqe.cpp`: the command-line tool
+- `src/edit/`, `tools/skqeedit.cpp`, `tests/test_edit.cpp`: the plugin writer
 - `data/patterns.json`: the pattern catalog, with the strings file each localized field uses

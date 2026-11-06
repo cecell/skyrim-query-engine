@@ -25,7 +25,7 @@
 #include "db_util.h"
 #include "pattern_value.h"
 
-namespace spf {
+namespace skqe {
 namespace {
 
 constexpr int kAssetSchemaVersion = 1;
@@ -645,7 +645,7 @@ void ProcessArchive(const Shared& sh, size_t index, AssetBatch* batch, AssetQueu
 // ---- SQL ----
 
 const char kSchema[] = R"SQL(
-CREATE TABLE spf_meta(key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
+CREATE TABLE skqe_meta(key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
 
 CREATE TABLE roots(
   root_id    INTEGER PRIMARY KEY,
@@ -805,7 +805,7 @@ const AssetExtra kAssetExtras[] = {
 
 // st_tables rows: name, kind, description.
 const char* kTableDocs[][3] = {
-    {"spf_meta", "core", "Build settings, sources and counts."},
+    {"skqe_meta", "core", "Build settings, sources and counts."},
     {"roots", "core", "Where files come from: the Data folder, each staging (mod) folder, MO2's overwrite folder."},
     {"paths", "core", "Every normalized relative path (lower case, backslashes, relative to Data), once."},
     {"files", "core", "Every copy of every file: loose in a root, or packed in an archive (archive_id)."},
@@ -829,8 +829,8 @@ const char* kTableDocs[][3] = {
 
 // st_columns descriptions (and refers_to, notes) for the columns that need one.
 const char* kColumnDocs[][5] = {
-    {"spf_meta", "key", "setting name", nullptr, nullptr},
-    {"spf_meta", "value", "its value", nullptr, nullptr},
+    {"skqe_meta", "key", "setting name", nullptr, nullptr},
+    {"skqe_meta", "value", "its value", nullptr, nullptr},
     {"roots", "root_id", "the root", nullptr, nullptr},
     {"roots", "kind", "data | staging | overwrite (MO2)", nullptr, nullptr},
     {"roots", "name", "mod / folder name", nullptr, nullptr},
@@ -1042,7 +1042,7 @@ int BuildAssets(const AssetOptions& opt, std::string* error) {
     for (const auto& e : kAssetExtras) extras.insert(e.name);
     for (const auto& s : opt.skip) {
         if (!extras.count(s)) {
-            *error = "--skip: '" + s + "' is not an extra (spf build-assets --help lists them)";
+            *error = "--skip: '" + s + "' is not an extra (skqe build-assets --help lists them)";
             return 2;
         }
         extras.erase(s);
@@ -1490,10 +1490,10 @@ int BuildAssets(const AssetOptions& opt, std::string* error) {
             setC.Text(4, c[0]).Text(5, c[1]).Run();
         }
 
-        Stmt meta{db.Prepare("INSERT INTO spf_meta VALUES(?,?)", error)};
+        Stmt meta{db.Prepare("INSERT INTO skqe_meta VALUES(?,?)", error)};
         auto putMeta = [&](const char* k, const std::string& v) { meta.Text(1, k).Text(2, v).Run(); };
         putMeta("schema_version", std::to_string(kAssetSchemaVersion));
-        putMeta("built_by", "spf build-assets");
+        putMeta("built_by", "skqe build-assets");
         putMeta("built_at", NowIso());
         putMeta("sqlite_version", sqlite3_libversion());
         putMeta("data_dir", Utf8(data));
@@ -1525,4 +1525,4 @@ int BuildAssets(const AssetOptions& opt, std::string* error) {
     return 0;
 }
 
-}  // namespace spf
+}  // namespace skqe

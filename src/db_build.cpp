@@ -27,10 +27,10 @@
 #include "plugin.h"
 #include "sqlite3.h"
 
-namespace spf {
+namespace skqe {
 namespace {
 
-constexpr int kSchemaVersion = 7;
+constexpr int kSchemaVersion = 8;
 constexpr size_t kBatchRows = 50000;
 constexpr int64_t kKeyShift = 1 << 24;
 
@@ -350,7 +350,7 @@ void FillColumns(const Value& value, const std::vector<ColumnDef>& cols, size_t 
 // One plugin: every record -> a form row and its type / child table rows;
 // its strings tables -> string rows.
 // `modules`: the optional modules to decode too. `core` false = only those
-// modules (spf db add): no forms rows, type table rows, header or strings.
+// modules (skqe db add): no forms rows, type table rows, header or strings.
 void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
                   const std::unordered_map<std::string, int>& noByName, const std::string& language,
                   const PatternCatalog& catalog, const Schema& schema, const std::set<std::string>& modules,
@@ -524,12 +524,12 @@ void DecodePlugin(const PluginInfo& info, const std::vector<PluginInfo>& all,
 // ---- SQLite ----
 
 const char kSchema[] = R"SQL(
-CREATE TABLE spf_meta(
+CREATE TABLE skqe_meta(
   key   TEXT PRIMARY KEY,
   value TEXT
 ) WITHOUT ROWID;
 
-CREATE TABLE spf_modules(
+CREATE TABLE skqe_modules(
   name     TEXT PRIMARY KEY,
   built_at TEXT NOT NULL,
   settings TEXT
@@ -1182,8 +1182,8 @@ const char* kCoreTables[][2] = {
     {"subrecord_raw", "Subrecords with no pattern, or whose bytes did not fit it."},
     {"form_refs", "The xref: one row per FormID inside a record (this occurrence of form_key references ref_key). Index on ref_key: what references a form."},
     {"ref_paths", "The field a form_refs row comes from: record type and path in the subrecord (\"SNAM.Faction\", \"KWDA\")."},
-    {"spf_meta", "Build settings and versions."},
-    {"spf_modules", "What is built: core and the optional modules."},
+    {"skqe_meta", "Build settings and versions."},
+    {"skqe_modules", "What is built: core and the optional modules."},
     {"st_tables", "The data dictionary: tables."},
     {"st_columns", "The data dictionary: columns."},
 };
@@ -1409,14 +1409,14 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         bool known = IsExtra(m);
         for (const auto& km : Schema::Modules()) known = known || km.first == m;
         if (!known) {
-            *error = "unknown module '" + m + "' (spf build-db --help lists them)";
+            *error = "unknown module '" + m + "' (skqe build-db --help lists them)";
             return 2;
         }
         (IsExtra(m) ? extras : modules).insert(m);
     }
     for (const auto& s : opt.skip) {
         if (!IsExtra(s)) {
-            *error = "--skip: '" + s + "' is not an extra (spf build-db --help lists them)";
+            *error = "--skip: '" + s + "' is not an extra (skqe build-db --help lists them)";
             return 2;
         }
         extras.erase(s);
@@ -1720,10 +1720,10 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             }
         }
 
-        Stmt meta{db.Prepare("INSERT INTO spf_meta VALUES(?,?)", error)};
+        Stmt meta{db.Prepare("INSERT INTO skqe_meta VALUES(?,?)", error)};
         auto putMeta = [&](const char* k, const std::string& v) { meta.Text(1, k).Text(2, v).Run(); };
         putMeta("schema_version", std::to_string(kSchemaVersion));
-        putMeta("built_by", "spf build-db");
+        putMeta("built_by", "skqe build-db");
         putMeta("built_at", NowIso());
         putMeta("sqlite_version", sqlite3_libversion());
         putMeta("data_dir", Utf8(data));
@@ -1739,7 +1739,7 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             if (!extras.count(e.name)) skipped += (skipped.empty() ? "" : ",") + std::string(e.name);
         putMeta("modules_not_built", skipped);
         putMeta("plugins_failed", std::to_string(failed.size()));
-        Stmt mod{db.Prepare("INSERT INTO spf_modules VALUES(?, ?, NULL)", error)};
+        Stmt mod{db.Prepare("INSERT INTO skqe_modules VALUES(?, ?, NULL)", error)};
         mod.Text(1, "core").Text(2, NowIso()).Run();
         for (const auto& m : modules) mod.Text(1, m).Text(2, NowIso()).Run();
         for (const auto& e : extras) mod.Text(1, e).Text(2, NowIso()).Run();
@@ -1786,8 +1786,8 @@ std::vector<std::string> LoadOrder(const BuildOptions& opt, const std::vector<st
     return order;
 }
 
-// spf db drop: removes extras (an index, a fact table's rows) so they can be
-// rebuilt later with db add; spf_modules and modules_not_built follow.
+// skqe db drop: removes extras (an index, a fact table's rows) so they can be
+// rebuilt later with db add; skqe_modules and modules_not_built follow.
 int DropExtras(const AddOptions& opt, std::string* error) {
     Db db;
     if (GetFileAttributesW(opt.db.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -1796,14 +1796,17 @@ int DropExtras(const AddOptions& opt, std::string* error) {
     }
     if (!db.Open(opt.db, error)) return 1;
     {
-        Stmt q{db.Prepare("SELECT value FROM spf_meta WHERE key='schema_version'", error)};
-        if (!q.st) return 1;
+        Stmt q{db.Prepare("SELECT value FROM skqe_meta WHERE key='schema_version'", error)};
+        if (!q.st) {
+            *error = "the database has no skqe_meta table, so an older version built it: rebuild it with build-db";
+            return 1;
+        }
         std::string version = sqlite3_step(q.st) == SQLITE_ROW && sqlite3_column_text(q.st, 0)
                                   ? reinterpret_cast<const char*>(sqlite3_column_text(q.st, 0))
                                   : "";
         if (version != std::to_string(kSchemaVersion)) {
             *error = "the database has schema version " + (version.empty() ? std::string("?") : version) +
-                     ", this spf writes " + std::to_string(kSchemaVersion) + ": rebuild it with build-db";
+                     ", this skqe writes " + std::to_string(kSchemaVersion) + ": rebuild it with build-db";
             return 1;
         }
     }
@@ -1817,10 +1820,10 @@ int DropExtras(const AddOptions& opt, std::string* error) {
         for (const auto& e : kExtras)
             if (m == e.name) found = &e;
         if (!found) {
-            *error = "'" + m + "' is not an extra (only extras can be dropped; spf db --help lists them)";
+            *error = "'" + m + "' is not an extra (only extras can be dropped; skqe db --help lists them)";
             return 2;
         }
-        Stmt q{db.Prepare("SELECT 1 FROM spf_modules WHERE name=?", error)};
+        Stmt q{db.Prepare("SELECT 1 FROM skqe_modules WHERE name=?", error)};
         if (!q.st) return 1;
         q.Text(1, m);
         if (sqlite3_step(q.st) != SQLITE_ROW) {
@@ -1835,7 +1838,7 @@ int DropExtras(const AddOptions& opt, std::string* error) {
     }
     if (!db.Exec("BEGIN", error)) return 1;
     ExtraContext ctx{db, schema, catalog, opt.threads};
-    Stmt del{db.Prepare("DELETE FROM spf_modules WHERE name=?", error)};
+    Stmt del{db.Prepare("DELETE FROM skqe_modules WHERE name=?", error)};
     if (!del.st) return 1;
     for (const Extra* e : drop) {
         if (!(e->drop ? e->drop(ctx, error) : db.Exec(e->dropSql, error))) {
@@ -1848,7 +1851,7 @@ int DropExtras(const AddOptions& opt, std::string* error) {
     }
     std::string notBuilt;
     {
-        Stmt q{db.Prepare("SELECT name FROM spf_modules", error)};
+        Stmt q{db.Prepare("SELECT name FROM skqe_modules", error)};
         if (!q.st) return 1;
         std::set<std::string> built;
         while (sqlite3_step(q.st) == SQLITE_ROW) built.insert(reinterpret_cast<const char*>(sqlite3_column_text(q.st, 0)));
@@ -1857,7 +1860,7 @@ int DropExtras(const AddOptions& opt, std::string* error) {
         for (const auto& e : kExtras)
             if (!built.count(e.name)) notBuilt += (notBuilt.empty() ? "" : ",") + std::string(e.name);
     }
-    Stmt meta{db.Prepare("UPDATE spf_meta SET value=? WHERE key='modules_not_built'", error)};
+    Stmt meta{db.Prepare("UPDATE skqe_meta SET value=? WHERE key='modules_not_built'", error)};
     if (!meta.st) return 1;
     meta.Text(1, notBuilt).Run();
     return db.Exec("COMMIT", error) ? 0 : 1;
@@ -1886,7 +1889,7 @@ int AddModules(const AddOptions& opt, std::string* error) {
     auto metaValue = [&](const char* key) {
         std::string v;
         std::string e;
-        Stmt q{db.Prepare("SELECT value FROM spf_meta WHERE key=?", &e)};
+        Stmt q{db.Prepare("SELECT value FROM skqe_meta WHERE key=?", &e)};
         if (!q.st) return v;
         q.Text(1, key);
         if (sqlite3_step(q.st) == SQLITE_ROW && sqlite3_column_text(q.st, 0))
@@ -1896,7 +1899,7 @@ int AddModules(const AddOptions& opt, std::string* error) {
     std::string version = metaValue("schema_version");
     if (version != std::to_string(kSchemaVersion)) {
         *error = "the database has schema version " + (version.empty() ? std::string("?") : version) +
-                 ", this spf writes " + std::to_string(kSchemaVersion) + ": rebuild it with build-db";
+                 ", this skqe writes " + std::to_string(kSchemaVersion) + ": rebuild it with build-db";
         return 1;
     }
 
@@ -1911,10 +1914,10 @@ int AddModules(const AddOptions& opt, std::string* error) {
         bool known = IsExtra(m);
         for (const auto& km : Schema::Modules()) known = known || km.first == m;
         if (!known) {
-            *error = "unknown module '" + m + "' (spf db add --help lists them)";
+            *error = "unknown module '" + m + "' (skqe db add --help lists them)";
             return 2;
         }
-        Stmt q{db.Prepare("SELECT 1 FROM spf_modules WHERE name=?", error)};
+        Stmt q{db.Prepare("SELECT 1 FROM skqe_modules WHERE name=?", error)};
         if (!q.st) return 1;
         q.Text(1, m);
         if (sqlite3_step(q.st) == SQLITE_ROW) {
@@ -2035,13 +2038,13 @@ int AddModules(const AddOptions& opt, std::string* error) {
         return 1;
     }
 
-    Stmt mod{db.Prepare("INSERT INTO spf_modules VALUES(?, ?, NULL)", error)};
+    Stmt mod{db.Prepare("INSERT INTO skqe_modules VALUES(?, ?, NULL)", error)};
     if (!mod.st) return 1;
     for (const auto& m : modules) mod.Text(1, m).Text(2, NowIso()).Run();
     for (const auto& e : extras) mod.Text(1, e).Text(2, NowIso()).Run();
     std::string notBuilt;
     {
-        Stmt q{db.Prepare("SELECT name FROM spf_modules", error)};
+        Stmt q{db.Prepare("SELECT name FROM skqe_modules", error)};
         if (!q.st) return 1;
         std::set<std::string> built;
         while (sqlite3_step(q.st) == SQLITE_ROW) built.insert(reinterpret_cast<const char*>(sqlite3_column_text(q.st, 0)));
@@ -2050,7 +2053,7 @@ int AddModules(const AddOptions& opt, std::string* error) {
         for (const auto& e : kExtras)
             if (!built.count(e.name)) notBuilt += (notBuilt.empty() ? "" : ",") + std::string(e.name);
     }
-    Stmt meta{db.Prepare("UPDATE spf_meta SET value=? WHERE key='modules_not_built'", error)};
+    Stmt meta{db.Prepare("UPDATE skqe_meta SET value=? WHERE key='modules_not_built'", error)};
     if (!meta.st) return 1;
     meta.Text(1, notBuilt).Run();
     if (!db.Exec("COMMIT; ANALYZE;", error)) return 1;
@@ -2058,4 +2061,4 @@ int AddModules(const AddOptions& opt, std::string* error) {
     return 0;
 }
 
-}  // namespace spf
+}  // namespace skqe

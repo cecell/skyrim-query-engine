@@ -1,4 +1,4 @@
-// A request for `spf export`: which forms of which plugins.
+// A request for `skqe export`: which forms of which plugins.
 //
 //   [Skyrim.esm]
 //   Skyrim.esm:0132AA, Skyrim.esm:01367B
@@ -15,7 +15,7 @@
 #include <string_view>
 #include <vector>
 
-namespace spf {
+namespace skqe {
 
 struct ExportTarget {
     std::string plugin;              // as written: a name or a path, UTF-8
@@ -79,4 +79,4 @@ inline bool ParseExportRequest(std::string_view text, std::vector<ExportTarget>*
     return true;
 }
 
-}  // namespace spf
+}  // namespace skqe

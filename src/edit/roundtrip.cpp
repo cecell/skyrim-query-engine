@@ -6,7 +6,7 @@
 
 #include "edit/document.h"
 
-namespace spf::edit {
+namespace skqe::edit {
 namespace {
 
 std::string FirstDifference(const Bytes& out, const uint8_t* in, size_t inSize) {
@@ -116,4 +116,4 @@ RoundTripResult RoundTrip(const std::wstring& path, const RoundTripOptions& opt)
     return r;
 }
 
-}  // namespace spf::edit
+}  // namespace skqe::edit

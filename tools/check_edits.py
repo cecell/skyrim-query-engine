@@ -1,4 +1,4 @@
-"""Real plugins through spfedit: after each edit, `spf diff --include-unknown`
+"""Real plugins through skqeedit: after each edit, `skqe diff --include-unknown`
 must show only the intended difference, the header must count what the file
 holds, and the output must round-trip.
 
@@ -22,7 +22,7 @@ ap.add_argument("--mod", action="append", default=[])
 a = ap.parse_args()
 
 BUILD = Path(a.build)
-SPFEDIT, SPF = str(BUILD / "spfedit.exe"), str(BUILD / "spf.exe")
+SKQEEDIT, SKQE = str(BUILD / "skqeedit.exe"), str(BUILD / "skqe.exe")
 WORK = Path(a.work)
 if WORK.exists():
     shutil.rmtree(WORK)
@@ -37,19 +37,19 @@ def run(*args):
 
 
 def export(plugin, typ, fields, limit=1):
-    r = run(SPF, "export", plugin, "--type", typ, "--limit", limit, "--fields", fields, "--json")
+    r = run(SKQE, "export", plugin, "--type", typ, "--limit", limit, "--fields", fields, "--json")
     if r.returncode:
         return []
     return json.loads(r.stdout)
 
 
 def diff(a_path, b_path):
-    r = run(SPF, "diff", a_path, b_path, "--include-unknown")
+    r = run(SKQE, "diff", a_path, b_path, "--include-unknown")
     return json.loads(r.stdout)
 
 
 def info(path):
-    return json.loads(run(SPF, "info", path, "--json").stdout)
+    return json.loads(run(SKQE, "info", path, "--json").stdout)
 
 
 def check(name, plugin, op, forms=None, fields=None, count_changes=None, expect_fail=None, extra=None):
@@ -63,7 +63,7 @@ def check(name, plugin, op, forms=None, fields=None, count_changes=None, expect_
     ops = out_dir / "ops.json"
     ops.write_text(json.dumps(op if isinstance(op, list) else [op]), encoding="utf-8")
     t = time.perf_counter()
-    r = run(SPFEDIT, "apply", plugin, "--ops", ops, "--out", out)
+    r = run(SKQEEDIT, "apply", plugin, "--ops", ops, "--out", out)
     secs = time.perf_counter() - t
     problems = []
     try:
@@ -87,7 +87,7 @@ def check(name, plugin, op, forms=None, fields=None, count_changes=None, expect_
             if got != set(fields):
                 problems.append(f"fields differ: {sorted(got)} instead of {sorted(fields)}")
         i = info(out)
-        rt = run(SPFEDIT, "roundtrip", out)
+        rt = run(SKQEEDIT, "roundtrip", out)
         if rt.returncode:
             problems.append("output does not round-trip: " + rt.stdout[:300])
         if extra:
@@ -104,7 +104,7 @@ def check(name, plugin, op, forms=None, fields=None, count_changes=None, expect_
 
 
 def only_members(form, sig, members):
-    """spf diff names the subrecord: the members of it that differ must be just these."""
+    """skqe diff names the subrecord: the members of it that differ must be just these."""
     def verify(res, d, i, out):
         rec = next((f for f in d.get("forms", []) if f["form"].lower() == form.lower()), None)
         if not rec:
@@ -179,8 +179,8 @@ if armo:
 
 # --- flags, header ----------------------------------------------------------------
 check("set a record flag", daw, {"op": "set-flags", "form": weap["form"], "set": "0x4"}, forms=[weap["form"]])
-check("author only", daw, {"op": "set-header", "author": "spfedit test"}, forms=[],
-      extra=lambda res, d, i, out: [] if i["author"] == "spfedit test" and i["next_object_id"] == info(daw)["next_object_id"] else ["header facts moved: " + str(i)])
+check("author only", daw, {"op": "set-header", "author": "skqeedit test"}, forms=[],
+      extra=lambda res, d, i, out: [] if i["author"] == "skqeedit test" and i["next_object_id"] == info(daw)["next_object_id"] else ["header facts moved: " + str(i)])
 check("version only", daw, {"op": "set-header", "version": 1.71}, forms=[])
 
 # --- new records ------------------------------------------------------------------
@@ -195,14 +195,14 @@ def new_record(res, d, i, out):
 
 
 check("add-record GLOB", daw,
-      {"op": "add-record", "type": "GLOB", "edid": "SpfEditTestGlobal",
+      {"op": "add-record", "type": "GLOB", "edid": "SkqeEditTestGlobal",
        "subs": [{"sig": "FNAM", "raw": "66"}, {"sig": "FLTV", "raw": "0000803F"}]},
       extra=new_record)
 
 cell = export(daw, "CELL", "EDID", 3)
 child = export(daw, "REFR", "NAME", 1)
 if child:
-    # A reference's own parent cell: spf gives it as "in".
+    # A reference's own parent cell: skqe gives it as "in".
     parent = child[0].get("in")
     if parent:
         check("add-record REFR into a cell", daw,
@@ -294,7 +294,7 @@ for name in ("ccvsvsse002-pets.esl",):
             return ["records read differently after add-master"]
         return []
 
-    check(f"add-master on {name}: every record reads the same", p, {"op": "add-master", "name": "SpfEditTest.esm", "force": True},
+    check(f"add-master on {name}: every record reads the same", p, {"op": "add-master", "name": "SkqeEditTest.esm", "force": True},
           extra=verify_master)
 
 for mod in a.mod:
@@ -308,7 +308,7 @@ for mod in a.mod:
             break
     if first:
         check(f"mod {p.name}: set EDID", p, {"op": "set", "form": first["form"], "field": "EDID", "value": (first["fields"].get("EDID") or "X") + "Y"}, forms=[first["form"]], fields=["EDID"])
-    check(f"mod {p.name}: add-record", p, {"op": "add-record", "type": "GLOB", "edid": "SpfEditTestG", "subs": [{"sig": "FNAM", "raw": "66"}, {"sig": "FLTV", "raw": "0000803F"}]})
+    check(f"mod {p.name}: add-record", p, {"op": "add-record", "type": "GLOB", "edid": "SkqeEditTestG", "subs": [{"sig": "FNAM", "raw": "66"}, {"sig": "FLTV", "raw": "0000803F"}]})
 
 print(f"\n{passes} passed, {len(failures)} failed")
 sys.exit(1 if failures else 0)

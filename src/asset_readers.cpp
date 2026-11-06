@@ -6,7 +6,7 @@
 
 #include "pattern_value.h"
 
-namespace spf {
+namespace skqe {
 namespace assets {
 namespace {
 
@@ -356,4 +356,4 @@ bool ReadTri(const uint8_t* d, size_t n, TriInfo* out, std::string* error) {
 }
 
 }  // namespace assets
-}  // namespace spf
+}  // namespace skqe

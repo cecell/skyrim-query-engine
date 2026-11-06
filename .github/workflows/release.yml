@@ -44,7 +44,7 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $m = Select-String -Path CMakeLists.txt -Pattern 'project\(SkyrimPluginFormat VERSION ([0-9.]+)'
+          $m = Select-String -Path CMakeLists.txt -Pattern 'project\(SkyrimQueryEngine VERSION ([0-9.]+)'
           if (-not $m) { throw 'No version in CMakeLists.txt' }
           $version = $m.Matches[0].Groups[1].Value
           if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
@@ -62,7 +62,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
           cmake --build build || exit /b 1
           ctest --test-dir build --output-on-failure || exit /b 1
-          build\spf.exe --version || exit /b 1
+          build\skqe.exe --version || exit /b 1
 
       - name: Package and hash
         id: package
@@ -70,12 +70,12 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          $stage = New-Item -ItemType Directory -Force "stage/spf-$env:VERSION"
-          Copy-Item build\spf.exe, build\patterns.json, README.md, LICENSE, THIRD_PARTY_NOTICES.md $stage
+          $stage = New-Item -ItemType Directory -Force "stage/skqe-$env:VERSION"
+          Copy-Item build\skqe.exe, build\patterns.json, README.md, LICENSE, THIRD_PARTY_NOTICES.md $stage
           Copy-Item -Recurse LICENSES $stage
           $dist = New-Item -ItemType Directory -Force dist
-          Compress-Archive -Path "$stage/*" -DestinationPath "dist/spf-$env:VERSION.zip"
-          Copy-Item build\spf.exe $dist
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/skqe-$env:VERSION.zip"
+          Copy-Item build\skqe.exe $dist
           $lines = Get-ChildItem $dist -File | Sort-Object Name | ForEach-Object {
             "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
           }
@@ -88,8 +88,8 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
-            dist/spf.exe
-            dist/spf-*.zip
+            dist/skqe.exe
+            dist/skqe-*.zip
 
       - name: VirusTotal scan
         id: scan
@@ -184,11 +184,11 @@ jobs:
           if gh release view "v$VERSION" >/dev/null 2>&1; then
             echo "Release v$VERSION already exists; left as it is." | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            gh release create "v$VERSION" --verify-tag --title "Skyrim Plugin Output $VERSION" --notes-file dist-notes.md --latest dist/*
+            gh release create "v$VERSION" --verify-tag --title "Skyrim Query Engine $VERSION" --notes-file dist-notes.md --latest dist/*
           fi
 
       - name: Upload to Nexus Mods
         run: |
-          args=(--tag "v$VERSION" --zip "dist/spf-$VERSION.zip" --notes dist-notes.md --virustotal "$VT_LINK")
+          args=(--tag "v$VERSION" --zip "dist/skqe-$VERSION.zip" --notes dist-notes.md --virustotal "$VT_LINK")
           if [ "$PUBLISH" != "true" ]; then args+=(--dry-run); fi
           python3 tools/nexus_release.py "${args[@]}"

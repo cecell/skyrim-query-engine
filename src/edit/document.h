@@ -18,7 +18,7 @@
 
 #include "edit/record_body.h"
 
-namespace spf::edit {
+namespace skqe::edit {
 
 constexpr size_t kHeaderSize = 24;
 constexpr uint32_t kFlagDeleted = 0x20;
@@ -156,4 +156,4 @@ private:
     mutable std::unordered_map<uint32_t, std::vector<Path>> index_;
 };
 
-}  // namespace spf::edit
+}  // namespace skqe::edit
