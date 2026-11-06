@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace spf::edit {
+namespace skqe::edit {
 
 using Sig = std::array<char, 4>;
 
@@ -52,4 +52,4 @@ void EmitBody(const std::vector<SubView>& subs, std::vector<uint8_t>* out);
 // zlib stream at level 9, the Creation Kit's level.
 bool ZlibDeflate(const uint8_t* src, size_t size, std::vector<uint8_t>* out);
 
-}  // namespace spf::edit
+}  // namespace skqe::edit

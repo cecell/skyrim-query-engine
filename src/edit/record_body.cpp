@@ -4,7 +4,7 @@
 
 #include "zlib.h"
 
-namespace spf::edit {
+namespace skqe::edit {
 namespace {
 
 uint16_t U16(const uint8_t* p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
@@ -98,4 +98,4 @@ bool ZlibDeflate(const uint8_t* src, size_t size, std::vector<uint8_t>* out) {
     return true;
 }
 
-}  // namespace spf::edit
+}  // namespace skqe::edit

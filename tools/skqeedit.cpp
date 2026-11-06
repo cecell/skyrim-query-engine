@@ -1,4 +1,4 @@
-// spfedit: writes and edits Skyrim SE plugins. `spfedit help` lists the commands.
+// skqeedit: writes and edits Skyrim SE plugins. `skqeedit help` lists the commands.
 #include <windows.h>
 
 #include <algorithm>
@@ -15,7 +15,7 @@
 #include "edit/roundtrip.h"
 #include "plugin.h"
 
-using namespace spf::edit;
+using namespace skqe::edit;
 namespace fs = std::filesystem;
 
 namespace {
@@ -161,7 +161,7 @@ int CmdSelfCheck(const std::vector<std::wstring>& args) {
         if (args[i] == L"--threads" && i + 1 < args.size()) threads = static_cast<unsigned>(_wtoi(args[++i].c_str()));
         else Collect(args[i], &files);
     }
-    spf::PatternCatalog cat;
+    skqe::PatternCatalog cat;
     std::string text, err;
     if (!ReadFileText(ExeFolder() + L"patterns.json", &text) || !cat.Load(text, &err)) {
         fprintf(stderr, "patterns.json: %s\n", err.c_str());
@@ -237,7 +237,7 @@ int CmdMasterCheck(const std::vector<std::wstring>& args) {
         if (args[i] == L"--csv" && i + 1 < args.size()) csvPath = args[++i];
         else Collect(args[i], &files);
     }
-    spf::PatternCatalog cat;
+    skqe::PatternCatalog cat;
     EditData data;
     std::string text, err;
     if (!ReadFileText(ExeFolder() + L"patterns.json", &text) || !cat.Load(text, &err) || !LoadEditData(ExeFolder(), &cat, &data, &err)) {
@@ -262,16 +262,16 @@ int CmdMasterCheck(const std::vector<std::wstring>& args) {
                 continue;
             }
             std::string name = doc->name();
-            auto before = spf::Plugin::FromMemory(doc->input(), doc->inputSize(), name, cat, &why);
+            auto before = skqe::Plugin::FromMemory(doc->input(), doc->inputSize(), name, cat, &why);
             if (!before) {
                 row.refused = why;
                 continue;
             }
             Editor ed(doc.get(), &data);
-            spf::Value op = spf::Value::Map();
-            op.Set("op", spf::Value::Str("add-master"));
-            op.Set("name", spf::Value::Str("SpfEditCheckMaster.esm"));
-            op.Set("force", spf::Value::Bool(true));
+            skqe::Value op = skqe::Value::Map();
+            op.Set("op", skqe::Value::Str("add-master"));
+            op.Set("name", skqe::Value::Str("SkqeEditCheckMaster.esm"));
+            op.Set("force", skqe::Value::Bool(true));
             OpResult r = ed.Apply(op);
             row.misses = r.possibleMisses.size();
             if (!r.possibleMisses.empty()) row.firstMiss = r.possibleMisses[0];
@@ -281,7 +281,7 @@ int CmdMasterCheck(const std::vector<std::wstring>& args) {
             }
             Bytes out;
             doc->Serialize(&out);
-            auto after = spf::Plugin::FromMemory(out.data(), out.size(), name, cat, &why);
+            auto after = skqe::Plugin::FromMemory(out.data(), out.size(), name, cat, &why);
             if (!after) {
                 row.refused = "output does not read: " + why;
                 continue;
@@ -295,25 +295,25 @@ int CmdMasterCheck(const std::vector<std::wstring>& args) {
                 continue;
             }
             // Bytes below 0x800 under index 00 are the engine's own forms in any
-            // plugin (the Creation Kit: IsHardcoded). spf would name their owner
+            // plugin (the Creation Kit: IsHardcoded). skqe would name their owner
             // differently before and after, for the same form.
-            spf::Plugin::FormIdMap beforeIds = [&](uint32_t v, const std::string&) {
-                return spf::Value::Str(v < 0x800 ? "engine:" + std::to_string(v) : before->FormKey(v));
+            skqe::Plugin::FormIdMap beforeIds = [&](uint32_t v, const std::string&) {
+                return skqe::Value::Str(v < 0x800 ? "engine:" + std::to_string(v) : before->FormKey(v));
             };
-            spf::Plugin::FormIdMap afterIds = [&](uint32_t v, const std::string&) {
-                return spf::Value::Str(v < 0x800 ? "engine:" + std::to_string(v) : after->FormKey(v));
+            skqe::Plugin::FormIdMap afterIds = [&](uint32_t v, const std::string&) {
+                return skqe::Value::Str(v < 0x800 ? "engine:" + std::to_string(v) : after->FormKey(v));
             };
-            auto json = [](const std::vector<spf::Field>& fields) {
+            auto json = [](const std::vector<skqe::Field>& fields) {
                 std::string s;
                 for (const auto& f : fields) {
                     s += f.sig;
-                    spf::WriteJson(f.value, &s);
+                    skqe::WriteJson(f.value, &s);
                 }
                 return s;
             };
             for (size_t k = 1; k < a.size(); ++k) {
                 ++row.records;
-                auto key = [](const spf::Plugin& p, uint32_t v) { return v < 0x800 ? "engine:" + std::to_string(v) : p.FormKey(v); };
+                auto key = [](const skqe::Plugin& p, uint32_t v) { return v < 0x800 ? "engine:" + std::to_string(v) : p.FormKey(v); };
                 bool same = a[k].type == b[k].type && key(*before, a[k].formId) == key(*after, b[k].formId) && a[k].formVersion == b[k].formVersion &&
                             (a[k].parent == 0) == (b[k].parent == 0) && (a[k].parent == 0 || key(*before, a[k].parent) == key(*after, b[k].parent));
                 if (same) same = json(before->Fields(a[k], &beforeIds)) == json(after->Fields(b[k], &afterIds));
@@ -379,7 +379,7 @@ bool ReadFileText(const std::wstring& path, std::string* out) {
 }
 
 struct Session {
-    spf::PatternCatalog catalog;
+    skqe::PatternCatalog catalog;
     EditData data;
     std::unique_ptr<Document> doc;
     std::unique_ptr<Editor> editor;
@@ -388,7 +388,7 @@ struct Session {
 bool OpenSession(const std::wstring& plugin, Session* s) {
     std::string text, err;
     if (!ReadFileText(ExeFolder() + L"patterns.json", &text) || !s->catalog.Load(text, &err)) {
-        fprintf(stderr, "patterns.json: %s\n", err.empty() ? "cannot read it next to spfedit.exe" : err.c_str());
+        fprintf(stderr, "patterns.json: %s\n", err.empty() ? "cannot read it next to skqeedit.exe" : err.c_str());
         return false;
     }
     if (!LoadEditData(ExeFolder(), &s->catalog, &s->data, &err)) {
@@ -411,7 +411,7 @@ struct OutputArgs {
 };
 
 // Applies ops in order; the first failure stops it and nothing is saved.
-int RunOps(const std::wstring& plugin, const std::vector<spf::Value>& ops, const OutputArgs& o) {
+int RunOps(const std::wstring& plugin, const std::vector<skqe::Value>& ops, const OutputArgs& o) {
     if (o.out.empty() && !o.dryRun) {
         fprintf(stderr, "give --out <file>, or --dry-run\n");
         return 2;
@@ -443,12 +443,12 @@ int RunOps(const std::wstring& plugin, const std::vector<spf::Value>& ops, const
     json += ",\"ok\":" + std::string(ok ? "true" : "false");
     if (!saveError.empty()) {
         std::string quoted;
-        spf::WriteJson(spf::Value::Str(saveError), &quoted);
+        skqe::WriteJson(skqe::Value::Str(saveError), &quoted);
         json += ",\"save_error\":" + quoted;
     }
     if (ok && !o.dryRun) {
         std::string quoted;
-        spf::WriteJson(spf::Value::Str(Narrow(o.out)), &quoted);
+        skqe::WriteJson(skqe::Value::Str(Narrow(o.out)), &quoted);
         json += ",\"saved\":" + quoted;
     }
     json += ",\"ms\":" + std::to_string(static_cast<long long>(1000.0 * (stop.QuadPart - start.QuadPart) / freq.QuadPart));
@@ -469,23 +469,23 @@ int CmdApply(const std::vector<std::wstring>& args) {
     }
     std::string text, err;
     if (plugin.empty() || opsPath.empty() || !ReadFileText(opsPath, &text)) {
-        fprintf(stderr, "usage: spfedit apply <plugin> --ops ops.json (--out <file> | --dry-run) [--overwrite]\n");
+        fprintf(stderr, "usage: skqeedit apply <plugin> --ops ops.json (--out <file> | --dry-run) [--overwrite]\n");
         return 2;
     }
-    spf::Value list;
-    if (!spf::ParseJson(text, &list, &err) || list.kind() != spf::Value::Kind::List) {
+    skqe::Value list;
+    if (!skqe::ParseJson(text, &list, &err) || list.kind() != skqe::Value::Kind::List) {
         fprintf(stderr, "%ls: %s\n", opsPath.c_str(), err.empty() ? "expected a JSON list of ops" : err.c_str());
         return 2;
     }
     return RunOps(plugin, list.Items(), o);
 }
 
-// spfedit <op> <plugin> --key value ...: one op built from flags.
+// skqeedit <op> <plugin> --key value ...: one op built from flags.
 int CmdOneOp(const std::wstring& opName, const std::vector<std::wstring>& args) {
     std::wstring plugin;
     OutputArgs o;
-    spf::Value op = spf::Value::Map();
-    op.Set("op", spf::Value::Str(Narrow(opName)));
+    skqe::Value op = skqe::Value::Map();
+    op.Set("op", skqe::Value::Str(Narrow(opName)));
     // These are never numbers, whatever they look like.
     static const char* const kText[] = {"form", "field", "sig", "from", "name", "item", "raw", "edid", "parent", "type",
                                         "after", "before", "author", "description", "objectId"};
@@ -501,25 +501,25 @@ int CmdOneOp(const std::wstring& opName, const std::vector<std::wstring>& args) 
             std::string key = Narrow(a.substr(2));
             bool nextIsValue = i + 1 < args.size() && args[i + 1].rfind(L"--", 0) != 0;
             if (!nextIsValue) {
-                op.Set(key, spf::Value::Bool(true));
+                op.Set(key, skqe::Value::Bool(true));
                 continue;
             }
             std::string val = Narrow(args[++i]);
             if (key == "text") {
-                op.Set("value", spf::Value::Str(val));
+                op.Set("value", skqe::Value::Str(val));
                 continue;
             }
-            spf::Value parsed;
+            skqe::Value parsed;
             std::string err;
             bool text = std::any_of(std::begin(kText), std::end(kText), [&](const char* k) { return key == k; });
-            if (text || !spf::ParseJson(val, &parsed, &err)) parsed = spf::Value::Str(val);
+            if (text || !skqe::ParseJson(val, &parsed, &err)) parsed = skqe::Value::Str(val);
             op.Set(key, std::move(parsed));
         } else {
             plugin = a;
         }
     }
     if (plugin.empty()) {
-        fprintf(stderr, "give the plugin (spfedit help)\n");
+        fprintf(stderr, "give the plugin (skqeedit help)\n");
         return 2;
     }
     return RunOps(plugin, {op}, o);
@@ -533,7 +533,7 @@ int CmdShow(const std::vector<std::wstring>& args) {
         else plugin = args[i];
     }
     if (plugin.empty()) {
-        fprintf(stderr, "usage: spfedit show <plugin> [--form F]\n");
+        fprintf(stderr, "usage: skqeedit show <plugin> [--form F]\n");
         return 2;
     }
     Session s;
@@ -549,27 +549,27 @@ int CmdShow(const std::vector<std::wstring>& args) {
 }
 
 void Help() {
-    puts(R"(spfedit: writes and edits Skyrim SE plugins. Never writes into a Skyrim
+    puts(R"(skqeedit: writes and edits Skyrim SE plugins. Never writes into a Skyrim
 Special Edition\Data folder, never replaces its input, and leaves every byte it
 was not asked to change as it was.
 
-  spfedit apply <plugin> --ops ops.json (--out <file> | --dry-run) [--overwrite]
+  skqeedit apply <plugin> --ops ops.json (--out <file> | --dry-run) [--overwrite]
       Run a list of ops. The first failure stops it and nothing is saved.
-  spfedit <op> <plugin> --key value ... (--out <file> | --dry-run) [--overwrite]
-      One op from flags: spfedit set X.esp --form X.esp:000800 --field DATA.damage
+  skqeedit <op> <plugin> --key value ... (--out <file> | --dry-run) [--overwrite]
+      One op from flags: skqeedit set X.esp --form X.esp:000800 --field DATA.damage
       --value 9 --out Y.esp. --text gives a value that is text even if it looks
       like a number. Numbers and JSON parse as JSON.
-  spfedit show <plugin> [--form F]
+  skqeedit show <plugin> [--form F]
       A record (default TES4): every value, its path, byte offset and size.
-  spfedit ops
+  skqeedit ops
       The ops and their arguments.
-  spfedit mastercheck <plugin|folder>... [--csv out.csv]
+  skqeedit mastercheck <plugin|folder>... [--csv out.csv]
       Read-only. add-master on each plugin in memory, then every record compared
       with the original by decoded values and what its FormIDs point at.
-  spfedit selfcheck <plugin|folder>... [--threads n]
+  skqeedit selfcheck <plugin|folder>... [--threads n]
       Read-only. The tracer against the decoder on every subrecord, every value
       encoded back and compared, group placement against the writer's rules.
-  spfedit roundtrip <plugin|folder>... [--csv out.csv] [--recompress] [--threads n]
+  skqeedit roundtrip <plugin|folder>... [--csv out.csv] [--recompress] [--threads n]
       Read each plugin, write it back in memory at three levels, compare with the
       input. Writes nothing except --csv.
 
@@ -598,6 +598,6 @@ int wmain(int argc, wchar_t** argv) {
                               L"copy-as-override", L"delete-record", L"add-master", L"set-flags", L"set-header"}) {
         if (cmd == op) return CmdOneOp(cmd, args);
     }
-    fprintf(stderr, "unknown command: %ls (try: spfedit help)\n", cmd.c_str());
+    fprintf(stderr, "unknown command: %ls (try: skqeedit help)\n", cmd.c_str());
     return 2;
 }

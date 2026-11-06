@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace spf {
+namespace skqe {
 namespace assets {
 
 // ---- Paths ----
@@ -93,4 +93,4 @@ constexpr size_t kTriMaxBytes = size_t{64} << 20;
 bool ReadTri(const uint8_t* d, size_t n, TriInfo* out, std::string* error);
 
 }  // namespace assets
-}  // namespace spf
+}  // namespace skqe

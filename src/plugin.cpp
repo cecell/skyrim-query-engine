@@ -8,7 +8,7 @@
 
 #include "inflate.h"
 
-namespace spf {
+namespace skqe {
 namespace {
 
 uint32_t U32(const uint8_t* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<uint32_t>(p[3]) << 24); }
@@ -384,4 +384,4 @@ std::vector<Value> Select(const Value& v, const std::string& path) {
     return cur;
 }
 
-}  // namespace spf
+}  // namespace skqe

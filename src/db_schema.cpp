@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <set>
 
-namespace spf {
+namespace skqe {
 namespace {
 
 using K = Shape::Kind;
@@ -213,4 +213,4 @@ int Schema::TypeTable(const std::string& rt) const {
     return it == typeTables_.end() ? -1 : it->second;
 }
 
-}  // namespace spf
+}  // namespace skqe

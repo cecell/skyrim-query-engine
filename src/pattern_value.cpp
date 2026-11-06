@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 
-namespace spf {
+namespace skqe {
 
 void Value::Set(std::string key, Value v) {
     for (auto& m : map_) {
@@ -357,4 +357,4 @@ std::string Utf8Lossy(const uint8_t* p, size_t n) {
     return out;
 }
 
-}  // namespace spf
+}  // namespace skqe

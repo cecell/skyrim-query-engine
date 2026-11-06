@@ -1,5 +1,5 @@
 """Generates src/unused_subrecords.inc: whole subrecords xEdit labels Unused or
-Unknown, which `spf export --conflicts` leaves out. Fields inside a subrecord
+Unknown, which `skqe export --conflicts` leaves out. Fields inside a subrecord
 are matched by name in the exporter; these have no name in the output.
 
 Sources: xEdit 4.1.5q's priorities (wbUnused elements) and the ground-truth DB's

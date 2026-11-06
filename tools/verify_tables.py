@@ -1,7 +1,7 @@
-"""Checks build-db's type / child tables against `spf export` (same decoder,
+"""Checks build-db's type / child tables against `skqe export` (same decoder,
 FormIDs as text): every column of every record of the chosen types.
 
-usage: python -I verify_tables.py <db> <spf.exe> <data dir> <plugin> <TYPE>...
+usage: python -I verify_tables.py <db> <skqe.exe> <data dir> <plugin> <TYPE>...
 """
 import json
 import re
@@ -9,14 +9,14 @@ import sqlite3
 import subprocess
 import sys
 
-db_path, spf, data, plugin = sys.argv[1:5]
+db_path, skqe, data, plugin = sys.argv[1:5]
 types = sys.argv[5:]
 db = sqlite3.connect(db_path)
 no_by_name = {n.lower(): no for no, n in db.execute("select plugin_no, name from plugins")}
 name_by_no = {no: n for n, no in no_by_name.items()}
 pno = no_by_name[plugin.lower()]
 import os
-MULTI = set(json.load(open(os.path.join(os.path.dirname(spf), "patterns.json"), encoding="utf-8"))["_multi"])
+MULTI = set(json.load(open(os.path.join(os.path.dirname(skqe), "patterns.json"), encoding="utf-8"))["_multi"])
 FORM = re.compile(r"^(.+\.(?:esm|esp|esl)):([0-9A-F]{6})$", re.I)
 
 
@@ -76,13 +76,13 @@ def cell_equal(dbv, ev, kind):
 
 bad = checked = 0
 for rt in types:
-    out = subprocess.run([spf, "export", f"{data}/{plugin}", "--type", rt, "--fields", "*"],
+    out = subprocess.run([skqe, "export", f"{data}/{plugin}", "--type", rt, "--fields", "*"],
                          capture_output=True, check=True).stdout
     records = json.loads(out)
     # Tables of modules this database did not build are empty by design.
     tables = {t: (fs, kind) for t, fs, kind in db.execute(
         "select table_name, subrecord, kind from st_tables where record_type=? and kind<>'core' "
-        "and (module is null or module in (select name from spf_modules))", (rt,))}
+        "and (module is null or module in (select name from skqe_modules))", (rt,))}
     cols = {}
     for t in tables:
         cols[t] = db.execute("select column_name, kind, subrecord, path from st_columns where table_name=? "

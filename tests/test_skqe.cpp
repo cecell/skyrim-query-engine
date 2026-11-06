@@ -4,7 +4,7 @@
 // truncation), path rules, and winners on a fixture tree (a Data folder with
 // hardlinks, staging folders, BSAs, an MO2 instance) in %TEMP%.
 //
-//   spf_tests [patterns.json]   (default: patterns.json next to the exe)
+//   skqe_tests [patterns.json]   (default: patterns.json next to the exe)
 #include <windows.h>
 
 #include <cstdio>
@@ -25,7 +25,7 @@
 #include "sqlite3.h"
 #include "strings.h"
 
-using namespace spf;
+using namespace skqe;
 
 namespace {
 
@@ -646,12 +646,12 @@ std::string Copy(sqlite3* db, const std::string& path, const std::string& where)
                          "' AND src = '" + where + "'");
 }
 
-// The fixture lives in %TEMP%\spf_tests_assets and is rewritten on every
+// The fixture lives in %TEMP%\skqe_tests_assets and is rewritten on every
 // run (nothing is deleted).
 std::wstring FixtureDir() {
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
-    return std::wstring(tmp) + L"spf_tests_assets\\";
+    return std::wstring(tmp) + L"skqe_tests_assets\\";
 }
 
 sqlite3* BuildFixture(AssetOptions opt, const std::wstring& out) {
@@ -705,7 +705,7 @@ void TestBuildAssetsStaging() {
     CHECK(Query(db, "SELECT count(*) FROM files f JOIN paths p USING(path_id) WHERE path = 'textures\\a.dds'") == "2");
     CHECK(Copy(db, "textures\\a.dds", "ModA") == "1 1");
     CHECK(Copy(db, "textures\\a.dds", "ModB") == "0 0");
-    CHECK(Query(db, "SELECT value FROM spf_meta WHERE key = 'hardlink_matches'") == "1");
+    CHECK(Query(db, "SELECT value FROM skqe_meta WHERE key = 'hardlink_matches'") == "1");
     // Data only: the Data root.
     CHECK(Copy(db, "meshes\\only.nif", "Data") == "1 1");
     CHECK(Query(db, "SELECT error FROM files JOIN paths USING(path_id) WHERE path = 'meshes\\only.nif'").find("nif") == 0);
@@ -755,7 +755,7 @@ void TestBuildAssetsMo2() {
     opt.mo2 = inst;
     opt.profile = L"Default";
     sqlite3* db = BuildFixture(opt, root + L"assets.db");
-    CHECK(Query(db, "SELECT value FROM spf_meta WHERE key = 'mo2_virtual_data'") == "1");
+    CHECK(Query(db, "SELECT value FROM skqe_meta WHERE key = 'mo2_virtual_data'") == "1");
     CHECK(Query(db, "SELECT priority FROM roots WHERE name = 'ModY'") == "3");
     CHECK(Query(db, "SELECT priority FROM roots WHERE kind = 'overwrite'") == "4");
     CHECK(Query(db, "SELECT enabled FROM roots WHERE name = 'ModZ'") == "0");

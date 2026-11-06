@@ -6,7 +6,7 @@
 #include <string>
 #include <unordered_map>
 
-namespace spf {
+namespace skqe {
 
 class StringTables {
 public:
@@ -32,4 +32,4 @@ private:
     std::unordered_map<uint32_t, std::string> tables_[3];  // strings, dlstrings, ilstrings
 };
 
-}  // namespace spf
+}  // namespace skqe

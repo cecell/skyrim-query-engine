@@ -1,5 +1,5 @@
-// `spf build-db`: reads a load order and writes one SQLite database that any
-// app opens with plain SQLite. Design: BACKLOG.md ("spf build-db").
+// `skqe build-db`: reads a load order and writes one SQLite database that any
+// app opens with plain SQLite. Design: BACKLOG.md ("skqe build-db").
 //
 // Every form is keyed by its natural key, computed from the bytes while
 // reading: form_key = owner plugin_no * 2^24 + object ID (12-bit when the
@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace spf {
+namespace skqe {
 
 struct BuildOptions {
     std::wstring out;                  // the .db to write (replaced when the build succeeds)
@@ -36,12 +36,12 @@ struct AddOptions {
     bool quiet = false;
 };
 
-// spf db add: decodes only the modules' subrecords from the plugins the
+// skqe db add: decodes only the modules' subrecords from the plugins the
 // database was built from and fills their tables, in one transaction.
 // Refuses when a plugin changed since the build (rebuild, or sync later).
 int AddModules(const AddOptions& opt, std::string* error);
 
-// spf db drop: removes built extras (indexes, fact rows); db add rebuilds
+// skqe db drop: removes built extras (indexes, fact rows); db add rebuilds
 // them. Modules cannot be dropped. `modules` holds the extras' names.
 int DropExtras(const AddOptions& opt, std::string* error);
 
@@ -55,4 +55,4 @@ std::vector<std::string> LoadOrder(const BuildOptions& opt, const std::vector<st
 // The optional modules and what each holds.
 std::vector<std::pair<std::string, std::string>> AvailableModules();
 
-}  // namespace spf
+}  // namespace skqe

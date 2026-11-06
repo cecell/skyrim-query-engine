@@ -17,7 +17,7 @@
 
 #include "pattern_value.h"
 
-namespace spf {
+namespace skqe {
 
 class PatternError : public std::runtime_error {
 public:
@@ -138,4 +138,4 @@ private:
     std::set<std::string> multi_;
 };
 
-}  // namespace spf
+}  // namespace skqe

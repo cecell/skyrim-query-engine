@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Uploads a release to the Nexus Mods page, as the last step of .github/workflows/release.yml.
 
-    python tools/nexus_release.py --tag v0.90 --zip dist/spf-0.90.zip --notes notes.md [--dry-run]
+    python tools/nexus_release.py --tag v0.90 --zip dist/skqe-0.90.zip --notes notes.md [--dry-run]
 
 The first upload creates the file on the page; later ones add a version of it, and the old version
 moves to Old files. The page's version number follows the file. The per-file note is the release's
@@ -30,8 +30,8 @@ V3 = "https://api.nexusmods.com/v3"
 V1 = "https://api.nexusmods.com/v1"
 GAME = "skyrimspecialedition"
 MOD = "198184"
-FILE_NAME = "Skyrim Plugin Output"
-UA = "skyrim-plugin-format-release/1.0"
+FILE_NAME = "Skyrim Query Engine"
+UA = "skyrim-query-engine-release/1.0"
 SKIP_SECTIONS = ("upgrading", "verification")
 
 
@@ -123,6 +123,9 @@ def main() -> int:
     named = [g for g in groups if g.get("name") == FILE_NAME]
     if len(named) > 1:
         raise SystemExit(f"{len(named)} files are named {FILE_NAME!r} on the page")
+    # A lone file is the one to update under any name, so renaming the project keeps its history.
+    if len(groups) == 1:
+        named = groups
     if groups and not named:
         raise SystemExit(f"the page has files but none named {FILE_NAME!r}: {[g.get('name') for g in groups]}")
     group = named[0]["id"] if named else None

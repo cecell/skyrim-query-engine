@@ -1,10 +1,10 @@
-// spf: look inside a Skyrim SE plugin and export fields.
+// skqe: look inside a Skyrim SE plugin and export fields.
 //
-//   spf info   <plugin> [--json]                header facts, masters, record counts by type
-//   spf fields <plugin> <TYPE>                  which fields that type has here, with sub-fields
-//   spf export <plugin> [--form ..] [<plugin> [--form ..]]... [options]
-//   spf export --request <file|-> [options]     the chosen fields of the chosen forms
-//   spf export --load-order <plugins.txt> --data <folder> [--form ..] [--conflicts | --conflict-summary]
+//   skqe info   <plugin> [--json]                header facts, masters, record counts by type
+//   skqe fields <plugin> <TYPE>                  which fields that type has here, with sub-fields
+//   skqe export <plugin> [--form ..] [<plugin> [--form ..]]... [options]
+//   skqe export --request <file|-> [options]     the chosen fields of the chosen forms
+//   skqe export --load-order <plugins.txt> --data <folder> [--form ..] [--conflicts | --conflict-summary]
 //                                               every copy across a load order, winner marked
 //       --type WEAP[,ARMO...]     only these record types
 //       --form 00012EB7[,...]     only these forms (as stored, or Skyrim.esm:012EB7)
@@ -12,10 +12,10 @@
 //                                 a field is a subrecord, then a dotted path inside it
 //       --csv | --json            output format (default json)
 //       --out <file>              write there instead of the console
-//   --patterns <file>             pattern catalog (default: patterns.json next to spf.exe)
-//   spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..]
+//   --patterns <file>             pattern catalog (default: patterns.json next to skqe.exe)
+//   skqe build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..]
 //                                               a SQLite database of a whole load order
-//   spf build-assets --out <db> --data <Data> [--staging <root> | --mo2 <instance> --profile <name>]
+//   skqe build-assets --out <db> --data <Data> [--staging <root> | --mo2 <instance> --profile <name>]
 //                                               a SQLite database of every asset file
 //
 // A field that occurs once is a value; one that repeats (SNAM, LVLO, CTDA...)
@@ -46,7 +46,7 @@
 #include "../src/export_request.h"
 #include "../src/plugin.h"
 
-using namespace spf;
+using namespace skqe;
 
 namespace {
 
@@ -164,7 +164,7 @@ std::string CsvCell(const Value& v) {
     return s;
 }
 
-const char kHelp[] = R"HELP(spf - read Skyrim SE plugins (.esm / .esp / .esl) and export their fields
+const char kHelp[] = R"HELP(skqe - read Skyrim SE plugins (.esm / .esp / .esl) and export their fields
 
 Use this instead of parsing plugin bytes yourself. It decodes every subrecord
 with 1,893 patterns covering 134 record types, and the decoder was checked
@@ -175,22 +175,22 @@ localized strings, repeating subrecords, context-dependent unions (PERK
 effects, conditions), and IMAD's non-ASCII signatures.
 
 COMMANDS
-  spf info   <plugin> [--json]    the plugin's header, masters and record counts by type
-  spf fields <plugin> <TYPE>      every field that record type has in this plugin
-  spf export <plugin> [options]   the fields you choose, of the forms you choose. Also:
+  skqe info   <plugin> [--json]    the plugin's header, masters and record counts by type
+  skqe fields <plugin> <TYPE>      every field that record type has in this plugin
+  skqe export <plugin> [options]   the fields you choose, of the forms you choose. Also:
                                   several plugins, each with its own forms (--request
                                   for long lists); every copy of a form across a load
                                   order with the winner marked (--load-order), and
                                   only what differs (--conflicts, --conflict-summary)
                                   Only the plugins named are opened, never their masters.
-  spf diff   <copy> <copy>...     what differs between copies of a plugin (or
+  skqe diff   <copy> <copy>...     what differs between copies of a plugin (or
                                   --name X.esp --in <folder>: every copy of a name)
-  spf build-db [options]          a SQLite database of a whole load order
-  spf db add <module> --db x.db   add an optional module (navmesh, landscape...) later
-  spf build-assets [options]      a SQLite database of every asset file (Data, mod
+  skqe build-db [options]          a SQLite database of a whole load order
+  skqe db add <module> --db x.db   add an optional module (navmesh, landscape...) later
+  skqe build-assets [options]      a SQLite database of every asset file (Data, mod
                                   staging folders, MO2, BSA contents) with winners
-  spf help [command]              this text, or one command's details
-                                  (also: spf <command> --help)
+  skqe help [command]              this text, or one command's details
+                                  (also: skqe <command> --help)
 
   Start with `info` to see what a plugin contains, then `fields <TYPE>` to see
   which fields and sub-fields exist, then `export` what you need.
@@ -234,11 +234,11 @@ LIMITS
   - A damaged plugin is refused with the reason (exit code 1); a subrecord
     whose bytes do not fit its pattern comes out as raw hex. Sizes and
     counts from the file are checked before use, so a damaged or crafted
-    file cannot make spf read out of bounds or allocate gigabytes.
+    file cannot make skqe read out of bounds or allocate gigabytes.
 
 EXIT CODES
   0 ok   1 the plugin could not be opened or is not a plugin   2 bad arguments
-  or the pattern catalog (patterns.json next to spf.exe) could not be loaded
+  or the pattern catalog (patterns.json next to skqe.exe) could not be loaded
 
 OPTIONS FOR ALL COMMANDS
   --patterns <file>   use another pattern catalog
@@ -258,7 +258,7 @@ std::vector<std::string> HeaderFlagNames(uint32_t flags) {
     return names;
 }
 
-// spf info, plain text.
+// skqe info, plain text.
 std::string InfoText(const Plugin& plugin, const std::map<std::string, size_t>& counts) {
     const PluginHeader& h = plugin.info();
     std::string out;
@@ -292,7 +292,7 @@ std::string InfoText(const Plugin& plugin, const std::map<std::string, size_t>& 
     return out;
 }
 
-// spf info --json: one object on one line.
+// skqe info --json: one object on one line.
 std::string InfoJson(const Plugin& plugin, const std::map<std::string, size_t>& counts) {
     const PluginHeader& h = plugin.info();
     auto hex = [](uint32_t v) {
@@ -339,7 +339,7 @@ std::string InfoJson(const Plugin& plugin, const std::map<std::string, size_t>& 
     return out + "\n";
 }
 
-const char kHelpInfo[] = R"HELP(spf info <plugin> [--json] [--out file]
+const char kHelpInfo[] = R"HELP(skqe info <plugin> [--json] [--out file]
 
 Prints the plugin name (and "(localized)" when its strings live in separate
 files), the facts from its TES4 header, its masters with their index - the
@@ -347,7 +347,7 @@ first byte of a stored FormID - and the size stored for each, and the number
 of records of each type. Plain text, or with --json one JSON object, the way
 a script or an agent should read it:
 
-  spf info Update.esm --json
+  skqe info Update.esm --json
   {"plugin":"Update.esm","version":1.71,"form_version":44,"flags":"0x00000081",
    "flag_names":["ESM","Localized"],"localized":true,"loads_as_master":true,
    "loads_light":false,"next_object_id":"0xFF003289","header_record_count":20874,
@@ -364,7 +364,7 @@ listed in ONAM, INTV and INCC when present, author and description when
 present. Flags are named for ESM, Localized and ESL; a .esl file loads light
 even without the ESL flag.
 
-  spf info "D:\Games\Skyrim Special Edition\Data\Update.esm"
+  skqe info "D:\Games\Skyrim Special Edition\Data\Update.esm"
   plugin: Update.esm (localized)
   version: 1.71
   form version: 44
@@ -377,14 +377,14 @@ even without the ESL flag.
     ...
 )HELP";
 
-const char kHelpFields[] = R"HELP(spf fields <plugin> <TYPE>
+const char kHelpFields[] = R"HELP(skqe fields <plugin> <TYPE>
 
 Lists every field (subrecord) that records of TYPE have in this plugin, how
 many records have it, and the sub-fields inside it: exactly the paths you can
-pass to `spf export --fields`. Plain text. TYPE is a record signature such as
+pass to `skqe export --fields`. Plain text. TYPE is a record signature such as
 WEAP, ARMO, NPC_, LVLI, CELL, REFR (case does not matter).
 
-  spf fields Skyrim.esm WEAP
+  skqe fields Skyrim.esm WEAP
   WEAP: 2484 records
     DATA  (in 2484)
       DATA.damage
@@ -397,9 +397,9 @@ Fields only appear if at least one record in THIS plugin has them; another
 plugin may use more.
 )HELP";
 
-const char kHelpExport[] = R"HELP(spf export <plugin> [--form F,..] [<plugin> [--form F,..]]... [--limit N [--random [--seed S]]] [options]
-spf export --request <file | -> [options]
-spf export --load-order <plugins.txt> --data <folder> [--form F,.. | --form-file <file | ->] [--type T,..]
+const char kHelpExport[] = R"HELP(skqe export <plugin> [--form F,..] [<plugin> [--form F,..]]... [--limit N [--random [--seed S]]] [options]
+skqe export --request <file | -> [options]
+skqe export --load-order <plugins.txt> --data <folder> [--form F,.. | --form-file <file | ->] [--type T,..]
            [--conflicts | --conflict-summary] [--active-only | --all-plugins] [options]
 
 Exports fields of plugins' records. Only the plugins you name are opened: a
@@ -411,7 +411,7 @@ is one list, and each row also says "plugin" (a leading plugin column in CSV).
 
   --request <file>        read plugins and forms from a file ("-" = stdin). Use
                           this for long lists: a Windows command line stops at
-                          32,767 characters, and at 8,191 through spf.cmd.
+                          32,767 characters, and at 8,191 through skqe.cmd.
                             [Skyrim.esm]
                             Skyrim.esm:0132AA, Skyrim.esm:01367B
                             # comments are fine; a list can span lines
@@ -447,7 +447,7 @@ is one list, and each row also says "plugin" (a leading plugin column in CSV).
                           stored); Data Size, Form Version and Version Control
                           Info are not fields here. Everything else is compared
                           as it reads, capitals and list order included. This is
-                          not xEdit's conflict status (see `spf conflict`), which
+                          not xEdit's conflict status (see `skqe conflict`), which
                           has a longer list of ignored fields.
                           A form named with --form always answers, with empty
                           "fields" if nothing differs; a --type sweep leaves
@@ -477,7 +477,7 @@ is one list, and each row also says "plugin" (a leading plugin column in CSV).
                           Missing forms are reported on stderr. A plugin that
                           cannot be opened is too: the others still come out,
                           and the exit code is 1.
-  --fields P,P,...        only these field paths (see `spf fields`). Omitted
+  --fields P,P,...        only these field paths (see `skqe fields`). Omitted
                           or "*" = every field of each record (JSON only).
   --json                  (default) a JSON array, one object per record:
                             [{"form":"Skyrim.esm:012EB7","type":"WEAP",
@@ -500,18 +500,18 @@ Field paths
   A subrecord that repeats gives a list; a path that matches nothing gives null.
 
 Examples
-  spf export Skyrim.esm --type WEAP --fields EDID,FULL,DATA.damage,DATA.value --csv
-  spf export MyMod.esp --form Skyrim.esm:012EB7
-  spf export Skyrim.esm --form Skyrim.esm:0132AA,Skyrim.esm:01367B Dawnguard.esm --form Dawnguard.esm:002B74 --fields EDID,PNAM
-  spf export --request npcs.txt --data "D:\Skyrim\Data" --fields EDID,PNAM --out headparts.json
-  spf export --load-order "%LOCALAPPDATA%\Skyrim Special Edition\plugins.txt" --data "D:\Skyrim\Data" --form Skyrim.esm:013BB9 --fields EDID,PNAM
-  spf export Skyrim.esm --type NPC_ --limit 25 --random --fields EDID,PNAM
-  spf export MyMod.esp --type LVLI --fields EDID,LVLO.reference,LVLO.level
-  spf export MyMod.esp --type REFR --fields NAME,DATA.pos_x,DATA.pos_y,DATA.pos_z --out refs.json
+  skqe export Skyrim.esm --type WEAP --fields EDID,FULL,DATA.damage,DATA.value --csv
+  skqe export MyMod.esp --form Skyrim.esm:012EB7
+  skqe export Skyrim.esm --form Skyrim.esm:0132AA,Skyrim.esm:01367B Dawnguard.esm --form Dawnguard.esm:002B74 --fields EDID,PNAM
+  skqe export --request npcs.txt --data "D:\Skyrim\Data" --fields EDID,PNAM --out headparts.json
+  skqe export --load-order "%LOCALAPPDATA%\Skyrim Special Edition\plugins.txt" --data "D:\Skyrim\Data" --form Skyrim.esm:013BB9 --fields EDID,PNAM
+  skqe export Skyrim.esm --type NPC_ --limit 25 --random --fields EDID,PNAM
+  skqe export MyMod.esp --type LVLI --fields EDID,LVLO.reference,LVLO.level
+  skqe export MyMod.esp --type REFR --fields NAME,DATA.pos_x,DATA.pos_y,DATA.pos_z --out refs.json
 )HELP";
 
-const char kHelpDiff[] = R"HELP(spf diff <copy> <copy> [<copy>...] [options]
-spf diff --name <plugin> --in <folder> [--in <folder>...] [options]
+const char kHelpDiff[] = R"HELP(skqe diff <copy> <copy> [<copy>...] [options]
+skqe diff --name <plugin> --in <folder> [--in <folder>...] [options]
 
 What differs between copies of a plugin: two versions of a mod, or the same
 plugin name in several staging folders. Prints one JSON object. Masters are never
@@ -555,11 +555,11 @@ What counts
   is not a difference, but it does appear under "header".
 
 Examples
-  spf diff "D:\Mods\A\X.esp" "D:\Mods\B\X.esp" --summary
-  spf diff --name X.esp --in D:\VortexMods\Mods\skyrimse --in D:\FacegenStaging --out x_diff.json
+  skqe diff "D:\Mods\A\X.esp" "D:\Mods\B\X.esp" --summary
+  skqe diff --name X.esp --in D:\VortexMods\Mods\skyrimse --in D:\FacegenStaging --out x_diff.json
 )HELP";
 
-const char kHelpBuildDb[] = R"HELP(spf build-db --out <file.db> --data <Data folder> [options]
+const char kHelpBuildDb[] = R"HELP(skqe build-db --out <file.db> --data <Data folder> [options]
 
 Builds one SQLite database of a whole load order, for any app or script to
 query with plain SQLite. Plugins are decoded in parallel: the Bethesda
@@ -601,7 +601,7 @@ WHAT IS IN IT (schema version 7)
   forms_v         view: forms with readable keys ("Skyrim.esm:012EB7"), the
                   in-game load-order FormID, recorded_in, is_override,
                   is_deleted.  winning_forms = forms_v of the winners.
-  spf_meta        build settings and versions; spf_modules = what is built.
+  skqe_meta        build settings and versions; skqe_modules = what is built.
 
   One table per record type (weap, npc, cell, refr, ...): one row per
   occurrence (form_key, plugin_no), one column per field of each subrecord
@@ -612,7 +612,7 @@ WHAT IS IN IT (schema version 7)
   *_ctda) and lists of FormIDs inside one (weap_kwda keywords).
   FormID columns hold form_key integers. Other lists, and anything nested
   below them, are JSON text. Bitfield flags are a JSON list of names.
-  Raw byte runs are BLOBs: SELECT hex(col) gives the hex text spf export
+  Raw byte runs are BLOBs: SELECT hex(col) gives the hex text skqe export
   shows (inside JSON they stay hex text).
   MODULES (optional; their tables exist in every build, empty until built):
     navmesh          NAVM geometry (vertices, triangles, edge and door
@@ -620,9 +620,9 @@ WHAT IS IN IT (schema version 7)
     landscape        LAND terrain (heights, normals, colours, texture
                      layers), CELL / WRLD height maps, occlusion, LOD offsets
     wrld_large_refs  WRLD.RNAM large-reference lists
-  Build them with --with, or add them later: spf db add <module> --db x.db.
+  Build them with --with, or add them later: skqe db add <module> --db x.db.
   EXTRAS (built from the database itself; on by default, --skip to leave
-  out, spf db add to add later):
+  out, skqe db add to add later):
     fts_names        full-text search over every form occurrence's editor
                      ID and name: form_names (the text), fts_names (words,
                      prefixes: MATCH 'iron sword', 'iro*'), fts_names_tri
@@ -648,13 +648,13 @@ WHAT IS IN IT (schema version 7)
                      positives; plugin_facts.itm. Reads every plugin and
                      its masters (slowest extra)
   INDEXES are extras too, all on by default; --skip any to save disk and
-  build time (lookups then scan the table), spf db add to build later:
+  build time (lookups then scan the table), skqe db add to build later:
     idx_forms_key, idx_forms_plugin, idx_forms_type, idx_forms_edid,
     idx_forms_parent, idx_forms_flags (deleted / persistent), idx_plugin_masters,
     idx_leftovers (overflow / raw), idx_refs_to (what references X),
     idx_refs_from (what X references), idx_table_keys (every type and
     child table by form_key, plugin_no)
-  spf_modules lists what is built; st_tables.module says which tables
+  skqe_modules lists what is built; st_tables.module says which tables
   belong to which module or extra.
   form_refs       the xref: one row per FormID inside a record, wherever it
                   sits (form_key, plugin_no = the occurrence; ref_key = the
@@ -669,7 +669,7 @@ WHAT IS IN IT (schema version 7)
   subrecord_raw       subrecords with no pattern or bytes that did not fit
                       (bytes: a BLOB).
   st_tables, st_columns  the data dictionary: every table and column, with
-                  its subrecord, its spf export path, what a key column
+                  its subrecord, its skqe export path, what a key column
                   refers to, xEdit's name for the subrecord, and notes
                   (how to read a BLOB column).
 
@@ -680,8 +680,8 @@ KEYS
   In light plugins the object ID is 12-bit, as the game reads it.
 
 EXAMPLES
-  spf build-db --out skyrim.db --data "C:\Games\Skyrim Special Edition\Data"
-  spf build-db --out lo.db --data D:\Data --load-order "%LOCALAPPDATA%\Skyrim Special Edition\plugins.txt"
+  skqe build-db --out skyrim.db --data "C:\Games\Skyrim Special Edition\Data"
+  skqe build-db --out lo.db --data D:\Data --load-order "%LOCALAPPDATA%\Skyrim Special Edition\plugins.txt"
 
   SELECT form, recorded_in FROM forms_v WHERE edid = 'IronSword';
   SELECT recorded_in, count(*) FROM forms_v WHERE is_override GROUP BY 1;
@@ -696,7 +696,7 @@ EXAMPLES
     WHERE ref_key = (SELECT form_key FROM winning_forms WHERE edid = 'IronSword');
 )HELP";
 
-const char kHelpDb[] = R"HELP(spf db add <module>[,<module>] --db <file.db> [--threads n] [--quiet]
+const char kHelpDb[] = R"HELP(skqe db add <module>[,<module>] --db <file.db> [--threads n] [--quiet]
 
 Adds optional modules to a database build-db made: re-reads only those
 modules' subrecords from the same plugins and fills their tables (plus xref
@@ -716,13 +716,13 @@ with build-db --skip are added the same way, from the database alone:
 It runs in one transaction: if anything fails, nothing is added. It refuses
 when a plugin changed (size or date) since the build, because the new rows
 would not match the core ones; rebuild then (extras alone do not check). A module already built is
-refused too. spf_modules lists what is built.
+refused too. skqe_modules lists what is built.
 
-  spf db add navmesh --db skyrim.db
-  spf db add landscape,wrld_large_refs --db skyrim.db
-  spf db add fts_names --db skyrim.db
+  skqe db add navmesh --db skyrim.db
+  skqe db add landscape,wrld_large_refs --db skyrim.db
+  skqe db add fts_names --db skyrim.db
 
-spf db drop <extra>[,<extra>] --db <file.db>
+skqe db drop <extra>[,<extra>] --db <file.db>
 
 Removes built extras: an index is dropped, a fact table is emptied. db add
 builds them again. Modules cannot be dropped. Predesigned indexes, off by
@@ -733,11 +733,11 @@ when done:
   idx_ref_base         placed objects by base object (filter references by
                        the base's EditorID, name or type)
 
-  spf db add idx_ref_base --db skyrim.db
-  spf db drop idx_ref_base --db skyrim.db
+  skqe db add idx_ref_base --db skyrim.db
+  skqe db drop idx_ref_base --db skyrim.db
 )HELP";
 
-const char kHelpBuildAssets[] = R"HELP(spf build-assets --out <assets.db> --data <Data folder> [options]
+const char kHelpBuildAssets[] = R"HELP(skqe build-assets --out <assets.db> --data <Data folder> [options]
 
 Catalogues every asset file into its own SQLite database: every file in the
 Data folder, in mod staging folders, and packed in their BSAs, with header
@@ -806,7 +806,7 @@ WHAT IS IN IT (schema version 1)
              object_id.
   winning_files  view: the copy of each path the game loads.
   conflicts      view: paths with more than one copy, the winner marked.
-  spf_meta, st_tables, st_columns   settings and counts; the dictionary.
+  skqe_meta, st_tables, st_columns   settings and counts; the dictionary.
 
 EXTRAS (on by default; --skip to leave out)
   nif_textures     every texture path a mesh expects (BSShaderTextureSet,
@@ -819,10 +819,10 @@ EXTRAS (on by default; --skip to leave out)
 Files are only read: Data and staging folders are never written.
 
 EXAMPLES
-  spf build-assets --out assets.db --data "C:\Games\Skyrim Special Edition\Data"
+  skqe build-assets --out assets.db --data "C:\Games\Skyrim Special Edition\Data"
       --load-order "%LOCALAPPDATA%\Skyrim Special Edition\plugins.txt"
-  spf build-assets --out assets.db --data D:\Skyrim\Data --staging D:\Vortex\skyrimse
-  spf build-assets --out assets.db --data D:\Skyrim\Data --mo2 D:\MO2 --profile Default
+  skqe build-assets --out assets.db --data D:\Skyrim\Data --staging D:\Vortex\skyrimse
+  skqe build-assets --out assets.db --data D:\Skyrim\Data --mo2 D:\MO2 --profile Default
 
   SELECT path, root, archive FROM winning_files WHERE path LIKE 'meshes\armor\iron\%';
   SELECT * FROM conflicts WHERE kind = 'texture' LIMIT 20;
@@ -835,16 +835,16 @@ EXAMPLES
 int Usage() {
     fprintf(stderr,
             "usage:\n"
-            "  spf info   <plugin> [--json] [--out file]\n"
-            "  spf fields <plugin> <TYPE>\n"
-            "  spf export <plugin> [--form ID,..] [<plugin> [--form ID,..]].. [--type T,..] [--limit N [--random [--seed S]]] [--fields F,..] [--csv|--json] [--out file]\n"
-            "  spf export --request <file|-> [--data <folder>] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
-            "  spf export --load-order <plugins.txt> --data <folder> [--form ID,..] [--form-file <file|->] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
-            "  spf diff <copy> <copy>.. | --name X.esp --in <folder>.. [--type T,..] [--form ID,..] [--fields F,..] [--summary] [--include-unknown] [--out file]\n"
-            "  spf build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..] [--skip e,..]\n"
-            "  spf db add <module>[,..] --db <db>\n"
-            "  spf build-assets --out <db> --data <Data> [--staging <root> | --mo2 <dir> --profile <p>]\n"
-            "  spf help [command]      (full explanation)\n");
+            "  skqe info   <plugin> [--json] [--out file]\n"
+            "  skqe fields <plugin> <TYPE>\n"
+            "  skqe export <plugin> [--form ID,..] [<plugin> [--form ID,..]].. [--type T,..] [--limit N [--random [--seed S]]] [--fields F,..] [--csv|--json] [--out file]\n"
+            "  skqe export --request <file|-> [--data <folder>] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
+            "  skqe export --load-order <plugins.txt> --data <folder> [--form ID,..] [--form-file <file|->] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
+            "  skqe diff <copy> <copy>.. | --name X.esp --in <folder>.. [--type T,..] [--form ID,..] [--fields F,..] [--summary] [--include-unknown] [--out file]\n"
+            "  skqe build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..] [--skip e,..]\n"
+            "  skqe db add <module>[,..] --db <db>\n"
+            "  skqe build-assets --out <db> --data <Data> [--staging <root> | --mo2 <dir> --profile <p>]\n"
+            "  skqe help [command]      (full explanation)\n");
     return 2;
 }
 
@@ -875,11 +875,11 @@ std::wstring PatternsNextToExe() {
     return p.substr(0, p.find_last_of(L"\\/") + 1) + L"patterns.json";
 }
 
-// spf db add|drop <name>[,<name>...] --db <file.db>
+// skqe db add|drop <name>[,<name>...] --db <file.db>
 int DbCommand(int argc, wchar_t** argv) {
     std::string sub = argc > 2 ? Utf8(argv[2]) : "";
     if (sub != "add" && sub != "drop") {
-        fprintf(stderr, "usage: spf db add|drop <name>[,<name>] --db <file.db> (spf db --help)\n");
+        fprintf(stderr, "usage: skqe db add|drop <name>[,<name>] --db <file.db> (skqe db --help)\n");
         return 2;
     }
     AddOptions opt;
@@ -893,12 +893,12 @@ int DbCommand(int argc, wchar_t** argv) {
         else if (!a.empty() && a[0] != '-') {
             for (const auto& m : SplitList(a)) opt.modules.push_back(m);
         } else {
-            fprintf(stderr, "db %s: unknown option %s (spf db --help)\n", sub.c_str(), a.c_str());
+            fprintf(stderr, "db %s: unknown option %s (skqe db --help)\n", sub.c_str(), a.c_str());
             return 2;
         }
     }
     if (opt.db.empty() || opt.modules.empty()) {
-        fprintf(stderr, "db %s: a name and --db are required (spf db --help)\n", sub.c_str());
+        fprintf(stderr, "db %s: a name and --db are required (skqe db --help)\n", sub.c_str());
         return 2;
     }
     if (opt.patterns.empty()) opt.patterns = PatternsNextToExe();
@@ -932,12 +932,12 @@ int BuildDbCommand(int argc, wchar_t** argv) {
         } else if (a == "--skip" && hasNext) {
             for (const auto& m : SplitList(Utf8(argv[++i]))) opt.skip.push_back(m);
         } else {
-            fprintf(stderr, "build-db: unknown option %s (spf build-db --help)\n", a.c_str());
+            fprintf(stderr, "build-db: unknown option %s (skqe build-db --help)\n", a.c_str());
             return 2;
         }
     }
     if (opt.out.empty() || opt.data.empty()) {
-        fprintf(stderr, "build-db: --out and --data are required (spf build-db --help)\n");
+        fprintf(stderr, "build-db: --out and --data are required (skqe build-db --help)\n");
         return 2;
     }
     if (opt.patterns.empty()) {
@@ -969,12 +969,12 @@ int BuildAssetsCommand(int argc, wchar_t** argv) {
         else if (a == "--skip" && hasNext) {
             for (const auto& m : SplitList(Utf8(argv[++i]))) opt.skip.push_back(m);
         } else {
-            fprintf(stderr, "build-assets: unknown option %s (spf build-assets --help)\n", a.c_str());
+            fprintf(stderr, "build-assets: unknown option %s (skqe build-assets --help)\n", a.c_str());
             return 2;
         }
     }
     if (opt.out.empty() || opt.data.empty()) {
-        fprintf(stderr, "build-assets: --out and --data are required (spf build-assets --help)\n");
+        fprintf(stderr, "build-assets: --out and --data are required (skqe build-assets --help)\n");
         return 2;
     }
     std::string err;
@@ -1040,7 +1040,7 @@ std::string LowerAscii(std::string s) {
     return s;
 }
 
-// spf export --load-order / --plugins: every copy of each form across a load
+// skqe export --load-order / --plugins: every copy of each form across a load
 // order, grouped by form, in load order, the last copy marked as the winner.
 struct LoadOrderExport {
     BuildOptions order;
@@ -1371,7 +1371,7 @@ int ExportLoadOrder(const LoadOrderExport& req, const PatternCatalog& cat, std::
     return status;
 }
 
-// spf export: one or many plugins, each with its own forms.
+// skqe export: one or many plugins, each with its own forms.
 int ExportCommand(int argc, wchar_t** argv) {
     std::vector<ExportTarget> targets;
     std::string types, fieldList, outPath, requestPath, formFile, explicitOrder;
@@ -1667,7 +1667,7 @@ int ExportCommand(int argc, wchar_t** argv) {
     return status;
 }
 
-// spf diff: what differs between copies of a plugin.
+// skqe diff: what differs between copies of a plugin.
 int DiffCommand(int argc, wchar_t** argv) {
     std::vector<std::wstring> paths, roots;
     std::string nameWanted, types, fieldList, outPath, formList, formFile;
@@ -1716,7 +1716,7 @@ int DiffCommand(int argc, wchar_t** argv) {
         paths.insert(paths.end(), found.begin(), found.end());
     }
     if (paths.size() < 2) {
-        fprintf(stderr, "spf diff needs at least 2 copies; found %zu\n", paths.size());
+        fprintf(stderr, "skqe diff needs at least 2 copies; found %zu\n", paths.size());
         return 2;
     }
     PatternCatalog cat;
@@ -1737,7 +1737,7 @@ int DiffCommand(int argc, wchar_t** argv) {
         opened.push_back(p);
     }
     if (plugins.size() < 2) {
-        fprintf(stderr, "spf diff needs at least 2 readable copies\n");
+        fprintf(stderr, "skqe diff needs at least 2 readable copies\n");
         return 1;
     }
     const size_t n = plugins.size();
@@ -1852,7 +1852,7 @@ int DiffCommand(int argc, wchar_t** argv) {
     for (const auto& spec : forms) {
         size_t colon = spec.rfind(':');
         if (colon == std::string::npos) {
-            fprintf(stderr, "spf diff needs forms as Owner:ObjectID, not %s\n", spec.c_str());
+            fprintf(stderr, "skqe diff needs forms as Owner:ObjectID, not %s\n", spec.c_str());
             return 2;
         }
         std::string owner = LowerAscii(spec.substr(0, colon));
@@ -2025,10 +2025,10 @@ int DiffCommand(int argc, wchar_t** argv) {
 }
 
 int wmain(int argc, wchar_t** argv) {
-    // spf help [cmd], spf --help, spf <cmd> --help
+    // skqe help [cmd], skqe --help, skqe <cmd> --help
     std::string arg1 = argc > 1 ? Utf8(argv[1]) : "";
     if (arg1 == "--version" || arg1 == "version") {
-        printf("spf %s\nGPL-3.0. Credits and third-party notices: THIRD_PARTY_NOTICES.md\n", SPF_VERSION);
+        printf("skqe %s\nGPL-3.0. Credits and third-party notices: THIRD_PARTY_NOTICES.md\n", SKQE_VERSION);
         return 0;
     }
     if (arg1 == "help" || arg1 == "--help" || arg1 == "-h" || arg1 == "/?")
@@ -2048,7 +2048,7 @@ int wmain(int argc, wchar_t** argv) {
     std::string types, forms, fieldList, outPath, positional;
     std::wstring patternsPath;
     bool csv = false;
-    bool json = false;  // spf info --json (export's default)
+    bool json = false;  // skqe info --json (export's default)
     for (int i = 3; i < argc; ++i) {
         std::string a = Utf8(argv[i]);
         auto next = [&](std::string* dst) {

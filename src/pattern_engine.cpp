@@ -5,7 +5,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace spf {
+namespace skqe {
 namespace {
 
 float BitsToFloat(uint32_t u) {
@@ -505,7 +505,7 @@ Value ExecPrim(const Pattern& node, Cursor& cur, Scope& scope) {
 }
 
 // Puts a seq's or repeat's segment in front of the paths of the leaves its item
-// reported, the way spf's Select walks the decoded value.
+// reported, the way skqe's Select walks the decoded value.
 void PrefixLeaves(std::vector<TraceLeaf>* leaves, size_t from, size_t to, const std::string& seg) {
     for (size_t i = from; i < to; ++i) {
         std::string& path = (*leaves)[i].path;
@@ -1221,4 +1221,4 @@ Shape ShapeOf(const Pattern& pattern) {
     return s ? *s : Leaf(K::Unknown);
 }
 
-}  // namespace spf
+}  // namespace skqe

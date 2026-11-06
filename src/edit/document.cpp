@@ -10,7 +10,7 @@
 
 #include "inflate.h"
 
-namespace spf::edit {
+namespace skqe::edit {
 namespace {
 
 uint32_t U32(const uint8_t* p) {
@@ -84,7 +84,7 @@ Document::~Document() {
     if (file_) CloseHandle(file_);
 }
 
-// The same structural checks as spf's Plugin::Parse: a group's size counts its
+// The same structural checks as skqe's Plugin::Parse: a group's size counts its
 // header and stays inside its parent and the file; a record stays inside its
 // group.
 bool Document::Build(std::string* error) {
@@ -425,4 +425,4 @@ const std::vector<Path>* Document::Find(uint32_t formId) const {
 
 uint32_t Document::CountForHedr() const { return CountRec(*root_) - 1; }
 
-}  // namespace spf::edit
+}  // namespace skqe::edit

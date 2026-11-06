@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SkyrimPluginFormat VERSION 0.91 LANGUAGES C CXX)
+project(SkyrimQueryEngine VERSION 0.91 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,7 +37,7 @@ target_compile_options(sqlite3 PRIVATE /W0)
 # The library: pattern engine (decodes subrecords from data/patterns.json),
 # zlib inflate, localized strings, the plugin / record / field objects, and
 # the database builders (build-db, build-assets).
-add_library(spf STATIC
+add_library(skqe STATIC
     src/pattern_value.cpp
     src/pattern_engine.cpp
     src/inflate.cpp
@@ -48,88 +48,88 @@ add_library(spf STATIC
     src/itm.cpp
     src/asset_readers.cpp
     src/asset_build.cpp)
-target_include_directories(spf PUBLIC src)
-target_link_libraries(spf PUBLIC sqlite3 PRIVATE bsa::reader asset::metadata bcrypt shell32 ole32)
+target_include_directories(skqe PUBLIC src)
+target_link_libraries(skqe PUBLIC sqlite3 PRIVATE bsa::reader asset::metadata bcrypt shell32 ole32)
 
-add_executable(spf_cli tools/spf.cpp)
-set_target_properties(spf_cli PROPERTIES OUTPUT_NAME spf)
-target_link_libraries(spf_cli PRIVATE spf)
-target_compile_definitions(spf_cli PRIVATE SPF_VERSION="${PROJECT_VERSION}")
-# spf.exe looks for patterns.json next to itself. Copied whenever the catalog
-# changes, not only when spf.exe relinks.
+add_executable(skqe_cli tools/skqe.cpp)
+set_target_properties(skqe_cli PROPERTIES OUTPUT_NAME skqe)
+target_link_libraries(skqe_cli PRIVATE skqe)
+target_compile_definitions(skqe_cli PRIVATE SKQE_VERSION="${PROJECT_VERSION}")
+# skqe.exe looks for patterns.json next to itself. Copied whenever the catalog
+# changes, not only when skqe.exe relinks.
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/patterns.json
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json
             ${CMAKE_CURRENT_BINARY_DIR}/patterns.json
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json)
-add_custom_target(spf_patterns ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/patterns.json)
+add_custom_target(skqe_patterns ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/patterns.json)
 
 # Unit tests: hand-built valid and damaged plugins / strings files.
 enable_testing()
-add_executable(spf_tests tests/test_spf.cpp)
-target_link_libraries(spf_tests PRIVATE spf)
-add_test(NAME unit COMMAND spf_tests ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json)
+add_executable(skqe_tests tests/test_skqe.cpp)
+target_link_libraries(skqe_tests PRIVATE skqe)
+add_test(NAME unit COMMAND skqe_tests ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json)
 
 # The plugin writer: an editable model over a plugin's bytes, field edits, and
-# spfedit.exe. A separate library and exe, so spf.exe stays read-only and
-# whoever links `spf` gets neither it nor zlib. Built when this is the top-level
-# project, or on request (-DSPF_EDIT=ON).
-option(SPF_EDIT "Build the plugin writer" ${PROJECT_IS_TOP_LEVEL})
-if(SPF_EDIT)
-    # zlib for deflate (spf's own inflate covers reading). Only the sources
+# skqeedit.exe. A separate library and exe, so skqe.exe stays read-only and
+# whoever links `skqe` gets neither it nor zlib. Built when this is the top-level
+# project, or on request (-DSKQE_EDIT=ON).
+option(SKQE_EDIT "Build the plugin writer" ${PROJECT_IS_TOP_LEVEL})
+if(SKQE_EDIT)
+    # zlib for deflate (skqe's own inflate covers reading). Only the sources
     # deflate needs, pinned to v1.3.1.
     FetchContent_Declare(zlib_src
         GIT_REPOSITORY https://github.com/madler/zlib.git
         GIT_TAG 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf  # v1.3.1
         SOURCE_SUBDIR do-not-configure)
     FetchContent_MakeAvailable(zlib_src)
-    add_library(spf_zlib STATIC
+    add_library(skqe_zlib STATIC
         ${zlib_src_SOURCE_DIR}/adler32.c ${zlib_src_SOURCE_DIR}/compress.c ${zlib_src_SOURCE_DIR}/crc32.c
         ${zlib_src_SOURCE_DIR}/deflate.c ${zlib_src_SOURCE_DIR}/trees.c ${zlib_src_SOURCE_DIR}/zutil.c)
-    target_include_directories(spf_zlib PUBLIC ${zlib_src_SOURCE_DIR})
-    target_compile_definitions(spf_zlib PRIVATE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
-    target_compile_options(spf_zlib PRIVATE /W0)
+    target_include_directories(skqe_zlib PUBLIC ${zlib_src_SOURCE_DIR})
+    target_compile_definitions(skqe_zlib PRIVATE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
+    target_compile_options(skqe_zlib PRIVATE /W0)
 
-    add_library(spf_edit STATIC
+    add_library(skqe_edit STATIC
         src/edit/record_body.cpp
         src/edit/document.cpp
         src/edit/roundtrip.cpp
         src/edit/ops.cpp)
-    target_link_libraries(spf_edit PUBLIC spf PRIVATE spf_zlib)
+    target_link_libraries(skqe_edit PUBLIC skqe PRIVATE skqe_zlib)
 
-    add_executable(spfedit tools/spfedit.cpp)
-    target_link_libraries(spfedit PRIVATE spf_edit)
-    add_dependencies(spfedit spf_patterns)
-    # spfedit.exe also reads these next to itself.
+    add_executable(skqeedit tools/skqeedit.cpp)
+    target_link_libraries(skqeedit PRIVATE skqe_edit)
+    add_dependencies(skqeedit skqe_patterns)
+    # skqeedit.exe also reads these next to itself.
     foreach(f field_order.csv catalog_open.csv)
         add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${f}
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/${f} ${CMAKE_CURRENT_BINARY_DIR}/${f}
             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data/${f})
-        list(APPEND SPF_EDIT_DATA ${CMAKE_CURRENT_BINARY_DIR}/${f})
+        list(APPEND SKQE_EDIT_DATA ${CMAKE_CURRENT_BINARY_DIR}/${f})
     endforeach()
-    add_custom_target(spf_edit_data ALL DEPENDS ${SPF_EDIT_DATA})
+    add_custom_target(skqe_edit_data ALL DEPENDS ${SKQE_EDIT_DATA})
 
-    add_executable(spfedit_tests tests/test_edit.cpp)
-    target_link_libraries(spfedit_tests PRIVATE spf_edit)
-    add_test(NAME edit COMMAND spfedit_tests ${CMAKE_CURRENT_SOURCE_DIR}/data)
+    add_executable(skqeedit_tests tests/test_edit.cpp)
+    target_link_libraries(skqeedit_tests PRIVATE skqe_edit)
+    add_test(NAME edit COMMAND skqeedit_tests ${CMAKE_CURRENT_SOURCE_DIR}/data)
 endif()
 
-# Fuzzing (separate build dir): cmake -B build-fuzz -DSPF_FUZZ=ON ...
-# The library gets coverage + AddressSanitizer instrumentation; spf_fuzz links
+# Fuzzing (separate build dir): cmake -B build-fuzz -DSKQE_FUZZ=ON ...
+# The library gets coverage + AddressSanitizer instrumentation; skqe_fuzz links
 # libFuzzer's main. Needs MSVC's clang_rt.asan_dynamic DLL on PATH (vcvars).
-option(SPF_FUZZ "Build the libFuzzer target spf_fuzz" OFF)
-if(SPF_FUZZ)
-    # Everything linked into spf_fuzz must agree on ASan (container
+option(SKQE_FUZZ "Build the libFuzzer target skqe_fuzz" OFF)
+if(SKQE_FUZZ)
+    # Everything linked into skqe_fuzz must agree on ASan (container
     # annotations). Coverage-instrumented code needs libFuzzer's runtime, so
-    # in a fuzz build only spf_fuzz links: build that target alone.
-    foreach(t spf spf_edit bsa_reader asset_metadata)
+    # in a fuzz build only skqe_fuzz links: build that target alone.
+    foreach(t skqe skqe_edit bsa_reader asset_metadata)
         target_compile_options(${t} PRIVATE /Zi /fsanitize=address /fsanitize-coverage=inline-8bit-counters
             /fsanitize-coverage=edge /fsanitize-coverage=trace-cmp)
     endforeach()
-    add_executable(spf_fuzz tests/fuzz_plugin.cpp)
-    target_compile_options(spf_fuzz PRIVATE /Zi /fsanitize=address /fsanitize=fuzzer)
-    target_link_libraries(spf_fuzz PRIVATE spf spf_edit)
-    target_link_options(spf_fuzz PRIVATE /INCREMENTAL:NO /DEBUG)
-    add_custom_command(TARGET spf_fuzz POST_BUILD
+    add_executable(skqe_fuzz tests/fuzz_plugin.cpp)
+    target_compile_options(skqe_fuzz PRIVATE /Zi /fsanitize=address /fsanitize=fuzzer)
+    target_link_libraries(skqe_fuzz PRIVATE skqe skqe_edit)
+    target_link_options(skqe_fuzz PRIVATE /INCREMENTAL:NO /DEBUG)
+    add_custom_command(TARGET skqe_fuzz POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json
-                $<TARGET_FILE_DIR:spf_fuzz>/patterns.json)
+                $<TARGET_FILE_DIR:skqe_fuzz>/patterns.json)
 endif()

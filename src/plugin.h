@@ -19,7 +19,7 @@
 #include "pattern_engine.h"
 #include "strings.h"
 
-namespace spf {
+namespace skqe {
 
 struct Record {
     std::string type;        // "WEAP", "NPC_", ...
@@ -129,4 +129,4 @@ private:
 // Returns every value found.
 std::vector<Value> Select(const Value& v, const std::string& path);
 
-}  // namespace spf
+}  // namespace skqe

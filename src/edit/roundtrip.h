@@ -11,7 +11,7 @@
 #include <map>
 #include <string>
 
-namespace spf::edit {
+namespace skqe::edit {
 
 struct RoundTripOptions {
     bool recompress = false;  // deflate each compressed record, count those that match byte for byte
@@ -43,4 +43,4 @@ struct RoundTripResult {
 
 RoundTripResult RoundTrip(const std::wstring& path, const RoundTripOptions& opt);
 
-}  // namespace spf::edit
+}  // namespace skqe::edit

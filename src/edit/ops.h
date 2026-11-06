@@ -17,7 +17,7 @@
 #include "pattern_engine.h"
 #include "strings.h"
 
-namespace spf::edit {
+namespace skqe::edit {
 
 // The order the Creation Kit writes a type's subrecords (data/field_order.csv).
 class FieldOrder {
@@ -145,4 +145,4 @@ const char* OpHelp();
 // One result as JSON.
 std::string ResultJson(const OpResult& r);
 
-}  // namespace spf::edit
+}  // namespace skqe::edit
