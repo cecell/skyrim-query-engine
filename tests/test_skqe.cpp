@@ -625,7 +625,7 @@ std::wstring FullPathForTest(const std::wstring& p) {
 }
 
 // Removes a fixture folder and everything in it.
-void RecycleForTest(const std::wstring& dir) {
+void RemoveFixture(const std::wstring& dir) {
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
@@ -857,6 +857,7 @@ void TestFindStaging() {
     CHECK(QtIniDecode("plain") == "plain");
 
     const std::wstring root = FixtureDir() + L"find\\";
+    RemoveFixture(root);  // a previous run's instances would be found too
     const std::wstring game = root + L"Game\\", data = game + L"Data\\";
     const std::string rootA = Utf8(root);
     auto esc = [](std::string s) {
@@ -938,10 +939,10 @@ void TestFindStaging() {
     env.mo2CurrentInstance = "second";
     CHECK(find("", &r, &err) && r.chosen.instanceName == "Second");
     env.mo2CurrentInstance.clear();
-    RecycleForTest(second);
+    RemoveFixture(second);
 
     // A portable instance, known only from nxmhandler.ini.
-    RecycleForTest(inst);
+    RemoveFixture(inst);
     const std::wstring portable = root + L"Portable MO2\\";
     ini(portable, game.substr(0, game.size() - 1));
     WriteFile(portable + L"mods\\A\\a.esp", "x");
