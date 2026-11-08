@@ -48,7 +48,8 @@ add_library(skqe STATIC
     src/itm.cpp
     src/asset_readers.cpp
     src/asset_build.cpp
-    src/staging_find.cpp)
+    src/staging_find.cpp
+    src/asset_search.cpp)
 target_include_directories(skqe PUBLIC src)
 target_link_libraries(skqe PUBLIC sqlite3 PRIVATE bsa::reader asset::metadata bcrypt shell32 ole32 advapi32)
 

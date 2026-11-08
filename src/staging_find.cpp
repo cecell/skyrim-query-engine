@@ -300,29 +300,95 @@ StagingEnv CurrentStagingEnv() {
     e.appData = EnvVar(L"APPDATA");
     e.localAppData = EnvVar(L"LOCALAPPDATA");
     e.programData = EnvVar(L"PROGRAMDATA");
+    if (!e.localAppData.empty()) e.settingsFile = e.localAppData + L"\\skqe\\settings.json";
     e.mo2CurrentInstance = Utf8(RegString(HKEY_CURRENT_USER, L"Software\\Mod Organizer Team\\Mod Organizer", L"CurrentInstance"));
     return e;
 }
 
-bool FindStaging(const std::wstring& dataIn, const std::string& manager, const StagingEnv& env, StagingResult* result,
-                 std::string* error) {
+StagingSettings LoadStagingSettings(const StagingEnv& env) {
+    StagingSettings s;
+    std::string text;
+    Value v;
+    std::string err;
+    if (env.settingsFile.empty() || !ReadHead(env.settingsFile, 1024 * 1024, &text) || !ParseJson(text, &v, &err)) return s;
+    if (const Value* d = v.Find("data"); d && d->IsString()) s.data = Wide(d->AsString());
+    if (const Value* d = v.Find("staging"); d && d->IsString()) s.staging = Wide(d->AsString());
+    return s;
+}
+
+bool SaveStagingSettings(const StagingEnv& env, const StagingSettings& settings, std::string* error) {
+    if (env.settingsFile.empty()) {
+        *error = "nowhere to save settings: LOCALAPPDATA isn't set";
+        return false;
+    }
+    Value v = Value::Map();
+    if (!settings.data.empty()) v.Set("data", Value::Str(Utf8(settings.data)));
+    if (!settings.staging.empty()) v.Set("staging", Value::Str(Utf8(settings.staging)));
+    std::string text;
+    WriteJson(v, &text);
+    text += "\n";
+    size_t slash = env.settingsFile.find_last_of(L'\\');
+    if (slash != std::wstring::npos) CreateDirectoryW(env.settingsFile.substr(0, slash).c_str(), nullptr);
+    const std::wstring temp = env.settingsFile + L".tmp";
+    {
+        std::ofstream f(temp, std::ios::binary);
+        f << text;
+        if (!f.good()) {
+            *error = "cannot write " + Utf8(temp);
+            return false;
+        }
+    }
+    if (!MoveFileExW(temp.c_str(), env.settingsFile.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        *error = "cannot write " + Utf8(env.settingsFile);
+        return false;
+    }
+    return true;
+}
+
+bool ResolveDataFolder(const std::wstring& dataIn, const StagingEnv& env, std::wstring* out, std::string* error) {
     std::wstring data = dataIn;
+    if (data.empty()) data = LoadStagingSettings(env).data;
     if (data.empty()) {
         const std::wstring game = RegString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Bethesda Softworks\\Skyrim Special Edition",
                                             L"installed path");
         if (game.empty()) {
-            *error = "the game isn't in the registry: give its folder with --data";
+            *error = "the game isn't in the registry: give its folder with --data, or save it with skqe staging --set-data <folder>";
             return false;
         }
         data = FullDir(game) + L"Data";
     }
     data = FullDir(data);
-    result->data = data;
     if (!IsDir(data)) {
         *error = "no Data folder at " + Utf8(data);
         return false;
     }
+    *out = data;
+    return true;
+}
+
+bool FindStaging(const std::wstring& dataIn, const std::string& manager, const StagingEnv& env, StagingResult* result,
+                 std::string* error) {
+    std::wstring data;
+    if (!ResolveDataFolder(dataIn, env, &data, error)) return false;
+    result->data = data;
     auto& all = result->all;
+    all.clear();
+    const StagingSettings saved = LoadStagingSettings(env);
+    if (manager.empty() && !saved.staging.empty()) {
+        const std::wstring dir = FullDir(saved.staging);
+        if (!IsDir(dir)) {
+            *error = "your saved staging folder doesn't exist: " + Utf8(dir) + "\nChange it with skqe staging --set-staging <folder>, or remove it with --clear";
+            return false;
+        }
+        StagingCandidate c;
+        c.manager = "manual";
+        c.staging = dir;
+        c.source = "your saved setting";
+        c.matchesData = true;
+        all.push_back(c);
+        result->chosen = std::move(c);
+        return true;
+    }
     if (manager != "mo2") AddVortex(data, env, &all);
     if (manager != "vortex") AddMo2(data, env, &all);
 

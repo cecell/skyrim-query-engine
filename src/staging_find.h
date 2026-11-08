@@ -15,7 +15,7 @@
 namespace skqe {
 
 struct StagingCandidate {
-    std::string manager;       // "vortex" or "mo2"
+    std::string manager;       // "vortex", "mo2", or "manual" for a saved folder
     std::wstring staging;      // the folder holding one subfolder per mod
     std::wstring instance;     // MO2: the folder with ModOrganizer.ini
     std::string instanceName;  // MO2: as in the registry; empty = portable
@@ -29,6 +29,7 @@ struct StagingCandidate {
 struct StagingEnv {
     std::wstring appData, localAppData, programData;
     std::string mo2CurrentInstance;  // HKCU; empty = none set, or portable
+    std::wstring settingsFile;       // the saved folders; empty = none
 };
 StagingEnv CurrentStagingEnv();
 
@@ -38,7 +39,20 @@ struct StagingResult {
     std::vector<StagingCandidate> all;  // everything found, chosen included
 };
 
-// data: empty = the installed game's, from the registry. manager: "", "vortex"
+// Folders the user saved with `skqe staging --set-data / --set-staging`. They
+// beat detection. Empty = not set.
+struct StagingSettings {
+    std::wstring data, staging;
+};
+StagingSettings LoadStagingSettings(const StagingEnv& env);
+bool SaveStagingSettings(const StagingEnv& env, const StagingSettings& settings, std::string* error);
+
+// The Data folder to use: `data` if given, else the saved one, else the
+// installed game's from the registry.
+bool ResolveDataFolder(const std::wstring& data, const StagingEnv& env, std::wstring* out, std::string* error);
+
+// data: empty = as ResolveDataFolder. A saved staging folder is used first,
+// unless manager names one. manager: "", "vortex"
 // or "mo2". With both managers set up for this game, Vortex wins when it has
 // files deployed, because MO2 leaves nothing in Data. False with *error when
 // nothing is found or two MO2 instances can't be told apart; result->all still

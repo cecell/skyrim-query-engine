@@ -18,6 +18,7 @@
 
 #include "asset_build.h"
 #include "asset_readers.h"
+#include "asset_search.h"
 #include "db_schema.h"
 #include "export_request.h"
 #include "inflate.h"
@@ -955,6 +956,97 @@ void TestFindStaging() {
     CHECK(!find("", &r, &err) && err.find("not for this Data") != std::string::npos && r.all.size() == 1 && !r.all[0].matchesData);
 }
 
+void TestSearch() {
+    CHECK(AssetPathMatches("textures\\a\\iron.dds", "iron"));
+    CHECK(AssetPathMatches("textures\\a\\iron.dds", "a\\iron"));
+    CHECK(!AssetPathMatches("textures\\a\\iron.dds", "steel"));
+    CHECK(AssetPathMatches("textures\\a\\iron.dds", "*.dds"));
+    CHECK(AssetPathMatches("textures\\a\\iron.dds", "ir?n.*"));
+    CHECK(!AssetPathMatches("textures\\a\\iron.dds", "textures*"));  // no \: file name only
+    CHECK(AssetPathMatches("textures\\a\\iron.dds", "textures\\*\\iron.dds"));
+
+    const std::wstring root = FixtureDir() + L"search\\";
+    RemoveFixture(root);
+    const std::wstring data = root + L"Data\\", staging = root + L"Staging\\";
+    WriteFile(data + L"Textures\\Iron.dds", Dds(4, 4));
+    WriteFile(staging + L"ModA\\Textures\\keep.dds", Dds(4, 4));
+    WriteFile(staging + L"ModB\\textures\\iron.dds", Dds(4, 4));  // the same bytes, a separate file
+    WriteFile(staging + L"__vortex_staging_folder", "");
+    CreateDirectoryW((staging + L"ModA\\Textures").c_str(), nullptr);
+    CHECK(CreateHardLinkW((staging + L"ModA\\Textures\\Iron.dds").c_str(), (data + L"Textures\\Iron.dds").c_str(), nullptr));
+    WriteFile(data + L"Pack.bsa", Bsa("textures", {{"iron.dds", Dds(4, 4)}, {"other.dds", Dds(4, 4)}}));
+    WriteFile(staging + L"ModC\\Other.bsa", Bsa("textures", {{"iron.dds", Dds(4, 4)}}));
+    CreateDirectoryW((staging + L"ModA").c_str(), nullptr);
+    CHECK(CreateHardLinkW((staging + L"ModA\\Pack.bsa").c_str(), (data + L"Pack.bsa").c_str(), nullptr));
+
+    AssetSearchOptions opt;
+    opt.threads = 3;
+    opt.pattern = "iron.dds";
+    opt.roots.push_back({data, "Data"});
+    AssetSearchResult r;
+    std::string err;
+    CHECK(SearchAssets(opt, &r, &err));
+    CHECK(r.files.size() == 1);
+    if (r.files.size() == 1) {
+        CHECK(r.files[0].path == "Textures\\Iron.dds");  // the loose file's spelling
+        CHECK(r.files[0].copies.size() == 2);
+        CHECK(r.files[0].copies[0].archive.empty() && r.files[0].copies[0].size > 0);
+        CHECK(r.files[0].copies[1].archive == "Pack.bsa" && r.files[0].copies[1].in == std::vector<std::string>{"Data"});
+    }
+    CHECK(r.archivesRead == 1 && r.hardlinksMerged == 0);
+
+    auto mods = StagingRoots(staging);
+    CHECK(mods.size() == 3 && mods[0].name == "ModA");
+    opt.roots.insert(opt.roots.end(), mods.begin(), mods.end());
+    r = AssetSearchResult();
+    CHECK(SearchAssets(opt, &r, &err));
+    CHECK(r.files.size() == 1 && r.archivesRead == 2 && r.hardlinksMerged == 2);
+    if (r.files.size() == 1) {
+        const auto& c = r.files[0].copies;
+        CHECK(c.size() == 4);  // Data+ModA hardlink, ModB, Pack.bsa (Data+ModA), ModC's archive
+        if (c.size() == 4) {
+            CHECK((c[0].in == std::vector<std::string>{"Data", "ModA"}) && c[0].archive.empty());
+            CHECK((c[1].in == std::vector<std::string>{"ModB"}) && c[1].archive.empty());
+            CHECK(c[2].archive == "Pack.bsa" && (c[2].in == std::vector<std::string>{"Data", "ModA"}));
+            CHECK(c[3].archive == "Other.bsa" && (c[3].in == std::vector<std::string>{"ModC"}));
+        }
+    }
+
+    // Wildcards reach into archives; a damaged archive warns and the rest still works.
+    WriteFile(data + L"Broken.bsa", "not a bsa at all");
+    opt.pattern = "oth*.dds";
+    r = AssetSearchResult();
+    CHECK(SearchAssets(opt, &r, &err));
+    CHECK(r.files.size() == 1 && r.files[0].path == "textures\\other.dds" && r.warnings.size() == 1);
+
+    opt.pattern = "";
+    CHECK(!SearchAssets(opt, &r, &err));
+    opt.pattern = "x";
+    opt.roots.push_back({root + L"Nowhere", "Nowhere"});
+    CHECK(!SearchAssets(opt, &r, &err));
+
+    // Saved folders beat detection, and a saved staging folder gone missing is an error.
+    StagingEnv env;
+    env.appData = root + L"R";
+    env.localAppData = root + L"L";
+    env.programData = root + L"P";
+    env.settingsFile = root + L"L\\skqe\\settings.json";
+    CreateDirectoryW((root + L"L").c_str(), nullptr);
+    CHECK(LoadStagingSettings(env).data.empty());
+    StagingSettings saved;
+    saved.data = data;
+    saved.staging = staging;
+    CHECK(SaveStagingSettings(env, saved, &err));
+    CHECK(LoadStagingSettings(env).staging == staging);
+    StagingResult found;
+    CHECK(FindStaging(L"", "", env, &found, &err) && found.chosen.manager == "manual" && found.chosen.staging == staging && found.data == data);
+    CHECK(!FindStaging(L"", "vortex", env, &found, &err));  // asking for a manager skips the saved folder
+    saved.staging = root + L"Gone";
+    CHECK(SaveStagingSettings(env, saved, &err));
+    found = StagingResult();
+    CHECK(!FindStaging(L"", "", env, &found, &err) && err.find("saved staging") != std::string::npos);
+}
+
 void TestSchema(const PatternCatalog& cat) {
     // Raw byte runs become BLOB columns, and nothing else does.
     Schema schema;
@@ -1006,6 +1098,7 @@ int wmain(int argc, wchar_t** argv) {
     TestBuildAssetsStaging();
     TestBuildAssetsMo2();
     TestFindStaging();
+    TestSearch();
     printf("%d passed, %d failed\n", g_passed, g_failed);
     return g_failed ? 1 : 0;
 }

@@ -16,6 +16,7 @@
 //   skqe build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..]
 //                                               a SQLite database of a whole load order
 //   skqe staging [--data <Data>] [--manager vortex|mo2] [--json]   where Vortex or MO2 keeps the mods
+//   skqe search <text or wildcard> [--all] [--json]   files by name in Data and its BSAs, and staging with --all
 //   skqe build-assets --out <db> --data <Data> [--staging <root>|auto | --mo2 <instance> --profile <name>]
 //                                               a SQLite database of every asset file
 //
@@ -43,6 +44,7 @@
 #include <vector>
 
 #include "../src/asset_build.h"
+#include "../src/asset_search.h"
 #include "../src/db_build.h"
 #include "../src/export_request.h"
 #include "../src/plugin.h"
@@ -198,6 +200,8 @@ COMMANDS
   skqe db add <module> --db x.db   add an optional module (navmesh, landscape...) later
   skqe build-assets [options]      a SQLite database of every asset file (Data, mod
                                   staging folders, MO2, BSA contents) with winners
+  skqe search <text>               find files by name in Data and its BSAs;
+                                  --all adds the staging folder, each file once
   skqe staging                     where Vortex or MO2 keeps this game's mods
   skqe help [command]              this text, or one command's details
                                   (also: skqe <command> --help)
@@ -387,9 +391,46 @@ even without the ESL flag.
     ...
 )HELP";
 
+const char kHelpSearch[] = R"HELP(skqe search <text or wildcard> [--all] [options]
+
+Finds files by name, including the files packed in BSAs. It only reads. Plain
+text matches anywhere in the path, ignoring case. With * or ? it's a wildcard
+over the file name, or over the whole path if it has a \ or /.
+
+  --all             also search the staging folder: every mod folder and the
+                    BSAs directly inside each.
+  --data <folder>   the Data folder. Default: the saved one, else the installed game.
+  --staging <folder>  the staging folder, for this search. Implies --all.
+                    Default: the saved one, else `skqe staging` finds it.
+  --manager m       with --all: vortex or mo2, if detection picks the wrong one.
+  --limit N         stop after N paths (the first N by name).
+  --json            one object per path: {"path":..,"copies":[{"archive":..,"in":[..],"size":..}]}
+  --threads n       default: one per logical core.
+
+Each path is listed once, with its distinct copies. A file hardlinked between
+Data and a mod is one copy found in both, and a hardlinked BSA is read once.
+Copies that are separate files stay separate, even with the same contents.
+
+  skqe search "barenziah"
+  skqe search "*.hkx" --all --limit 50
+  skqe search "textures\armor\iron*" --json
+
+  textures\armor\iron\cuirass.dds
+    loose: Data, Some Armor Mod
+    in Skyrim - Textures3.bsa: Data
+
+The file and copy counts go to stderr, so the output stays clean.
+)HELP";
+
 const char kHelpStaging[] = R"HELP(skqe staging [--data <folder>] [--manager vortex|mo2] [--json]
+skqe staging --set-data <folder> | --set-staging <folder> | --clear | --show
 
 Finds where the user's mod manager keeps its mods for this game. It only reads.
+
+To set the folders yourself, --set-data and --set-staging save them for every
+later command, and they beat detection. --clear forgets them, and --show lists
+them. --data and --staging on a single command beat the saved folders. A
+--manager asks for detection of that manager, ignoring a saved staging folder.
 
   --data <folder>   the game's Data folder. Default: the installed game, from
                     the registry.
@@ -901,7 +942,7 @@ int Usage() {
 }
 
 int Help(const std::string& topic) {
-    const char* text = topic == "info" ? kHelpInfo : topic == "fields" ? kHelpFields : topic == "staging" ? kHelpStaging
+    const char* text = topic == "info" ? kHelpInfo : topic == "fields" ? kHelpFields : topic == "staging" ? kHelpStaging : topic == "search" ? kHelpSearch
                      : topic == "export" ? kHelpExport : topic == "diff" ? kHelpDiff : topic == "build-db" ? kHelpBuildDb
                      : topic == "db" ? kHelpDb : topic == "build-assets" ? kHelpBuildAssets : kHelp;
     _setmode(_fileno(stdout), _O_BINARY);
@@ -1004,20 +1045,161 @@ int BuildDbCommand(int argc, wchar_t** argv) {
     return rc;
 }
 
+int SearchCommand(int argc, wchar_t** argv) {
+    std::wstring data, staging;
+    std::string manager, pattern;
+    bool json = false, all = false;
+    int threads = 0;
+    size_t limit = 0;
+    for (int i = 2; i < argc; ++i) {
+        std::string a = Utf8(argv[i]);
+        bool hasNext = i + 1 < argc;
+        if (a == "--data" && hasNext) data = argv[++i];
+        else if (a == "--staging" && hasNext) { staging = argv[++i]; all = true; }
+        else if (a == "--manager" && hasNext) manager = Utf8(argv[++i]);
+        else if (a == "--limit" && hasNext) limit = static_cast<size_t>(_wtoi64(argv[++i]));
+        else if (a == "--threads" && hasNext) threads = _wtoi(argv[++i]);
+        else if (a == "--all") all = true;
+        else if (a == "--json") json = true;
+        else if (a.rfind("--", 0) == 0) {
+            fprintf(stderr, "search: unknown option %s (skqe search --help)\n", a.c_str());
+            return 2;
+        } else if (pattern.empty()) pattern = a;
+        else {
+            fprintf(stderr, "search: one search text at a time; quote it if it has spaces\n");
+            return 2;
+        }
+    }
+    if (pattern.empty()) {
+        fprintf(stderr, "search: what to search for? (skqe search --help)\n");
+        return 2;
+    }
+    const StagingEnv env = CurrentStagingEnv();
+    std::wstring dataDir;
+    std::string err;
+    if (!ResolveDataFolder(data, env, &dataDir, &err)) {
+        fprintf(stderr, "search: %s\n", err.c_str());
+        return 1;
+    }
+    AssetSearchOptions opt;
+    opt.pattern = pattern;
+    opt.threads = threads;
+    opt.roots.push_back({dataDir, "Data"});
+    if (all) {
+        std::wstring root = staging, overwrite;
+        if (root.empty()) {
+            StagingResult found;
+            if (!FindStaging(dataDir, manager, env, &found, &err)) {
+                fprintf(stderr, "search: %s\n", err.c_str());
+                return 1;
+            }
+            root = found.chosen.staging;
+            if (found.chosen.manager == "mo2") overwrite = ResolveMo2Folders(found.chosen.instance).overwrite;
+        }
+        auto mods = StagingRoots(root);
+        if (mods.empty()) {
+            fprintf(stderr, "search: no mod folders in %s\n", Utf8(root).c_str());
+            return 1;
+        }
+        opt.roots.insert(opt.roots.end(), mods.begin(), mods.end());
+        if (!overwrite.empty() && GetFileAttributesW(overwrite.c_str()) != INVALID_FILE_ATTRIBUTES) opt.roots.push_back({overwrite, "overwrite"});
+    }
+    const ULONGLONG start = GetTickCount64();
+    AssetSearchResult r;
+    if (!SearchAssets(opt, &r, &err)) {
+        fprintf(stderr, "search: %s\n", err.c_str());
+        return 1;
+    }
+    const size_t total = r.files.size();
+    const size_t shown = limit && limit < total ? limit : total;
+    std::string out;
+    size_t copies = 0;
+    for (const auto& f : r.files) copies += f.copies.size();
+    if (json) out = "[\n";
+    for (size_t i = 0; i < shown; ++i) {
+        const auto& f = r.files[i];
+        if (json) {
+            std::vector<Value> list;
+            for (const auto& c : f.copies) {
+                Value v = Value::Map();
+                if (!c.archive.empty()) v.Set("archive", Value::Str(c.archive));
+                std::vector<Value> in;
+                for (const auto& n : c.in) in.push_back(Value::Str(n));
+                v.Set("in", Value::List(std::move(in)));
+                if (c.size >= 0) v.Set("size", Value::Int(c.size));
+                list.push_back(std::move(v));
+            }
+            Value obj = Value::Map();
+            obj.Set("path", Value::Str(f.path));
+            obj.Set("copies", Value::List(std::move(list)));
+            WriteJson(obj, &out);
+            out += i + 1 < shown ? ",\n" : "\n";
+        } else {
+            out += f.path + "\n";
+            for (const auto& c : f.copies) {
+                out += c.archive.empty() ? std::string("  loose: ") : "  in " + c.archive + ": ";
+                for (size_t k = 0; k < c.in.size(); ++k) out += (k ? ", " : "") + c.in[k];
+                out += "\n";
+            }
+        }
+    }
+    if (json) out += "]\n";
+    _setmode(_fileno(stdout), _O_BINARY);
+    fwrite(out.data(), 1, out.size(), stdout);
+    fflush(stdout);
+    for (const auto& w : r.warnings) fprintf(stderr, "warning: %s\n", w.c_str());
+    fprintf(stderr, "%zu paths, %zu distinct copies%s; %lld hardlinks merged; searched %lld loose files and %lld packed in %lld BSAs in %.2f s\n",
+            total, copies, shown < total ? " (output limited)" : "", static_cast<long long>(r.hardlinksMerged),
+            static_cast<long long>(r.looseScanned), static_cast<long long>(r.packedScanned),
+            static_cast<long long>(r.archivesRead), (GetTickCount64() - start) / 1000.0);
+    return 0;
+}
+
 int StagingCommand(int argc, wchar_t** argv) {
-    std::wstring data;
+    std::wstring data, setData, setStaging;
     std::string manager;
-    bool json = false;
+    bool json = false, clear = false, show = false;
     for (int i = 2; i < argc; ++i) {
         std::string a = Utf8(argv[i]);
         bool hasNext = i + 1 < argc;
         if (a == "--data" && hasNext) data = argv[++i];
         else if (a == "--manager" && hasNext) manager = Utf8(argv[++i]);
+        else if (a == "--set-data" && hasNext) setData = argv[++i];
+        else if (a == "--set-staging" && hasNext) setStaging = argv[++i];
+        else if (a == "--clear") clear = true;
+        else if (a == "--show") show = true;
         else if (a == "--json") json = true;
         else {
             fprintf(stderr, "staging: unknown option %s (skqe staging --help)\n", a.c_str());
             return 2;
         }
+    }
+    if (clear || show || !setData.empty() || !setStaging.empty()) {
+        const StagingEnv env = CurrentStagingEnv();
+        StagingSettings s = clear ? StagingSettings() : LoadStagingSettings(env);
+        auto setFolder = [](const std::wstring& in, std::wstring* out) {
+            wchar_t buf[MAX_PATH * 2];
+            DWORD n = GetFullPathNameW(in.c_str(), MAX_PATH * 2, buf, nullptr);
+            const std::wstring full(buf, n);
+            DWORD at = GetFileAttributesW(full.c_str());
+            if (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_DIRECTORY)) {
+                fprintf(stderr, "staging: no folder at %s\n", Utf8(full).c_str());
+                return false;
+            }
+            *out = full;
+            return true;
+        };
+        if (!setData.empty() && !setFolder(setData, &s.data)) return 1;
+        if (!setStaging.empty() && !setFolder(setStaging, &s.staging)) return 1;
+        std::string err;
+        if ((clear || !setData.empty() || !setStaging.empty()) && !SaveStagingSettings(env, s, &err)) {
+            fprintf(stderr, "staging: %s\n", err.c_str());
+            return 1;
+        }
+        std::string out = "data: " + (s.data.empty() ? std::string("(not set)") : Utf8(s.data)) + "\nstaging: " +
+                          (s.staging.empty() ? std::string("(not set)") : Utf8(s.staging)) + "\n";
+        fwrite(out.data(), 1, out.size(), stdout);
+        return 0;
     }
     if (!manager.empty() && manager != "vortex" && manager != "mo2") {
         fprintf(stderr, "staging: --manager is vortex or mo2\n");
@@ -2184,6 +2366,7 @@ int wmain(int argc, wchar_t** argv) {
     if (arg1 == "db") return DbCommand(argc, argv);
     if (arg1 == "build-assets") return BuildAssetsCommand(argc, argv);
     if (arg1 == "staging") return StagingCommand(argc, argv);
+    if (arg1 == "search") return SearchCommand(argc, argv);
     if (arg1 == "export") return ExportCommand(argc, argv);
     if (arg1 == "diff") return DiffCommand(argc, argv);
     if (argc < 3) return argc == 1 ? Help("") : Usage();

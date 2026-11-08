@@ -59,6 +59,7 @@ skqe export <plugin> [options]             chosen fields of chosen forms, as JSO
                                           what conflicts: `skqe help export`
 skqe diff   <copy> <copy>...               what differs between copies of a plugin, as JSON
 skqe staging [--manager vortex|mo2]        where Vortex or MO2 keeps this game's mods
+skqe search <text> [--all]                 files by name in Data and its BSAs; --all adds staging
     --type WEAP[,ARMO...]                 only these record types
     --form 00012EB7[,Skyrim.esm:012EB7]   only these forms (as stored, or owner:objectID)
     --fields EDID,FULL,DATA.damage        only these fields; omitted or * = all
@@ -192,6 +193,21 @@ the `stagingPath` in `Dataortex.deployment.json`, so a moved staging folder is 
 global instances and portable ones named in `nxmhandler.ini`, and follows custom folders in
 `ModOrganizer.ini`. If both manage the game, Vortex wins when it has files deployed. `skqe build-assets
 --staging auto` uses the same search.
+
+To set the folders yourself, `skqe staging --set-data <folder>` and `--set-staging <folder>` save them for
+every later command, and they beat detection. `--show` lists them and `--clear` forgets them.
+
+## `skqe search`: find a file, including inside BSAs
+
+```
+skqe search "iron*.dds"
+skqe search barenziah --all
+skqe search "textures\\armor\\iron*" --json
+```
+
+It searches `Data` and the BSAs in it by default. `--all` adds the staging folder. Each path is listed once
+with its distinct copies, so a file hardlinked between `Data` and a mod shows as one copy found in both.
+Separate files with the same contents stay separate.
 
 ## `skqe build-assets`: every asset file as one SQLite database
 
