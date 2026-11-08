@@ -72,6 +72,11 @@ bool Wildcard(const char* s, const char* p) {
     return !*p;
 }
 
+// Bookkeeping files Vortex leaves in folders it manages. Never game files.
+bool ManagerMarker(const std::wstring& name) {
+    return !_wcsicmp(name.c_str(), L"__folder_managed_by_vortex") || !_wcsicmp(name.c_str(), L"__vortex_staging_folder");
+}
+
 struct Id {
     uint32_t volume = 0;
     uint64_t file = 0;
@@ -211,7 +216,7 @@ bool SearchAssets(const AssetSearchOptions& opt, AssetSearchResult* result, std:
                 for (;;) {
                     auto* e = reinterpret_cast<const FILE_ID_BOTH_DIR_INFO*>(p);
                     const std::wstring name(e->FileName, e->FileNameLength / sizeof(wchar_t));
-                    if (name != L"." && name != L"..") {
+                    if (name != L"." && name != L".." && !ManagerMarker(name)) {
                         if (e->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                             if (!(e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) queue.Push({job.root, job.rel + name + L"\\"});
                         } else {

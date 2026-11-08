@@ -1019,6 +1019,11 @@ void TestSearch() {
     CHECK(SearchAssets(opt, &r, &err));
     CHECK(r.files.size() == 1 && r.files[0].path == "textures\\other.dds" && r.warnings.size() == 1);
 
+    WriteFile(data + L"Textures\\__folder_managed_by_vortex", "");
+    opt.pattern = "vortex";
+    r = AssetSearchResult();
+    CHECK(SearchAssets(opt, &r, &err) && r.files.empty());  // manager markers aren't results
+
     opt.pattern = "";
     CHECK(!SearchAssets(opt, &r, &err));
     opt.pattern = "x";
