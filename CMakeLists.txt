@@ -47,9 +47,10 @@ add_library(skqe STATIC
     src/db_build.cpp
     src/itm.cpp
     src/asset_readers.cpp
-    src/asset_build.cpp)
+    src/asset_build.cpp
+    src/staging_find.cpp)
 target_include_directories(skqe PUBLIC src)
-target_link_libraries(skqe PUBLIC sqlite3 PRIVATE bsa::reader asset::metadata bcrypt shell32 ole32)
+target_link_libraries(skqe PUBLIC sqlite3 PRIVATE bsa::reader asset::metadata bcrypt shell32 ole32 advapi32)
 
 add_executable(skqe_cli tools/skqe.cpp)
 set_target_properties(skqe_cli PROPERTIES OUTPUT_NAME skqe)

@@ -15,7 +15,8 @@
 //   --patterns <file>             pattern catalog (default: patterns.json next to skqe.exe)
 //   skqe build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..]
 //                                               a SQLite database of a whole load order
-//   skqe build-assets --out <db> --data <Data> [--staging <root> | --mo2 <instance> --profile <name>]
+//   skqe staging [--data <Data>] [--manager vortex|mo2] [--json]   where Vortex or MO2 keeps the mods
+//   skqe build-assets --out <db> --data <Data> [--staging <root>|auto | --mo2 <instance> --profile <name>]
 //                                               a SQLite database of every asset file
 //
 // A field that occurs once is a value; one that repeats (SNAM, LVLO, CTDA...)
@@ -45,8 +46,11 @@
 #include "../src/db_build.h"
 #include "../src/export_request.h"
 #include "../src/plugin.h"
+#include "../src/staging_find.h"
 
 using namespace skqe;
+
+std::wstring WidenUtf8(const std::string& s);
 
 namespace {
 
@@ -194,6 +198,7 @@ COMMANDS
   skqe db add <module> --db x.db   add an optional module (navmesh, landscape...) later
   skqe build-assets [options]      a SQLite database of every asset file (Data, mod
                                   staging folders, MO2, BSA contents) with winners
+  skqe staging                     where Vortex or MO2 keeps this game's mods
   skqe help [command]              this text, or one command's details
                                   (also: skqe <command> --help)
 
@@ -380,6 +385,35 @@ even without the ESL flag.
   records: 16065
     ACHR 39
     ...
+)HELP";
+
+const char kHelpStaging[] = R"HELP(skqe staging [--data <folder>] [--manager vortex|mo2] [--json]
+
+Finds where the user's mod manager keeps its mods for this game. It only reads.
+
+  --data <folder>   the game's Data folder. Default: the installed game, from
+                    the registry.
+  --manager m       only look for vortex or mo2.
+  --json            one JSON object: data, manager, staging, instance, profile,
+                    source, deployed, and also_found for anything else found.
+
+Vortex: the "stagingPath" in Data\vortex.deployment.json, written when Vortex
+deploys. Its default folder is used only when that doesn't exist and the folder
+has mods in it.
+
+MO2: global instances in %LOCALAPPDATA%\ModOrganizer, and portable ones next to
+a ModOrganizer.exe named in nxmhandler.ini, when the instance's game folder is
+this Data folder's. Custom mod folders in ModOrganizer.ini are followed.
+
+If both manage this game, Vortex wins when it has files deployed, because MO2
+leaves nothing in Data. Otherwise MO2 wins. Between MO2 instances, MO2's current
+one wins. If it can't tell, it lists them and exits with 1.
+
+  skqe staging
+  manager: vortex
+  staging: D:\Mods\Staging
+  found by: Vortex's deployment manifest in Data
+  deployed: yes
 )HELP";
 
 const char kHelpFields[] = R"HELP(skqe fields <plugin> <TYPE> [--names]
@@ -767,6 +801,8 @@ OPTIONS
   --staging <root>         a mod staging root (any manager): each immediate
                            subfolder is one mod (roots.kind 'staging'). A
                            Vortex staging folder is recognised (manager).
+                           `--staging auto` finds Vortex's or MO2's for this
+                           Data folder; see `skqe staging`. --manager picks one.
   --mo2 <instance> --profile <name>
                            an MO2 instance (the folder with ModOrganizer.ini,
                            mods, profiles, overwrite): every mod folder,
@@ -865,7 +901,7 @@ int Usage() {
 }
 
 int Help(const std::string& topic) {
-    const char* text = topic == "info" ? kHelpInfo : topic == "fields" ? kHelpFields
+    const char* text = topic == "info" ? kHelpInfo : topic == "fields" ? kHelpFields : topic == "staging" ? kHelpStaging
                      : topic == "export" ? kHelpExport : topic == "diff" ? kHelpDiff : topic == "build-db" ? kHelpBuildDb
                      : topic == "db" ? kHelpDb : topic == "build-assets" ? kHelpBuildAssets : kHelp;
     _setmode(_fileno(stdout), _O_BINARY);
@@ -968,8 +1004,80 @@ int BuildDbCommand(int argc, wchar_t** argv) {
     return rc;
 }
 
+int StagingCommand(int argc, wchar_t** argv) {
+    std::wstring data;
+    std::string manager;
+    bool json = false;
+    for (int i = 2; i < argc; ++i) {
+        std::string a = Utf8(argv[i]);
+        bool hasNext = i + 1 < argc;
+        if (a == "--data" && hasNext) data = argv[++i];
+        else if (a == "--manager" && hasNext) manager = Utf8(argv[++i]);
+        else if (a == "--json") json = true;
+        else {
+            fprintf(stderr, "staging: unknown option %s (skqe staging --help)\n", a.c_str());
+            return 2;
+        }
+    }
+    if (!manager.empty() && manager != "vortex" && manager != "mo2") {
+        fprintf(stderr, "staging: --manager is vortex or mo2\n");
+        return 2;
+    }
+    StagingResult r;
+    std::string err;
+    if (!FindStaging(data, manager, CurrentStagingEnv(), &r, &err)) {
+        fprintf(stderr, "staging: %s\n", err.c_str());
+        return 1;
+    }
+    const StagingCandidate& c = r.chosen;
+    auto isChosen = [&](const StagingCandidate& o) { return o.manager == c.manager && o.staging == c.staging; };
+    std::string out;
+    if (json) {
+        auto describe = [&](const StagingCandidate& o, Value* v) {
+            v->Set("manager", Value::Str(o.manager));
+            v->Set("staging", Value::Str(Utf8(o.staging)));
+            if (o.manager == "mo2") {
+                v->Set("instance", Value::Str(Utf8(o.instance)));
+                v->Set("profile", Value::Str(o.profile));
+                v->Set("matches_data", Value::Bool(o.matchesData));
+            } else {
+                v->Set("deployed", Value::Bool(o.deployed));
+            }
+            v->Set("source", Value::Str(o.source));
+        };
+        Value obj = Value::Map();
+        obj.Set("data", Value::Str(Utf8(r.data)));
+        describe(c, &obj);
+        std::vector<Value> also;
+        for (const auto& o : r.all) {
+            if (isChosen(o)) continue;
+            Value v = Value::Map();
+            describe(o, &v);
+            also.push_back(std::move(v));
+        }
+        obj.Set("also_found", Value::List(std::move(also)));
+        WriteJson(obj, &out);
+        out += "\n";
+    } else {
+        out = "manager: " + c.manager + "\nstaging: " + Utf8(c.staging) + "\n";
+        if (c.manager == "mo2") out += "instance: " + Utf8(c.instance) + "\nprofile: " + c.profile + "\n";
+        out += "found by: " + c.source + "\n";
+        if (c.manager == "vortex") out += std::string("deployed: ") + (c.deployed ? "yes" : "no") + "\n";
+        for (const auto& o : r.all) {
+            if (isChosen(o)) continue;
+            out += "also found: " + o.manager + " " + Utf8(o.manager == "mo2" ? o.instance : o.staging);
+            if (o.manager == "mo2" && !o.matchesData) out += " (a different game folder)";
+            out += "\n";
+        }
+    }
+    _setmode(_fileno(stdout), _O_BINARY);
+    fwrite(out.data(), 1, out.size(), stdout);
+    return 0;
+}
+
 int BuildAssetsCommand(int argc, wchar_t** argv) {
     AssetOptions opt;
+    std::string manager;
     for (int i = 2; i < argc; ++i) {
         std::string a = Utf8(argv[i]);
         bool hasNext = i + 1 < argc;
@@ -977,6 +1085,7 @@ int BuildAssetsCommand(int argc, wchar_t** argv) {
         else if (a == "--data" && hasNext) opt.data = argv[++i];
         else if (a == "--staging" && hasNext) opt.staging = argv[++i];
         else if (a == "--mo2" && hasNext) opt.mo2 = argv[++i];
+        else if (a == "--manager" && hasNext) manager = Utf8(argv[++i]);
         else if (a == "--profile" && hasNext) opt.profile = argv[++i];
         else if (a == "--load-order" && hasNext) opt.loadOrderFile = argv[++i];
         else if (a == "--hash") opt.hash = true;
@@ -994,6 +1103,22 @@ int BuildAssetsCommand(int argc, wchar_t** argv) {
         return 2;
     }
     std::string err;
+    if (opt.staging == L"auto") {
+        StagingResult found;
+        if (!FindStaging(opt.data, manager, CurrentStagingEnv(), &found, &err)) {
+            fprintf(stderr, "build-assets: %s\n", err.c_str());
+            return 1;
+        }
+        opt.staging.clear();
+        if (found.chosen.manager == "mo2") {
+            opt.mo2 = found.chosen.instance;
+            if (opt.profile.empty()) opt.profile = WidenUtf8(found.chosen.profile);
+        } else {
+            opt.staging = found.chosen.staging;
+        }
+        if (!opt.quiet)
+            fprintf(stderr, "staging: %s, %s\n", found.chosen.manager.c_str(), Utf8(found.chosen.staging).c_str());
+    }
     int rc = BuildAssets(opt, &err);
     if (rc) fprintf(stderr, "build-assets: %s\n", err.c_str());
     return rc;
@@ -2058,6 +2183,7 @@ int wmain(int argc, wchar_t** argv) {
     if (arg1 == "build-db") return BuildDbCommand(argc, argv);
     if (arg1 == "db") return DbCommand(argc, argv);
     if (arg1 == "build-assets") return BuildAssetsCommand(argc, argv);
+    if (arg1 == "staging") return StagingCommand(argc, argv);
     if (arg1 == "export") return ExportCommand(argc, argv);
     if (arg1 == "diff") return DiffCommand(argc, argv);
     if (argc < 3) return argc == 1 ? Help("") : Usage();

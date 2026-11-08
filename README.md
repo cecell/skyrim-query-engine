@@ -58,6 +58,7 @@ skqe export <plugin> [options]             chosen fields of chosen forms, as JSO
                                           several plugins, or every copy across a load order with the winner and
                                           what conflicts: `skqe help export`
 skqe diff   <copy> <copy>...               what differs between copies of a plugin, as JSON
+skqe staging [--manager vortex|mo2]        where Vortex or MO2 keeps this game's mods
     --type WEAP[,ARMO...]                 only these record types
     --form 00012EB7[,Skyrim.esm:012EB7]   only these forms (as stored, or owner:objectID)
     --fields EDID,FULL,DATA.damage        only these fields; omitted or * = all
@@ -183,6 +184,14 @@ Every form has one integer key, `form_key = owner plugin_no * 16777216 +
 object ID`, computed from the bytes. It is the same whichever plugin a
 reference is read from, so joins are plain integer joins. `skqe build-db
 --help` has the details.
+
+## `skqe staging`: where the mods are
+
+Finds the folder Vortex or Mod Organizer 2 keeps this game's mods in, and only reads. For Vortex it uses
+the `stagingPath` in `Dataortex.deployment.json`, so a moved staging folder is found. For MO2 it checks
+global instances and portable ones named in `nxmhandler.ini`, and follows custom folders in
+`ModOrganizer.ini`. If both manage the game, Vortex wins when it has files deployed. `skqe build-assets
+--staging auto` uses the same search.
 
 ## `skqe build-assets`: every asset file as one SQLite database
 

@@ -1,4 +1,5 @@
 #include "asset_build.h"
+#include "staging_find.h"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -956,25 +957,10 @@ struct Mo2Layout {
 // ModOrganizer.ini's folders (custom base / mod / overwrite / profiles
 // directories, %BASE_DIR%), and the profile's modlist.txt.
 bool ReadMo2(const std::wstring& instance, const std::wstring& profile, Mo2Layout* out, std::string* error) {
-    const std::wstring inst = FullDir(instance);
-    const std::wstring ini = inst + L"ModOrganizer.ini";
-    std::string base, v;
-    auto dirSetting = [&](const char* key, const wchar_t* def) {
-        std::wstring d;
-        if (IniValue(ini, "Settings", key, &v) && !v.empty()) {
-            size_t k = v.find("%BASE_DIR%");
-            if (k != std::string::npos) v.replace(k, 10, base);
-            d = Widen(v);
-        } else {
-            d = Widen(base) + L"\\" + def;
-        }
-        return FullDir(d);
-    };
-    base = Utf8(inst.substr(0, inst.size() - 1));
-    if (IniValue(ini, "Settings", "base_directory", &v) && !v.empty()) base = v;
-    out->mods = dirSetting("mod_directory", L"mods");
-    out->overwrite = dirSetting("overwrite_directory", L"overwrite");
-    out->profileDir = dirSetting("profiles_directory", L"profiles") + profile + L"\\";
+    const Mo2Folders folders = ResolveMo2Folders(instance);
+    out->mods = folders.mods;
+    out->overwrite = folders.overwrite;
+    out->profileDir = folders.profiles + profile + L"\\";
     if (!IsDir(out->mods)) {
         *error = "MO2: no mods folder at " + Utf8(out->mods);
         return false;

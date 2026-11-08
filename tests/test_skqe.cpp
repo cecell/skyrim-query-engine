@@ -23,6 +23,7 @@
 #include "inflate.h"
 #include "plugin.h"
 #include "sqlite3.h"
+#include "staging_find.h"
 #include "strings.h"
 
 using namespace skqe;
@@ -609,6 +610,26 @@ void TestTri() {
 
 // ---- End to end: a Data folder, staging folders, an MO2 instance ----
 
+std::string Utf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(n, ' ');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+std::wstring FullPathForTest(const std::wstring& p) {
+    wchar_t buf[MAX_PATH * 2];
+    DWORD n = GetFullPathNameW(p.c_str(), MAX_PATH * 2, buf, nullptr);
+    return std::wstring(buf, n);
+}
+
+// Removes a fixture folder and everything in it.
+void RecycleForTest(const std::wstring& dir) {
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 void WriteFile(const std::wstring& path, const std::string& bytes) {
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -829,6 +850,110 @@ int WriteSeeds(const std::wstring& dir) {
     return 0;
 }
 
+void TestFindStaging() {
+    CHECK(QtIniDecode("@ByteArray(D:\\\\Games\\\\Skyrim)") == "D:\\Games\\Skyrim");
+    CHECK(QtIniDecode("\"C:/a b\"") == "C:/a b");
+    CHECK(QtIniDecode("@ByteArray(Caf\\xc3\\xa9)") == "Caf\xC3\xA9");
+    CHECK(QtIniDecode("plain") == "plain");
+
+    const std::wstring root = FixtureDir() + L"find\\";
+    const std::wstring game = root + L"Game\\", data = game + L"Data\\";
+    const std::string rootA = Utf8(root);
+    auto esc = [](std::string s) {
+        std::string o;
+        for (char c : s) {
+            if (c == '\\') o += '\\';
+            o += c;
+        }
+        return o;
+    };
+    const std::wstring custom = root + L"Custom\\Vortex Mods\\";
+    WriteFile(data + L"Skyrim.esm", "TES4");
+    WriteFile(custom + L"__vortex_staging_folder", "");
+    WriteFile(custom + L"ModA\\a.esp", "x");
+    auto manifest = [&](const std::string& files, const std::string& game_ = "skyrimse", const std::wstring& at = L"") {
+        WriteFile(data + L"vortex.deployment.json",
+                  "{\n \"instance\": \"x\",\n \"version\": 1,\n \"gameId\": \"" + game_ + "\",\n \"stagingPath\": \"" +
+                      esc(Utf8(at.empty() ? custom.substr(0, custom.size() - 1) : at)) + "\",\n \"files\": " + files + "\n}\n");
+    };
+    StagingEnv env;
+    env.appData = root + L"Roaming";
+    env.localAppData = root + L"Local";
+    env.programData = root + L"ProgramData";
+    auto find = [&](const std::string& manager, StagingResult* r, std::string* err) {
+        *r = StagingResult();
+        err->clear();
+        return FindStaging(data, manager, env, r, err);
+    };
+    StagingResult r;
+    std::string err;
+
+    // Nothing at all.
+    CHECK(!find("", &r, &err) && err.find("no Vortex or MO2") != std::string::npos);
+
+    // The manifest beats a default folder that has the marker and even a mod.
+    WriteFile(env.appData + L"\\Vortex\\skyrimse\\mods\\__vortex_staging_folder", "");
+    WriteFile(env.appData + L"\\Vortex\\skyrimse\\mods\\Old\\o.esp", "x");
+    manifest("[{\"relPath\":\"a.esp\"}]");
+    CHECK(find("", &r, &err) && r.chosen.manager == "vortex" && r.chosen.staging == custom && r.chosen.deployed);
+    CHECK(r.all.size() == 1);
+
+    // A manifest for another game, or pointing nowhere, isn't used; the default is.
+    manifest("[]", "fallout4");
+    CHECK(find("", &r, &err) && r.chosen.staging == FullPathForTest(env.appData + L"\\Vortex\\skyrimse\\mods\\"));
+    manifest("[]", "skyrimse", root + L"Gone");
+    CHECK(find("", &r, &err) && !r.chosen.deployed && r.chosen.staging != custom);
+
+    // The marker with no mods doesn't count.
+    DeleteFileW((env.appData + L"\\Vortex\\skyrimse\\mods\\Old\\o.esp").c_str());
+    RemoveDirectoryW((env.appData + L"\\Vortex\\skyrimse\\mods\\Old").c_str());
+    CHECK(!find("vortex", &r, &err));
+
+    // MO2: a global instance, stored the way Qt writes it, with a custom mods folder.
+    const std::wstring inst = env.localAppData + L"\\ModOrganizer\\Skyrim Special Edition\\";
+    auto ini = [&](const std::wstring& at, const std::wstring& gamePath, const std::string& extra = "") {
+        WriteFile(at + L"ModOrganizer.ini", "[General]\r\ngameName=Skyrim Special Edition\r\nselected_profile=@ByteArray(Mine)\r\ngamePath=@ByteArray(" +
+                                                esc(Utf8(gamePath)) + ")\r\n\r\n[Settings]\r\n" + extra);
+        WriteFile(at + L"profiles\\Mine\\modlist.txt", "+A\r\n");
+        WriteFile(at + L"profiles\\Other\\modlist.txt", "+A\r\n");
+    };
+    ini(inst, game.substr(0, game.size() - 1), "mod_directory=%BASE_DIR%/elsewhere\r\n");
+    WriteFile(inst + L"elsewhere\\A\\a.esp", "x");
+    CHECK(find("", &r, &err) && r.chosen.manager == "mo2" && r.chosen.profile == "Mine" && r.chosen.staging == inst + L"elsewhere\\");
+
+    // Vortex with files deployed beats MO2, unless MO2 is asked for; a purged Vortex doesn't.
+    manifest("[{\"relPath\":\"a.esp\"}]");
+    CHECK(find("", &r, &err) && r.chosen.manager == "vortex" && r.all.size() == 2);
+    CHECK(find("mo2", &r, &err) && r.chosen.manager == "mo2" && r.all.size() == 1);
+    manifest("[ ]");
+    CHECK(find("", &r, &err) && r.chosen.manager == "mo2");
+    CHECK(find("vortex", &r, &err) && r.chosen.manager == "vortex" && !r.chosen.deployed);
+    DeleteFileW((data + L"vortex.deployment.json").c_str());
+
+    // Another instance of the same game: can't tell, until MO2's current one says.
+    const std::wstring second = env.localAppData + L"\\ModOrganizer\\Second\\";
+    ini(second, game.substr(0, game.size() - 1));
+    WriteFile(second + L"mods\\A\\a.esp", "x");
+    CHECK(!find("", &r, &err) && err.find("more than one") != std::string::npos && r.all.size() == 2);
+    env.mo2CurrentInstance = "second";
+    CHECK(find("", &r, &err) && r.chosen.instanceName == "Second");
+    env.mo2CurrentInstance.clear();
+    RecycleForTest(second);
+
+    // A portable instance, known only from nxmhandler.ini.
+    RecycleForTest(inst);
+    const std::wstring portable = root + L"Portable MO2\\";
+    ini(portable, game.substr(0, game.size() - 1));
+    WriteFile(portable + L"mods\\A\\a.esp", "x");
+    WriteFile(env.localAppData + L"\\ModOrganizer\\nxmhandler.ini",
+              "[handlers]\r\nsize=2\r\n1\\executable=" + esc(Utf8(portable)) + "ModOrganizer.exe\r\n2\\executable=C:\\\\Vortex\\\\Vortex.exe\r\n");
+    CHECK(find("", &r, &err) && r.chosen.manager == "mo2" && r.chosen.instanceName.empty() && r.chosen.staging == portable + L"mods\\");
+
+    // An instance of this game in another folder isn't chosen, but is reported.
+    ini(portable, root.substr(0, root.size() - 1) + L"\\OtherGame");
+    CHECK(!find("", &r, &err) && err.find("not for this Data") != std::string::npos && r.all.size() == 1 && !r.all[0].matchesData);
+}
+
 void TestSchema(const PatternCatalog& cat) {
     // Raw byte runs become BLOB columns, and nothing else does.
     Schema schema;
@@ -879,6 +1004,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTri();
     TestBuildAssetsStaging();
     TestBuildAssetsMo2();
+    TestFindStaging();
     printf("%d passed, %d failed\n", g_passed, g_failed);
     return g_failed ? 1 : 0;
 }
