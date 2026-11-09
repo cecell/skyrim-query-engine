@@ -64,6 +64,11 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/patterns.json
             ${CMAKE_CURRENT_BINARY_DIR}/patterns.json
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json)
 add_custom_target(skqe_patterns ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/patterns.json)
+# skqe search's rules, next to the exe.
+add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/search_filters.txt
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/search_filters.txt ${CMAKE_CURRENT_BINARY_DIR}/search_filters.txt
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data/search_filters.txt)
+add_custom_target(skqe_search_filters ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/search_filters.txt)
 
 # Unit tests: hand-built valid and damaged plugins / strings files.
 enable_testing()

@@ -1,0 +1,48 @@
+# Which folders `skqe search` looks in for each kind of file.
+#
+# To change these, copy this file to %LOCALAPPDATA%\skqe\search_filters.txt and
+# edit the copy, so an update of skqe won't replace your changes.
+#
+# Each line is:  file type, folders to search
+#
+# File type is one of:
+#   plugins         .esp, .esm and .esl
+#   dds             an extension
+#   *_SUM.ini       a wildcard on the file name, ignoring case
+#   regex: ...      a regular expression on the file name, matching case
+#
+# Folders are separated by ; and are relative to Data, subfolders included.
+# "data" means files directly in Data, without its subfolders.
+#
+# The first line that fits a file decides. Keep the regex last, so the lines
+# before it win. A file type no line fits is searched for everywhere.
+#
+#   exclude: name   leaves a file out of the results (a name or a wildcard).
+#
+# `skqe search --anywhere` and `--bsa-only` ignore all of this.
+
+plugins, data
+pex, scripts
+psc, scripts;source
+seq, seq
+bik, Video
+nif, meshes;calientetools
+hkx, meshes
+dds, textures
+tga, textures
+swf, mapmarkers;interface
+dll, skse
+osd, calientetools
+osp, calientetools
+xml, calientetools;skse;pandora_engine;meshes;dialogueviews
+*_SUM.ini, seasons
+*_WIN.ini, seasons
+*_SPR.ini, seasons
+*_AUT.ini, seasons
+*_NOSNOW.ini, seasons
+*_VSU.ini, vsu
+
+# This one must stay last.
+regex: _[A-Z]{3,5}\.ini, data
+
+exclude: __folder_managed_by_vortex

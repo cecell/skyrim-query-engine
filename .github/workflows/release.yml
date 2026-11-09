@@ -71,7 +71,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           $stage = New-Item -ItemType Directory -Force "stage/skqe-$env:VERSION"
-          Copy-Item build\skqe.exe, build\patterns.json, README.md, LICENSE, THIRD_PARTY_NOTICES.md $stage
+          Copy-Item build\skqe.exe, build\patterns.json, build\search_filters.txt, README.md, LICENSE, THIRD_PARTY_NOTICES.md $stage
           Copy-Item -Recurse LICENSES $stage
           $dist = New-Item -ItemType Directory -Force dist
           Compress-Archive -Path "$stage/*" -DestinationPath "dist/skqe-$env:VERSION.zip"

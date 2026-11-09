@@ -8,6 +8,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -28,6 +29,12 @@ struct AssetOptions {
 
 // Returns 0 on success; prints progress to stderr unless quiet.
 int BuildAssets(const AssetOptions& opt, std::string* error);
+
+// Which archives in a Data folder the game loads, and their order: lowercase
+// names to load rank, higher wins, the same plan build-assets uses. An empty
+// loadOrderFile means every plugin in Data.
+bool LoadedArchiveRanks(const std::wstring& data, const std::wstring& loadOrderFile,
+                        std::unordered_map<std::string, int>* ranks, std::string* error);
 
 // The extras (on by default, --skip to leave out) and what each is.
 std::vector<std::pair<std::string, std::string>> AssetExtras();

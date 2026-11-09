@@ -8,7 +8,9 @@
 #pragma once
 
 #include <cstdint>
+#include <regex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace skqe {
@@ -18,11 +20,42 @@ struct AssetSearchRoot {
     std::string name;   // shown in results: "Data", or the mod's folder name
 };
 
+// The folders each kind of file is looked for in, from search_filters.txt.
+class SearchFilters {
+public:
+    bool LoadFile(const std::wstring& path, std::string* error);
+    bool Parse(const std::string& text, std::string* error);
+    // Whether a file (path relative to its root) passes the rules.
+    bool Allows(const std::string& path) const;
+    // If the search text names one kind of file, the only places it can be:
+    // *folders (lowercase top-level names) and *dataRoot. False = can't say.
+    bool Narrow(const std::string& pattern, std::vector<std::string>* folders, bool* dataRoot) const;
+    size_t RuleCount() const { return rules_.size(); }
+    size_t ExcludeCount() const { return excludes_.size(); }
+
+private:
+    struct Rule {
+        enum Kind { Extension, Wildcard, Regex } kind = Extension;
+        std::string text;  // lowercase: ".dds" or a wildcard
+        std::regex regex;
+        std::vector<std::string> folders;  // lowercase, each ending in a backslash
+        bool dataRoot = false;
+    };
+    const Rule* RuleFor(const std::string& name, const std::string& lowerName) const;
+    std::vector<Rule> rules_;
+    std::vector<std::string> excludes_;  // lowercase names or wildcards
+};
+
 struct AssetSearchOptions {
     std::vector<AssetSearchRoot> roots;
     std::string pattern;  // case-insensitive. Text anywhere in the path, or with * and ?
                           // a wildcard over the whole path (the file name if it has no \ or /)
     int threads = 0;      // 0 = one per logical core
+    const SearchFilters* filters = nullptr;  // null = no rules
+    bool bsaOnly = false;                    // only the files packed in BSAs
+    // Set for winners: each path's one copy the game loads. Keys are lowercase
+    // archive names, values their load rank, higher wins. Other archives aren't read.
+    const std::unordered_map<std::string, int>* winnerRanks = nullptr;
 };
 
 struct AssetSearchCopy {
@@ -40,6 +73,8 @@ struct AssetSearchResult {
     std::vector<AssetSearchFile> files;  // sorted by path
     int64_t looseScanned = 0, packedScanned = 0, archivesRead = 0;
     int64_t hardlinksMerged = 0;         // places folded into a copy already found
+    std::vector<std::string> narrowedTo; // the folders searched, if the text named a file type
+    bool narrowedToDataRoot = false;
     std::vector<std::string> warnings;   // archives and folders that couldn't be read
 };
 

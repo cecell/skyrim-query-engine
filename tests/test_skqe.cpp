@@ -619,6 +619,11 @@ std::string Utf8(const std::wstring& w) {
     return s;
 }
 
+std::string LowerPathForTest(std::string s) {
+    for (char& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
 std::wstring FullPathForTest(const std::wstring& p) {
     wchar_t buf[MAX_PATH * 2];
     DWORD n = GetFullPathNameW(p.c_str(), MAX_PATH * 2, buf, nullptr);
@@ -1019,11 +1024,6 @@ void TestSearch() {
     CHECK(SearchAssets(opt, &r, &err));
     CHECK(r.files.size() == 1 && r.files[0].path == "textures\\other.dds" && r.warnings.size() == 1);
 
-    WriteFile(data + L"Textures\\__folder_managed_by_vortex", "");
-    opt.pattern = "vortex";
-    r = AssetSearchResult();
-    CHECK(SearchAssets(opt, &r, &err) && r.files.empty());  // manager markers aren't results
-
     opt.pattern = "";
     CHECK(!SearchAssets(opt, &r, &err));
     opt.pattern = "x";
@@ -1050,6 +1050,94 @@ void TestSearch() {
     CHECK(SaveStagingSettings(env, saved, &err));
     found = StagingResult();
     CHECK(!FindStaging(L"", "", env, &found, &err) && err.find("saved staging") != std::string::npos);
+}
+
+void TestSearchFilters() {
+    const std::string rules =
+        "# comment\nplugins, data\npex, scripts\npsc, scripts;source\nxml, a;b\n*_SUM.ini, seasons\n"
+        "regex: _[A-Z]{3,5}\\.ini, data\n\nexclude: __folder_managed_by_vortex\n";
+    SearchFilters f;
+    std::string err;
+    CHECK(f.Parse(rules, &err));
+    CHECK(f.RuleCount() == 8 && f.ExcludeCount() == 1);
+    CHECK(f.Allows("Skyrim.esm") && f.Allows("X.ESL"));
+    CHECK(!f.Allows("sub\\X.esp"));
+    CHECK(f.Allows("Scripts\\a.pex") && f.Allows("scripts\\deep\\a.pex"));
+    CHECK(!f.Allows("textures\\a.pex") && !f.Allows("a.pex"));
+    CHECK(f.Allows("source\\scripts\\a.psc") && f.Allows("scripts\\a.psc") && !f.Allows("other\\a.psc"));
+    CHECK(f.Allows("anything\\a.wav") && f.Allows("a.wav"));                      // no rule: everywhere
+    CHECK(f.Allows("Seasons\\Foo_SUM.ini") && !f.Allows("Foo_SUM.ini"));          // the earlier line wins over the regex
+    CHECK(f.Allows("Foo_DISTR.ini") && !f.Allows("sub\\Foo_DISTR.ini"));          // regex: Data's top folder only
+    CHECK(f.Allows("sub\\foo_distr.ini") && f.Allows("sub\\Foo_Toolong.ini"));    // the regex matches case, and 3 to 5 letters
+    CHECK(!f.Allows("textures\\a\\__folder_managed_by_vortex"));
+
+    std::vector<std::string> folders;
+    bool root = false;
+    CHECK(f.Narrow("*.pex", &folders, &root) && folders == std::vector<std::string>{"scripts"} && !root);
+    CHECK(f.Narrow("x.xml", &folders, &root) && folders.size() == 2);
+    CHECK(f.Narrow("*.esp", &folders, &root) && folders.empty() && root);
+    CHECK(f.Narrow("*_SUM.ini", &folders, &root) && folders == std::vector<std::string>{"seasons"});
+    CHECK(f.Narrow("*_DISTR.ini", &folders, &root) && folders.empty() && root);
+    CHECK(!f.Narrow("barenziah", &folders, &root));
+    CHECK(!f.Narrow("*.wav", &folders, &root));
+    CHECK(!f.Narrow("textures\\iron*", &folders, &root));
+
+    SearchFilters bad;
+    CHECK(!bad.Parse("pex\n", &err) && err.find("line 1") != std::string::npos);
+    CHECK(!bad.Parse("regex: [, data\n", &err) && err.find("bad regex") != std::string::npos);
+    CHECK(!bad.Parse("pex, a;;b\n", &err));
+
+    // On real files: the rules, then the bypasses, then winners.
+    const std::wstring root2 = FixtureDir() + L"filters\\";
+    RemoveFixture(root2);
+    const std::wstring data = root2 + L"Data\\";
+    WriteFile(data + L"scripts\\good.pex", "x");
+    WriteFile(data + L"textures\\stray.pex", "x");
+    WriteFile(data + L"textures\\__folder_managed_by_vortex", "");
+    WriteFile(data + L"meshes\\a.nif", "x");
+    WriteFile(data + L"meshes\\both.nif", "x");
+    WriteFile(data + L"A.bsa", Bsa("meshes", {{"both.nif", "aaa"}, {"packed.nif", "aaa"}, {"only.nif", "aaa"}}));
+    WriteFile(data + L"B.bsa", Bsa("meshes", {{"packed.nif", "bbb"}}));
+    WriteFile(data + L"Unloaded.bsa", Bsa("meshes", {{"unloaded.nif", "ccc"}, {"only.nif", "ccc"}}));
+    WriteFile(data + L"Stray.bsa", Bsa("textures", {{"packed.pex", "ddd"}}));
+
+    AssetSearchOptions opt;
+    opt.threads = 3;
+    opt.roots.push_back({data, "Data"});
+    opt.filters = &f;
+    auto run = [&](const char* pattern, AssetSearchResult* r) {
+        *r = AssetSearchResult();
+        opt.pattern = pattern;
+        return SearchAssets(opt, r, &err);
+    };
+    AssetSearchResult r;
+    CHECK(run("*.pex", &r) && r.files.size() == 1 && r.files[0].path == "scripts\\good.pex");
+    CHECK(r.narrowedTo == std::vector<std::string>{"scripts"});
+    CHECK(r.looseScanned < 9);                               // textures and meshes weren't walked
+    CHECK(run("vortex", &r) && r.files.empty());             // excluded
+    opt.filters = nullptr;
+    CHECK(run("*.pex", &r) && r.files.size() == 3);          // --anywhere: both loose and the packed one
+    CHECK(run("vortex", &r) && r.files.size() == 1);
+    opt.bsaOnly = true;
+    CHECK(run("*.pex", &r) && r.files.size() == 1 && r.files[0].path == "textures\\packed.pex");
+    CHECK(r.looseScanned < 7);                               // only Data's top folder was listed
+    opt.bsaOnly = false;
+    opt.filters = &f;
+
+    std::unordered_map<std::string, int> ranks{{"a.bsa", 1}, {"b.bsa", 2}};
+    opt.winnerRanks = &ranks;
+    CHECK(run("*.nif", &r));
+    auto copyOf = [&](const char* path) {
+        for (const auto& file : r.files)
+            if (LowerPathForTest(file.path) == path) return file.copies;
+        return std::vector<AssetSearchCopy>();
+    };
+    CHECK(r.archivesRead == 2);                              // the unloaded archive wasn't read
+    CHECK(copyOf("meshes\\both.nif").size() == 1 && copyOf("meshes\\both.nif")[0].archive.empty());  // loose first
+    CHECK(copyOf("meshes\\packed.nif").size() == 1 && copyOf("meshes\\packed.nif")[0].archive == "B.bsa");  // later archive
+    CHECK(copyOf("meshes\\only.nif").size() == 1 && copyOf("meshes\\only.nif")[0].archive == "A.bsa");
+    CHECK(copyOf("meshes\\unloaded.nif").empty());           // the game doesn't load it
+    opt.winnerRanks = nullptr;
 }
 
 void TestSchema(const PatternCatalog& cat) {
@@ -1104,6 +1192,7 @@ int wmain(int argc, wchar_t** argv) {
     TestBuildAssetsMo2();
     TestFindStaging();
     TestSearch();
+    TestSearchFilters();
     printf("%d passed, %d failed\n", g_passed, g_failed);
     return g_failed ? 1 : 0;
 }

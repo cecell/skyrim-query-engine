@@ -7,6 +7,7 @@
 #include <cctype>
 #include <condition_variable>
 #include <cstring>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -70,11 +71,6 @@ bool Wildcard(const char* s, const char* p) {
     }
     while (*p == '*') ++p;
     return !*p;
-}
-
-// Bookkeeping files Vortex leaves in folders it manages. Never game files.
-bool ManagerMarker(const std::wstring& name) {
-    return !_wcsicmp(name.c_str(), L"__folder_managed_by_vortex") || !_wcsicmp(name.c_str(), L"__vortex_staging_folder");
 }
 
 struct Id {
@@ -145,6 +141,144 @@ bool AssetPathMatches(const std::string& path, const std::string& pattern) {
     return Wildcard(path.c_str() + (slash == std::string::npos ? 0 : slash + 1), pattern.c_str());
 }
 
+bool SearchFilters::LoadFile(const std::wstring& path, std::string* error) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        *error = "cannot read " + Utf8(path);
+        return false;
+    }
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (!Parse(text, error)) {
+        *error = Utf8(path) + ": " + *error;
+        return false;
+    }
+    return true;
+}
+
+bool SearchFilters::Parse(const std::string& text, std::string* error) {
+    rules_.clear();
+    excludes_.clear();
+    auto trim = [](std::string s) {
+        size_t a = s.find_first_not_of(" \t\r\n");
+        if (a == std::string::npos) return std::string();
+        return s.substr(a, s.find_last_not_of(" \t\r\n") - a + 1);
+    };
+    size_t at = 0;
+    if (!text.compare(0, 3, "\xEF\xBB\xBF")) at = 3;
+    for (int number = 1; at < text.size(); ++number) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        const std::string line = trim(text.substr(at, end - at));
+        at = end + 1;
+        if (line.empty() || line[0] == '#') continue;
+        auto fail = [&](const std::string& why) {
+            *error = "line " + std::to_string(number) + ": " + why;
+            return false;
+        };
+        if (LowerPath(line.substr(0, 8)) == "exclude:") {
+            const std::string name = LowerPath(trim(line.substr(8)));
+            if (name.empty()) return fail("exclude: needs a file name");
+            excludes_.push_back(name);
+            continue;
+        }
+        // The last comma, because a regex can hold commas.
+        const size_t comma = line.rfind(',');
+        if (comma == std::string::npos) return fail("expected: file type, folders");
+        const std::string type = trim(line.substr(0, comma));
+        const std::string where = trim(line.substr(comma + 1));
+        if (type.empty() || where.empty()) return fail("expected: file type, folders");
+        std::vector<std::string> folders;
+        bool dataRoot = false;
+        for (size_t p = 0; p <= where.size();) {
+            size_t semi = where.find(';', p);
+            if (semi == std::string::npos) semi = where.size();
+            std::string folder = LowerPath(trim(where.substr(p, semi - p)));
+            p = semi + 1;
+            while (!folder.empty() && folder.back() == '\\') folder.pop_back();
+            if (folder.empty()) return fail("an empty folder name");
+            if (folder == "data") dataRoot = true;
+            else folders.push_back(folder + "\\");
+        }
+        Rule rule;
+        rule.folders = folders;
+        rule.dataRoot = dataRoot;
+        if (LowerPath(type.substr(0, 6)) == "regex:") {
+            rule.kind = Rule::Regex;
+            rule.text = trim(type.substr(6));
+            try {
+                rule.regex = std::regex(rule.text, std::regex::ECMAScript | std::regex::optimize);
+            } catch (const std::regex_error& e) {
+                return fail(std::string("bad regex: ") + e.what());
+            }
+            rules_.push_back(std::move(rule));
+        } else if (LowerPath(type) == "plugins") {
+            for (const char* ext : {".esp", ".esm", ".esl"}) {
+                Rule r = rule;
+                r.text = ext;
+                rules_.push_back(std::move(r));
+            }
+        } else if (type.find_first_of("*?.") != std::string::npos) {
+            rule.kind = Rule::Wildcard;
+            rule.text = LowerPath(type);
+            rules_.push_back(std::move(rule));
+        } else {
+            rule.text = "." + LowerPath(type);
+            rules_.push_back(std::move(rule));
+        }
+    }
+    return true;
+}
+
+const SearchFilters::Rule* SearchFilters::RuleFor(const std::string& name, const std::string& lowerName) const {
+    for (const Rule& r : rules_) {
+        bool fits = false;
+        switch (r.kind) {
+            case Rule::Extension:
+                fits = lowerName.size() >= r.text.size() && !lowerName.compare(lowerName.size() - r.text.size(), r.text.size(), r.text);
+                break;
+            case Rule::Wildcard:
+                fits = Wildcard(lowerName.c_str(), r.text.c_str());
+                break;
+            case Rule::Regex:
+                fits = std::regex_search(name, r.regex);
+                break;
+        }
+        if (fits) return &r;
+    }
+    return nullptr;
+}
+
+bool SearchFilters::Allows(const std::string& path) const {
+    const size_t slash = path.rfind('\\');
+    const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    const std::string lowerName = LowerPath(name);
+    for (const auto& e : excludes_)
+        if (Wildcard(lowerName.c_str(), e.c_str())) return false;
+    const Rule* r = RuleFor(name, lowerName);
+    if (!r) return true;
+    if (slash == std::string::npos) return r->dataRoot;
+    const std::string lower = LowerPath(path);
+    for (const auto& f : r->folders)
+        if (!lower.compare(0, f.size(), f)) return true;
+    return false;
+}
+
+bool SearchFilters::Narrow(const std::string& pattern, std::vector<std::string>* folders, bool* dataRoot) const {
+    // What the name must end with: the text after the last wildcard or folder.
+    const size_t cut = pattern.find_last_of("*?\\/");
+    const std::string tail = cut == std::string::npos ? pattern : pattern.substr(cut + 1);
+    if (tail.find('.') == std::string::npos) return false;
+    const Rule* r = RuleFor(tail, LowerPath(tail));
+    if (!r) return false;
+    folders->clear();
+    for (const auto& f : r->folders) {
+        std::string top = f.substr(0, f.find('\\'));
+        if (std::find(folders->begin(), folders->end(), top) == folders->end()) folders->push_back(top);
+    }
+    *dataRoot = r->dataRoot;
+    return true;
+}
+
 std::vector<AssetSearchRoot> StagingRoots(const std::wstring& staging) {
     const std::wstring dir = FullDir(staging);
     std::vector<AssetSearchRoot> out;
@@ -188,6 +322,19 @@ bool SearchAssets(const AssetSearchOptions& opt, AssetSearchResult* result, std:
         result->warnings.push_back(std::move(w));
     };
 
+    // A search for one kind of file only walks the folders that kind can be in.
+    std::vector<std::string> topFolders;
+    bool rootOnly = false;
+    if (opt.filters && !opt.bsaOnly) {
+        bool dataRoot = false;
+        if (opt.filters->Narrow(opt.pattern, &topFolders, &dataRoot)) {
+            std::sort(topFolders.begin(), topFolders.end());
+            rootOnly = dataRoot && topFolders.empty();
+            result->narrowedTo = topFolders;
+            result->narrowedToDataRoot = dataRoot;
+        }
+    }
+
     JobQueue queue;
     for (int i = 0; i < static_cast<int>(opt.roots.size()); ++i) queue.Push({i, L""});
     auto lister = [&] {
@@ -216,22 +363,26 @@ bool SearchAssets(const AssetSearchOptions& opt, AssetSearchResult* result, std:
                 for (;;) {
                     auto* e = reinterpret_cast<const FILE_ID_BOTH_DIR_INFO*>(p);
                     const std::wstring name(e->FileName, e->FileNameLength / sizeof(wchar_t));
-                    if (name != L"." && name != L".." && !ManagerMarker(name)) {
+                    if (name != L"." && name != L"..") {
                         if (e->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                            if (!(e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) queue.Push({job.root, job.rel + name + L"\\"});
+                            if (!(e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !opt.bsaOnly && !rootOnly &&
+                                (!job.rel.empty() || topFolders.empty() ||
+                                 std::binary_search(topFolders.begin(), topFolders.end(), LowerPath(Utf8(name)))))
+                                queue.Push({job.root, job.rel + name + L"\\"});
                         } else {
                             ++loose;
                             const Id id{volume, static_cast<uint64_t>(e->FileId.QuadPart)};
                             std::string shown = Utf8(job.rel + name);
                             std::string key = LowerPath(shown);
-                            if (job.rel.empty() && key.size() > 4 && !key.compare(key.size() - 4, 4, ".bsa")) {
+                            if (job.rel.empty() && key.size() > 4 && !key.compare(key.size() - 4, 4, ".bsa") &&
+                                (!opt.winnerRanks || opt.winnerRanks->count(key))) {
                                 Archive a;
                                 a.path = dir + name;
                                 a.name = shown;
                                 a.roots.push_back(job.root);
                                 found.push_back({id, std::move(a)});
                             }
-                            if (AssetPathMatches(key, pattern)) {
+                            if (!opt.bsaOnly && AssetPathMatches(key, pattern) && (!opt.filters || opt.filters->Allows(shown))) {
                                 Hit hit;
                                 hit.key = std::move(key);
                                 hit.shown = std::move(shown);
@@ -289,7 +440,7 @@ bool SearchAssets(const AssetSearchOptions& opt, AssetSearchResult* result, std:
                 rel.append(name);
                 std::string shown = TextToUtf8(reinterpret_cast<const uint8_t*>(rel.data()), rel.size());
                 std::string key = LowerPath(shown);
-                if (!AssetPathMatches(key, pattern)) continue;
+                if (!AssetPathMatches(key, pattern) || (opt.filters && !opt.filters->Allows(shown))) continue;
                 Hit hit;
                 hit.key = std::move(key);
                 hit.shown = std::move(shown);
@@ -314,6 +465,24 @@ bool SearchAssets(const AssetSearchOptions& opt, AssetSearchResult* result, std:
         std::map<std::pair<bool, Id>, AssetSearchCopy> copies;
         std::map<std::pair<bool, Id>, std::vector<int>> where;
     };
+    // Loose first, then the highest-ranked loaded archive, as the game does.
+    auto keepWinner = [&](Merged& m) {
+        auto best = m.copies.end();
+        int bestRank = -1;
+        for (auto it = m.copies.begin(); it != m.copies.end(); ++it) {
+            if (it->second.archive.empty()) {
+                best = it;
+                break;
+            }
+            auto rank = opt.winnerRanks->find(LowerPath(it->second.archive));
+            if (rank != opt.winnerRanks->end() && rank->second > bestRank) {
+                bestRank = rank->second;
+                best = it;
+            }
+        }
+        for (auto it = m.copies.begin(); it != m.copies.end();)
+            it = it == best ? std::next(it) : m.copies.erase(it);
+    };
     std::unordered_map<std::string, Merged> byPath;
     byPath.reserve(hits.size());
     for (auto& h : hits) {
@@ -335,6 +504,10 @@ bool SearchAssets(const AssetSearchOptions& opt, AssetSearchResult* result, std:
     }
     auto rootLess = [&](int a, int b) { return a < b; };  // Data comes first, then mods by name
     for (auto& [key, m] : byPath) {
+        if (opt.winnerRanks) {
+            keepWinner(m);
+            if (m.copies.empty()) continue;
+        }
         AssetSearchFile f;
         f.path = m.shown;
         std::vector<std::pair<int, AssetSearchCopy>> ordered;

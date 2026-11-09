@@ -391,7 +391,8 @@ even without the ESL flag.
     ...
 )HELP";
 
-const char kHelpSearch[] = R"HELP(skqe search <text or wildcard> [--all] [options]
+const char kHelpSearch[] = R"HELP(skqe search <text or wildcard> [--all | --winner] [--anywhere | --bsa-only] [options]
+skqe search --show-filters
 
 Finds files by name, including the files packed in BSAs. It only reads. Plain
 text matches anywhere in the path, ignoring case. With * or ? it's a wildcard
@@ -399,6 +400,14 @@ over the file name, or over the whole path if it has a \ or /.
 
   --all             also search the staging folder: every mod folder and the
                     BSAs directly inside each.
+  --winner          Data only: for each path, the one copy the game uses. A
+                    loose file wins, else the last-loaded archive holding it.
+                    A path only in archives the game doesn't load isn't listed.
+  --load-order <f>  with --winner: plugins.txt. Default: the game's own, else
+                    every plugin in Data.
+  --anywhere        ignore the filters below.
+  --bsa-only        only the files packed in BSAs, ignoring the filters. Loose
+                    folders aren't walked.
   --data <folder>   the Data folder. Default: the saved one, else the installed game.
   --staging <folder>  the staging folder, for this search. Implies --all.
                     Default: the saved one, else `skqe staging` finds it.
@@ -420,6 +429,16 @@ Copies that are separate files stay separate, even with the same contents.
     in Skyrim - Textures3.bsa: Data
 
 The file and copy counts go to stderr, so the output stays clean.
+
+FILTERS
+A file type is looked for only in its usual folders: .dds in textures, .pex in
+scripts, plugins directly in Data. A search for one type (*.dds, iron.dds) walks
+only those folders, which is much faster. A type with no rule is searched for
+everywhere. A file in an unusual place needs --anywhere.
+
+The rules are in search_filters.txt, next to skqe.exe. To change them, copy it
+to %LOCALAPPDATA%\\skqe\\search_filters.txt and edit the copy. --show-filters
+says which file is in use.
 )HELP";
 
 const char kHelpStaging[] = R"HELP(skqe staging [--data <folder>] [--manager vortex|mo2] [--json]
@@ -1047,8 +1066,9 @@ int BuildDbCommand(int argc, wchar_t** argv) {
 
 int SearchCommand(int argc, wchar_t** argv) {
     std::wstring data, staging;
+    std::wstring loadOrder;
     std::string manager, pattern;
-    bool json = false, all = false;
+    bool json = false, all = false, winner = false, anywhere = false, bsaOnly = false, showFilters = false;
     int threads = 0;
     size_t limit = 0;
     for (int i = 2; i < argc; ++i) {
@@ -1059,7 +1079,12 @@ int SearchCommand(int argc, wchar_t** argv) {
         else if (a == "--manager" && hasNext) manager = Utf8(argv[++i]);
         else if (a == "--limit" && hasNext) limit = static_cast<size_t>(_wtoi64(argv[++i]));
         else if (a == "--threads" && hasNext) threads = _wtoi(argv[++i]);
+        else if (a == "--load-order" && hasNext) loadOrder = argv[++i];
         else if (a == "--all") all = true;
+        else if (a == "--winner") winner = true;
+        else if (a == "--anywhere") anywhere = true;
+        else if (a == "--bsa-only") bsaOnly = true;
+        else if (a == "--show-filters") showFilters = true;
         else if (a == "--json") json = true;
         else if (a.rfind("--", 0) == 0) {
             fprintf(stderr, "search: unknown option %s (skqe search --help)\n", a.c_str());
@@ -1070,13 +1095,48 @@ int SearchCommand(int argc, wchar_t** argv) {
             return 2;
         }
     }
-    if (pattern.empty()) {
+    if (winner && all) {
+        fprintf(stderr, "search: --winner looks only in Data, so it can't be used with --all or --staging\n");
+        return 2;
+    }
+    if (winner && bsaOnly) {
+        fprintf(stderr, "search: --winner looks at loose files first, so it can't be used with --bsa-only\n");
+        return 2;
+    }
+    if (pattern.empty() && !showFilters) {
         fprintf(stderr, "search: what to search for? (skqe search --help)\n");
         return 2;
     }
     const StagingEnv env = CurrentStagingEnv();
     std::wstring dataDir;
     std::string err;
+
+    // A user's own copy, so an update can't replace it, else the one that ships.
+    std::wstring filtersFile = env.localAppData + L"\\skqe\\search_filters.txt";
+    if (GetFileAttributesW(filtersFile.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        wchar_t exe[MAX_PATH * 2];
+        GetModuleFileNameW(nullptr, exe, MAX_PATH * 2);
+        filtersFile = exe;
+        filtersFile = filtersFile.substr(0, filtersFile.find_last_of(L'\\') + 1) + L"search_filters.txt";
+    }
+    SearchFilters filters;
+    bool haveFilters = false;
+    if (GetFileAttributesW(filtersFile.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        if (!filters.LoadFile(filtersFile, &err)) {
+            fprintf(stderr, "search: %s\n", err.c_str());
+            return 1;
+        }
+        haveFilters = true;
+    }
+    if (showFilters) {
+        if (!haveFilters) {
+            printf("no search_filters.txt found; searches use no filters\n");
+            return 0;
+        }
+        printf("%s\n%zu rules, %zu excluded names\n", Utf8(filtersFile).c_str(), filters.RuleCount(), filters.ExcludeCount());
+        return 0;
+    }
+    if (!haveFilters && !anywhere && !bsaOnly) fprintf(stderr, "warning: no search_filters.txt found, so nothing is filtered\n");
     if (!ResolveDataFolder(data, env, &dataDir, &err)) {
         fprintf(stderr, "search: %s\n", err.c_str());
         return 1;
@@ -1085,6 +1145,20 @@ int SearchCommand(int argc, wchar_t** argv) {
     opt.pattern = pattern;
     opt.threads = threads;
     opt.roots.push_back({dataDir, "Data"});
+    opt.bsaOnly = bsaOnly;
+    if (haveFilters && !anywhere && !bsaOnly) opt.filters = &filters;
+    std::unordered_map<std::string, int> ranks;
+    if (winner) {
+        if (loadOrder.empty()) {
+            const std::wstring own = env.localAppData + L"\\Skyrim Special Edition\\plugins.txt";
+            if (GetFileAttributesW(own.c_str()) != INVALID_FILE_ATTRIBUTES) loadOrder = own;
+        }
+        if (!LoadedArchiveRanks(dataDir, loadOrder, &ranks, &err)) {
+            fprintf(stderr, "search: %s\n", err.c_str());
+            return 1;
+        }
+        opt.winnerRanks = &ranks;
+    }
     if (all) {
         std::wstring root = staging, overwrite;
         if (root.empty()) {
@@ -1148,6 +1222,11 @@ int SearchCommand(int argc, wchar_t** argv) {
     fwrite(out.data(), 1, out.size(), stdout);
     fflush(stdout);
     for (const auto& w : r.warnings) fprintf(stderr, "warning: %s\n", w.c_str());
+    if (r.narrowedToDataRoot || !r.narrowedTo.empty()) {
+        std::string where = r.narrowedToDataRoot ? "Data's top folder" : "";
+        for (const auto& f : r.narrowedTo) where += (where.empty() ? "" : ", ") + f;
+        fprintf(stderr, "filter: looked only in %s (--anywhere to search everywhere)\n", where.c_str());
+    }
     fprintf(stderr, "%zu paths, %zu distinct copies%s; %lld hardlinks merged; searched %lld loose files and %lld packed in %lld BSAs in %.2f s\n",
             total, copies, shown < total ? " (output limited)" : "", static_cast<long long>(r.hardlinksMerged),
             static_cast<long long>(r.looseScanned), static_cast<long long>(r.packedScanned),

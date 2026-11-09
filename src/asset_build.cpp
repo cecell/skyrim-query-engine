@@ -979,6 +979,36 @@ bool ReadMo2(const std::wstring& instance, const std::wstring& profile, Mo2Layou
 
 }  // namespace
 
+bool LoadedArchiveRanks(const std::wstring& dataIn, const std::wstring& loadOrderFile,
+                        std::unordered_map<std::string, int>* ranks, std::string* error) {
+    const std::wstring data = FullDir(dataIn);
+    BuildOptions lo;
+    lo.data = data;
+    lo.loadOrderFile = loadOrderFile;
+    std::string err;
+    const std::vector<std::string> order = LoadOrder(lo, nullptr, &err);
+    if (!err.empty()) {
+        *error = err;
+        return false;
+    }
+    std::vector<std::string> names;
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileExW((data + L"*.bsa").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr,
+                                FIND_FIRST_EX_LARGE_FETCH);
+    if (f != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) names.push_back(Utf8(fd.cFileName));
+        } while (FindNextFileW(f, &fd));
+        FindClose(f);
+    }
+    std::vector<std::wstring> iniDirs;
+    const std::wstring docs = DocumentsDir();
+    if (!docs.empty()) iniDirs.push_back(docs + L"\\My Games\\Skyrim Special Edition\\");
+    std::string source;
+    for (const auto& a : assets::PlanArchives(names, IniArchives(iniDirs, &source), order)) (*ranks)[Lower(a.name)] = a.rank;
+    return true;
+}
+
 std::vector<std::pair<std::string, std::string>> AssetExtras() {
     std::vector<std::pair<std::string, std::string>> out;
     for (const auto& e : kAssetExtras) out.push_back({e.name, e.description});

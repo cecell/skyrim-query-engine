@@ -209,6 +209,15 @@ It searches `Data` and the BSAs in it by default. `--all` adds the staging folde
 with its distinct copies, so a file hardlinked between `Data` and a mod shows as one copy found in both.
 Separate files with the same contents stay separate.
 
+`--winner` looks only in `Data` and returns the one copy of each path the game uses: the loose file, else the
+copy in the last-loaded archive. A path found only in archives the game doesn't load isn't listed.
+
+Each kind of file is looked for only in its usual folders: `.dds` in `textures`, `.pex` in `scripts`, plugins
+directly in `Data`. A search for one kind of file, like `*.dds`, then walks only those folders. A kind with no
+rule is searched for everywhere. `--anywhere` ignores the rules, and `--bsa-only` searches only inside BSAs,
+also ignoring them. The rules are in `search_filters.txt` next to `skqe.exe`. To change them, copy it to
+`%LOCALAPPDATA%\skqe\search_filters.txt` and edit the copy.
+
 ## `skqe build-assets`: every asset file as one SQLite database
 
 ```
