@@ -12,7 +12,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 include(FetchContent)
 FetchContent_Declare(bsa_reader
     GIT_REPOSITORY https://github.com/cecell/bsa-reader.git
-    GIT_TAG bbff0cbc5cd04d39bb3b50c470c579669c027dbf)  # v0.1.1
+    GIT_TAG 88e40b4022050d0ea7d850a7804c56dcca58b77f)  # v0.1.1
 FetchContent_MakeAvailable(bsa_reader)
 # beth-asset-metadata (GPL-3.0, github.com/cecell/beth-asset-metadata): DDS,
 # TGA, NIF (header and texture paths), WAV / XWM / FUZ header facts for
@@ -20,7 +20,7 @@ FetchContent_MakeAvailable(bsa_reader)
 # then bump this pin.
 FetchContent_Declare(asset_metadata
     GIT_REPOSITORY https://github.com/cecell/beth-asset-metadata.git
-    GIT_TAG 9d0c51a3cb43866d9e0e2118a6f73a2c83074057)  # v0.4.0
+    GIT_TAG 1a9a77786d94aa5188ec28bdbd6da011053d348f)  # v0.4.0
 FetchContent_MakeAvailable(asset_metadata)
 
 add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
