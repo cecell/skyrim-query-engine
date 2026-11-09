@@ -5,7 +5,8 @@
 
 The first upload creates the file on the page; later ones add a version of it, and the old version
 moves to Old files. The page's version number follows the file. The per-file note is the release's
-first line, the zip's SHA-256 and, when given, the VirusTotal report. The changelog comes from the
+first line and the zip's SHA-256 (VirusTotal links are long and stay in the GitHub release notes).
+The changelog comes from the
 release notes: the first line, then each section heading and bullet, with Markdown stripped, except
 the "Upgrading..." and "Verification" sections. The page's own text is never touched. Re-running is
 safe: a version already there isn't uploaded again, and one with changelog entries gets no more.
@@ -106,7 +107,6 @@ def main() -> int:
     ap.add_argument("--tag", required=True, help="release tag, e.g. v0.90")
     ap.add_argument("--zip", required=True, type=Path, help="the release zip, uploaded unchanged")
     ap.add_argument("--notes", required=True, type=Path, help="the release notes (Markdown)")
-    ap.add_argument("--virustotal", default="", help="link to the zip's VirusTotal report")
     ap.add_argument("--dry-run", action="store_true", help="read only: show what would be uploaded")
     a = ap.parse_args()
 
@@ -115,8 +115,6 @@ def main() -> int:
     sha = hashlib.sha256(data).hexdigest()
     summary, changelog = parse_notes(a.notes.read_text(encoding="utf-8"))
     note = f"{summary} SHA-256 of this zip: {sha}."
-    if a.virustotal:
-        note += f" VirusTotal: {a.virustotal}"
 
     mod_id = call("GET", f"{V3}/games/{GAME}/mods/{MOD}")["data"]["id"]
     groups = call("GET", f"{V3}/mods/{mod_id}/files")["data"]["mod_files"]

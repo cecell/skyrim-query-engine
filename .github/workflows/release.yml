@@ -36,7 +36,6 @@ jobs:
       MSVC_TOOLSET: "14.44"
     outputs:
       version: ${{ steps.version.outputs.version }}
-      virustotal: ${{ steps.scan.outputs.zip_report }}
     steps:
       - uses: actions/checkout@v5
 
@@ -126,7 +125,6 @@ jobs:
           $details = @()
           foreach ($s in $scans) {
             $link = "https://www.virustotal.com/gui/file/$($s.Sha)"
-            if ($s.File -like '*.zip') { "zip_report=$link" >> $env:GITHUB_OUTPUT }
             if (-not $s.Analysis) { $md += "| ``$($s.File)`` | ``$($s.Sha)`` | [still running]($link) |"; continue }
             $st = $s.Analysis.stats
             $flagged = $st.malicious + $st.suspicious
@@ -165,7 +163,6 @@ jobs:
       VERSION: ${{ needs.build.outputs.version }}
       GH_TOKEN: ${{ github.token }}
       NEXUS_API_KEY: ${{ secrets.NEXUS_API_KEY }}
-      VT_LINK: ${{ needs.build.outputs.virustotal }}
       # Only a tag publishes. A manual run stops at the dry run below.
       PUBLISH: ${{ github.ref_type == 'tag' }}
     steps:
@@ -189,6 +186,6 @@ jobs:
 
       - name: Upload to Nexus Mods
         run: |
-          args=(--tag "v$VERSION" --zip "dist/skqe-$VERSION.zip" --notes dist-notes.md --virustotal "$VT_LINK")
+          args=(--tag "v$VERSION" --zip "dist/skqe-$VERSION.zip" --notes dist-notes.md)
           if [ "$PUBLISH" != "true" ]; then args+=(--dry-run); fi
           python3 tools/nexus_release.py "${args[@]}"
