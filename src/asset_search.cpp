@@ -73,6 +73,37 @@ bool Wildcard(const char* s, const char* p) {
     return !*p;
 }
 
+// A regex can say folders with /, so nobody has to write \\ for a backslash.
+std::string RegexWithBackslashes(const std::string& pattern) {
+    std::string out;
+    for (size_t i = 0; i < pattern.size(); ++i) {
+        if (pattern[i] == '\\' && i + 1 < pattern.size()) {
+            out += pattern[i];
+            out += pattern[++i];
+        } else if (pattern[i] == '/') {
+            out += "\\\\";
+        } else {
+            out += pattern[i];
+        }
+    }
+    return out;
+}
+
+// The extension a regex must end in, like \.pex$, as text the filters can
+// narrow on. Empty if it can end in anything else.
+std::string RegexSuffix(const std::string& pattern) {
+    if (pattern.find('|') != std::string::npos) return {};
+    std::string p = pattern;
+    if (!p.empty() && p.back() == '$') p.pop_back();
+    const size_t dot = p.rfind("\\.");
+    if (dot == std::string::npos) return {};
+    const std::string ext = p.substr(dot + 2);
+    if (ext.empty()) return {};
+    for (char c : ext)
+        if (!std::isalnum(static_cast<unsigned char>(c))) return {};
+    return "." + ext;
+}
+
 struct Id {
     uint32_t volume = 0;
     uint64_t file = 0;
@@ -136,7 +167,15 @@ private:
 
 bool AssetPathMatches(const std::string& path, const std::string& pattern) {
     if (pattern.find_first_of("*?") == std::string::npos) return path.find(pattern) != std::string::npos;
-    if (pattern.find('\\') != std::string::npos) return Wildcard(path.c_str(), pattern.c_str());
+    if (pattern.find('\\') != std::string::npos) {
+        // From any folder down: armor\iron* finds textures\armor\iron.dds.
+        for (size_t at = 0;;) {
+            if (Wildcard(path.c_str() + at, pattern.c_str())) return true;
+            at = path.find('\\', at);
+            if (at == std::string::npos) return false;
+            ++at;
+        }
+    }
     const size_t slash = path.rfind('\\');
     return Wildcard(path.c_str() + (slash == std::string::npos ? 0 : slash + 1), pattern.c_str());
 }
@@ -303,6 +342,23 @@ bool SearchAssets(const AssetSearchOptions& opt, AssetSearchResult* result, std:
         *error = "nothing to search for";
         return false;
     }
+    std::regex compiled;
+    if (opt.regex) {
+        try {
+            compiled = std::regex(RegexWithBackslashes(opt.pattern), std::regex::ECMAScript | std::regex::icase | std::regex::optimize);
+        } catch (const std::regex_error& e) {
+            *error = std::string("bad regex: ") + e.what();
+            return false;
+        }
+    }
+    auto matches = [&](const std::string& key) {
+        if (!opt.regex) return AssetPathMatches(key, pattern);
+        try {
+            return std::regex_search(key, compiled);
+        } catch (const std::regex_error&) {
+            return false;  // too complex for this one path
+        }
+    };
     std::vector<std::wstring> bases;
     for (const auto& r : opt.roots) {
         bases.push_back(LongPath(FullDir(r.path)));
@@ -327,7 +383,7 @@ bool SearchAssets(const AssetSearchOptions& opt, AssetSearchResult* result, std:
     bool rootOnly = false;
     if (opt.filters && !opt.bsaOnly) {
         bool dataRoot = false;
-        if (opt.filters->Narrow(opt.pattern, &topFolders, &dataRoot)) {
+        if (opt.filters->Narrow(opt.regex ? RegexSuffix(opt.pattern) : opt.pattern, &topFolders, &dataRoot)) {
             std::sort(topFolders.begin(), topFolders.end());
             rootOnly = dataRoot && topFolders.empty();
             result->narrowedTo = topFolders;
@@ -382,7 +438,7 @@ bool SearchAssets(const AssetSearchOptions& opt, AssetSearchResult* result, std:
                                 a.roots.push_back(job.root);
                                 found.push_back({id, std::move(a)});
                             }
-                            if (!opt.bsaOnly && AssetPathMatches(key, pattern) && (!opt.filters || opt.filters->Allows(shown))) {
+                            if (!opt.bsaOnly && matches(key) && (!opt.filters || opt.filters->Allows(shown))) {
                                 Hit hit;
                                 hit.key = std::move(key);
                                 hit.shown = std::move(shown);
@@ -440,7 +496,7 @@ bool SearchAssets(const AssetSearchOptions& opt, AssetSearchResult* result, std:
                 rel.append(name);
                 std::string shown = TextToUtf8(reinterpret_cast<const uint8_t*>(rel.data()), rel.size());
                 std::string key = LowerPath(shown);
-                if (!AssetPathMatches(key, pattern) || (opt.filters && !opt.filters->Allows(shown))) continue;
+                if (!matches(key) || (opt.filters && !opt.filters->Allows(shown))) continue;
                 Hit hit;
                 hit.key = std::move(key);
                 hit.shown = std::move(shown);

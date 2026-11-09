@@ -969,6 +969,10 @@ void TestSearch() {
     CHECK(AssetPathMatches("textures\\a\\iron.dds", "ir?n.*"));
     CHECK(!AssetPathMatches("textures\\a\\iron.dds", "textures*"));  // no \: file name only
     CHECK(AssetPathMatches("textures\\a\\iron.dds", "textures\\*\\iron.dds"));
+    CHECK(AssetPathMatches("textures\\a\\iron.dds", "a\\iron*"));               // from any folder down
+    CHECK(AssetPathMatches("textures\\a\\iron.dds", "textures\\a\\ir*.dds"));
+    CHECK(!AssetPathMatches("textures\\a\\iron.dds", "b\\iron*"));
+    CHECK(!AssetPathMatches("textures\\a\\iron.dds", "ures\\a\\iron*"));      // whole folder names only
 
     const std::wstring root = FixtureDir() + L"search\\";
     RemoveFixture(root);
@@ -1023,6 +1027,21 @@ void TestSearch() {
     r = AssetSearchResult();
     CHECK(SearchAssets(opt, &r, &err));
     CHECK(r.files.size() == 1 && r.files[0].path == "textures\\other.dds" && r.warnings.size() == 1);
+
+    // A regex: the whole path, any case, / between folders, classes intact.
+    auto regexHits = [&](const char* p) {
+        opt.pattern = p;
+        opt.regex = true;
+        r = AssetSearchResult();
+        const bool ok = SearchAssets(opt, &r, &err);
+        opt.regex = false;
+        return ok ? static_cast<int>(r.files.size()) : -1;
+    };
+    CHECK(regexHits("TEXTURES/IRON\\.DDS$") == 1);
+    CHECK(regexHits("textures/o.*\\.dds$") == 1);
+    CHECK(regexHits("^iron") == 0);
+    CHECK(regexHits("\\D+\\.dds$") >= 1);                                       // \D must not become \d
+    CHECK(regexHits("[unclosed") == -1 && err.find("bad regex") != std::string::npos);
 
     opt.pattern = "";
     CHECK(!SearchAssets(opt, &r, &err));
@@ -1087,6 +1106,18 @@ void TestSearchFilters() {
     CHECK(!bad.Parse("regex: [, data\n", &err) && err.find("bad regex") != std::string::npos);
     CHECK(!bad.Parse("pex, a;;b\n", &err));
 
+    // The file that ships: any case fits the last rule, while seasons' lines win over it.
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring shipped = exe;
+    shipped = shipped.substr(0, shipped.find_last_of(L"\\") + 1) + L"search_filters.txt";
+    SearchFilters ship;
+    CHECK(ship.LoadFile(shipped, &err));
+    CHECK(ship.Allows("Foo_DISTR.ini") && ship.Allows("foo_distr.ini"));
+    CHECK(!ship.Allows("sub\\Foo_DISTR.ini") && !ship.Allows("sub\\foo_distr.ini"));
+    CHECK(ship.Allows("seasons\\foo_sum.ini") && !ship.Allows("foo_sum.ini"));
+    CHECK(ship.Narrow("*_distr.ini", &folders, &root) && folders.empty() && root);
+
     // On real files: the rules, then the bypasses, then winners.
     const std::wstring root2 = FixtureDir() + L"filters\\";
     RemoveFixture(root2);
@@ -1112,6 +1143,11 @@ void TestSearchFilters() {
     };
     AssetSearchResult r;
     CHECK(run("*.pex", &r) && r.files.size() == 1 && r.files[0].path == "scripts\\good.pex");
+    opt.regex = true;
+    CHECK(run("\\.pex$", &r) && r.files.size() == 1 && r.narrowedTo == std::vector<std::string>{"scripts"});  // narrows too
+    CHECK(run("(a|good)\\.pex$", &r) && r.narrowedTo.empty() && r.files.size() == 1);                          // can't tell: walks all
+    opt.regex = false;
+    CHECK(run("*.pex", &r) && r.files.size() == 1);
     CHECK(r.narrowedTo == std::vector<std::string>{"scripts"});
     CHECK(r.looseScanned < 9);                               // textures and meshes weren't walked
     CHECK(run("vortex", &r) && r.files.empty());             // excluded

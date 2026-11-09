@@ -48,8 +48,10 @@ private:
 
 struct AssetSearchOptions {
     std::vector<AssetSearchRoot> roots;
-    std::string pattern;  // case-insensitive. Text anywhere in the path, or with * and ?
-                          // a wildcard over the whole path (the file name if it has no \ or /)
+    std::string pattern;  // case-insensitive. Text anywhere in the path; or with * and ?, a
+                          // wildcard on the file name, or if it has a \ or / on the path
+                          // from any folder down; or a regex if `regex` is set
+    bool regex = false;   // the pattern is a regular expression, searched for in the whole path
     int threads = 0;      // 0 = one per logical core
     const SearchFilters* filters = nullptr;  // null = no rules
     bool bsaOnly = false;                    // only the files packed in BSAs

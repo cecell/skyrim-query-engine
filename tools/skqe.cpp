@@ -394,9 +394,13 @@ even without the ESL flag.
 const char kHelpSearch[] = R"HELP(skqe search <text or wildcard> [--all | --winner] [--anywhere | --bsa-only] [options]
 skqe search --show-filters
 
-Finds files by name, including the files packed in BSAs. It only reads. Plain
-text matches anywhere in the path, ignoring case. With * or ? it's a wildcard
-over the file name, or over the whole path if it has a \ or /.
+Finds files by name, including the files packed in BSAs. It only reads. Case
+never matters. Plain text matches anywhere in the path, folders included. With
+* or ? it's a wildcard on the file name, or if it has a \ or / on the path from
+any folder down, so armor\iron* finds textures\armor\iron.dds.
+
+  --regex           the text is a regular expression, searched for in the whole
+                    path. Use / between folders.
 
   --all             also search the staging folder: every mod folder and the
                     BSAs directly inside each.
@@ -422,7 +426,8 @@ Copies that are separate files stay separate, even with the same contents.
 
   skqe search "barenziah"
   skqe search "*.hkx" --all --limit 50
-  skqe search "textures\armor\iron*" --json
+  skqe search "armor\iron*.dds" --json
+  skqe search "armor/iron.*_[nm]\.dds$" --regex
 
   textures\armor\iron\cuirass.dds
     loose: Data, Some Armor Mod
@@ -437,7 +442,7 @@ only those folders, which is much faster. A type with no rule is searched for
 everywhere. A file in an unusual place needs --anywhere.
 
 The rules are in search_filters.txt, next to skqe.exe. To change them, copy it
-to %LOCALAPPDATA%\\skqe\\search_filters.txt and edit the copy. --show-filters
+to %LOCALAPPDATA%\skqe\search_filters.txt and edit the copy. --show-filters
 says which file is in use.
 )HELP";
 
@@ -1068,7 +1073,7 @@ int SearchCommand(int argc, wchar_t** argv) {
     std::wstring data, staging;
     std::wstring loadOrder;
     std::string manager, pattern;
-    bool json = false, all = false, winner = false, anywhere = false, bsaOnly = false, showFilters = false;
+    bool json = false, all = false, winner = false, anywhere = false, bsaOnly = false, showFilters = false, regex = false;
     int threads = 0;
     size_t limit = 0;
     for (int i = 2; i < argc; ++i) {
@@ -1081,6 +1086,7 @@ int SearchCommand(int argc, wchar_t** argv) {
         else if (a == "--threads" && hasNext) threads = _wtoi(argv[++i]);
         else if (a == "--load-order" && hasNext) loadOrder = argv[++i];
         else if (a == "--all") all = true;
+        else if (a == "--regex") regex = true;
         else if (a == "--winner") winner = true;
         else if (a == "--anywhere") anywhere = true;
         else if (a == "--bsa-only") bsaOnly = true;
@@ -1146,6 +1152,7 @@ int SearchCommand(int argc, wchar_t** argv) {
     opt.threads = threads;
     opt.roots.push_back({dataDir, "Data"});
     opt.bsaOnly = bsaOnly;
+    opt.regex = regex;
     if (haveFilters && !anywhere && !bsaOnly) opt.filters = &filters;
     std::unordered_map<std::string, int> ranks;
     if (winner) {

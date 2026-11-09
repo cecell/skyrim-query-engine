@@ -43,6 +43,6 @@ xml, calientetools;skse;pandora_engine;meshes;dialogueviews
 *_VSU.ini, vsu
 
 # This one must stay last.
-regex: _[A-Z]{3,5}\.ini, data
+regex: _[A-Za-z]{3,5}\.ini, data
 
 exclude: __folder_managed_by_vortex

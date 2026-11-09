@@ -202,8 +202,13 @@ every later command, and they beat detection. `--show` lists them and `--clear` 
 ```
 skqe search "iron*.dds"
 skqe search barenziah --all
-skqe search "textures\\armor\\iron*" --json
+skqe search "armor\iron*.dds" --json
+skqe search "armor/iron.*_[nm]\.dds$" --regex
 ```
+
+Case never matters. Plain text matches anywhere in the path, folders included. A wildcard matches the file name,
+or if it has a folder in it, the path from any folder down. `--regex` searches the whole path and takes `/`
+between folders.
 
 It searches `Data` and the BSAs in it by default. `--all` adds the staging folder. Each path is listed once
 with its distinct copies, so a file hardlinked between `Data` and a mod shows as one copy found in both.
