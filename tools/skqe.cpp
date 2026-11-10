@@ -559,8 +559,8 @@ is one list, and each row also says "plugin" (a leading plugin column in CSV).
                           stored); Data Size, Form Version and Version Control
                           Info are not fields here. Everything else is compared
                           as it reads, capitals and list order included. This is
-                          not xEdit's conflict status (see `skqe conflict`), which
-                          has a longer list of ignored fields.
+                          not xEdit's conflict status, which has a longer list of
+                          ignored fields.
                           A form named with --form always answers, with empty
                           "fields" if nothing differs; a --type sweep leaves
                           out forms with no difference. --fields limits what
