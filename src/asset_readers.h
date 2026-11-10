@@ -1,5 +1,5 @@
 // Header facts of the asset types beth-asset-metadata does not read (Papyrus
-// .pex, Havok .hkx, FaceGen .tri), the texture paths a .nif expects, and the
+// .pex, FaceGen .tri), the texture paths a .nif expects, and the
 // path conventions build-assets relies on (normalized paths, kinds, voice and
 // FaceGen file names, ini archive lists).
 //
@@ -66,16 +66,6 @@ struct PexInfo {
 };
 constexpr size_t kPexMaxBytes = size_t{16} << 20;
 bool ReadPex(const uint8_t* d, size_t n, PexInfo* out, std::string* error);
-
-// ---- Havok .hkx packfile ----
-
-struct HkxInfo {
-    std::string havokVersion;  // contents version: "hk_2010.2.0-r1"
-    int pointerSize = 0;       // 4 (LE) or 8 (SE)
-    bool valid = false;        // a binary packfile the game can load
-};
-constexpr size_t kHkxProbeBytes = 64;
-bool ReadHkx(const uint8_t* d, size_t n, HkxInfo* out, std::string* error);
 
 // ---- .tri: FaceGen (FRTRI003) and BodySlide (PIRT) morphs ----
 

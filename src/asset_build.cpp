@@ -29,11 +29,12 @@
 namespace skqe {
 namespace {
 
-constexpr int kAssetSchemaVersion = 1;
+constexpr int kAssetSchemaVersion = 2;
 constexpr size_t kBatchRows = 20000;
 // Header reads: how much of a file a reader may need. Whole files are read
 // for NIF texture paths, PEX and TRI (names at the end), up to these caps.
 constexpr size_t kAudioProbe = asset::kAudioProbeBytes;
+constexpr size_t kHkxMax = size_t{64} << 20;
 constexpr size_t kAudioMax = size_t{64} << 20;
 constexpr size_t kPackedMax = size_t{128} << 20;  // largest packed file decompressed for headers / hash
 constexpr size_t kHashChunk = size_t{1} << 20;
@@ -244,10 +245,10 @@ void WalkRoot(Root* root, std::vector<Loose>* out, int rootIndex, std::atomic<in
 
 // ---- Rows flowing from the read workers to the writer ----
 
-enum Table { kArchives, kDds, kTga, kNif, kNifTextures, kAudio, kPex, kHkx, kTri, kTriMorphs, kTableCount };
+enum Table { kArchives, kDds, kTga, kNif, kNifTextures, kAudio, kPex, kHkx, kTri, kTriMorphs, kLip, kTableCount };
 const char* kTableNames[kTableCount] = {"archives", "dds", "tga", "nif", "nif_textures", "audio", "pex", "hkx", "tri",
-                                        "tri_morphs"};
-const int kTableColumns[kTableCount] = {9, 11, 7, 9, 6, 9, 3, 5, 7, 4};
+                                        "tri_morphs", "lip"};
+const int kTableColumns[kTableCount] = {9, 11, 7, 9, 6, 10, 3, 10, 7, 4, 3};
 
 struct FileRow {
     int64_t id = 0;
@@ -281,7 +282,8 @@ Cell OptText(const std::string& s) { return s.empty() ? Cell() : Cell::Text(s); 
 size_t BytesNeeded(const std::string& ext) {
     if (ext == "dds") return asset::kDdsProbeBytes;
     if (ext == "tga") return asset::kTgaProbeBytes;
-    if (ext == "hkx") return assets::kHkxProbeBytes;
+    if (ext == "hkx") return kHkxMax;  // animations / behaviours: the whole packfile
+    if (ext == "lip") return 64;
     if (ext == "wav" || ext == "xwm" || ext == "fuz") return kAudioProbe;
     if (ext == "nif") return asset::kNifMaxBytes;  // the game label needs the skin partitions too
     if (ext == "pex") return assets::kPexMaxBytes;
@@ -350,11 +352,13 @@ std::string ReadFacts(int64_t id, const std::string& ext, const uint8_t* d, size
                          : engine == asset::NifEngine::SkyrimLe       ? "le"
                          : engine == asset::NifEngine::SkyrimEither   ? "both"
                                                                       : "unknown";
-        // vertex_count / triangle_count: not in beth-asset-metadata yet.
+        // Counts only when every shape's layout checked out.
+        const bool counted = ts == asset::Status::Ok && body.shapesUnread == 0;
         rows->push_back({kNif,
                          {Cell::Int(id), Cell::Text(asset::nif_version_string(i.version)), Cell::Int(i.userVersion),
-                          OptInt(i.hasBsHeader, i.bsVersion), Cell::Int(i.blockCount), Cell::Int(shapes), Cell(),
-                          Cell(), Cell::Text(game)}});
+                          OptInt(i.hasBsHeader, i.bsVersion), Cell::Int(i.blockCount), Cell::Int(shapes),
+                          OptInt(counted, static_cast<int64_t>(body.vertices)),
+                          OptInt(counted, static_cast<int64_t>(body.triangles)), Cell::Text(game)}});
         if (ts != asset::Status::Ok && i.engine != asset::NifEngine::Unknown) return st(ts, "nif body");
         if (textures) {
             int64_t idx = 0;
@@ -376,12 +380,21 @@ std::string ReadFacts(int64_t id, const std::string& ext, const uint8_t* d, size
             return {};
         }
         if (s != asset::Status::Ok) return st(s, "audio");
+        // A FUZ's lip block follows its 12-byte header.
+        asset::LipInfo lip;
+        const bool lipOk = i.container == asset::AudioContainer::Fuz && i.lipBytes >= 16 && 12 + uint64_t{i.lipBytes} <= n &&
+                           asset::read_lip(d + 12, i.lipBytes, lip) == asset::Status::Ok;
         rows->push_back({kAudio,
                          {Cell::Int(id), Cell::Text(asset::to_string(i.container)),
                           Cell::Text(asset::codec_name(i.formatTag, i.payload)), Cell::Int(i.sampleRate),
                           Cell::Int(i.channels), Cell::Int(i.bitsPerSample), Cell::Int(i.bitRate),
                           i.durationSeconds > 0 ? Cell::Real(i.durationSeconds) : Cell(),
-                          OptInt(i.container == asset::AudioContainer::Fuz, i.lipBytes)}});
+                          OptInt(i.container == asset::AudioContainer::Fuz, i.lipBytes), OptInt(lipOk, lip.units)}});
+    } else if (ext == "lip") {
+        asset::LipInfo i;
+        asset::Status s = asset::read_lip(d, n, i);
+        if (s != asset::Status::Ok) return st(s, "lip");
+        rows->push_back({kLip, {Cell::Int(id), Cell::Int(i.version), Cell::Int(i.units)}});
     } else if (ext == "pex") {
         assets::PexInfo i;
         std::string err;
@@ -389,14 +402,23 @@ std::string ReadFacts(int64_t id, const std::string& ext, const uint8_t* d, size
         rows->push_back({kPex, {Cell::Int(id), Cell::Text(i.scriptName), OptText(i.parentScript)}});
         return err;
     } else if (ext == "hkx") {
-        assets::HkxInfo i;
-        std::string err;
-        bool ok = assets::ReadHkx(d, n, &i, &err);
+        asset::HkxInfo i;
+        asset::Status s = whole ? asset::read_hkx(d, n, i) : asset::Status::Truncated;
+        const bool valid = s == asset::Status::Ok;
+        const bool anim = valid && i.hasAnimation;
+        const bool beh = valid && (!i.variables.empty() || !i.events.empty());
         rows->push_back({kHkx,
-                         {Cell::Int(id), OptText(i.havokVersion), OptInt(i.pointerSize > 0, i.pointerSize),
-                          i.valid ? Cell::Text(i.pointerSize == 8 ? "se" : "le") : Cell(), Cell::Int(i.valid)}});
-        (void)ok;
-        return err;
+                         {Cell::Int(id), OptText(i.version), OptInt(i.pointerSize > 0, i.pointerSize),
+                          valid ? Cell::Text(i.pointerSize == 8 ? "se" : "le") : Cell(), Cell::Int(valid),
+                          valid ? Cell::Text(asset::to_string(i.content)) : Cell(),
+                          anim ? Cell::Real(i.duration) : Cell(), OptInt(anim && i.frameCount >= 0, i.frameCount),
+                          OptInt(anim, static_cast<int64_t>(i.annotations.size())),
+                          OptInt(beh, static_cast<int64_t>(i.variables.size()))}});
+        if (valid) return {};
+        const bool xml = (n >= 5 && memcmp(d, "<?xml", 5) == 0) || (n >= 6 && memcmp(d, "\xEF\xBB\xBF<?x", 6) == 0);
+        if (xml) return "hkx: XML (the game loads binary packfiles)";
+        if (s == asset::Status::Unsupported) return "hkx: tagfile or other unsupported layout";
+        return !whole ? std::string("hkx: larger than the read cap") : st(s, "hkx");
     } else if (ext == "tri") {
         assets::TriInfo i;
         std::string err;
@@ -711,7 +733,8 @@ CREATE TABLE nif_textures(
   PRIMARY KEY(file_id, idx)) WITHOUT ROWID;
 CREATE TABLE audio(file_id INTEGER PRIMARY KEY, container TEXT, codec TEXT,
   sample_rate INTEGER, channels INTEGER, bits_per_sample INTEGER, avg_bit_rate INTEGER,
-  duration REAL, lip_size INTEGER);
+  duration REAL, lip_size INTEGER, lip_units INTEGER);
+CREATE TABLE lip(file_id INTEGER PRIMARY KEY, version INTEGER, units INTEGER);
 CREATE TABLE voice(
   file_id INTEGER PRIMARY KEY, plugin TEXT NOT NULL, voice_type TEXT NOT NULL,
   object_id INTEGER NOT NULL,
@@ -721,7 +744,8 @@ CREATE TABLE facegen(
   plugin TEXT NOT NULL, object_id INTEGER NOT NULL);
 CREATE TABLE pex(file_id INTEGER PRIMARY KEY, script_name TEXT, parent_script TEXT);
 CREATE TABLE hkx(file_id INTEGER PRIMARY KEY, havok_version TEXT, pointer_size INTEGER,
-  game TEXT, is_valid INTEGER);
+  game TEXT, is_valid INTEGER, content TEXT, duration REAL, frame_count INTEGER,
+  annotation_count INTEGER, variable_count INTEGER);
 CREATE TABLE tri(file_id INTEGER PRIMARY KEY, version TEXT, vertex_count INTEGER,
   triangle_count INTEGER, uv_count INTEGER, morph_count INTEGER, modifier_count INTEGER);
 CREATE TABLE tri_morphs(file_id INTEGER NOT NULL, idx INTEGER NOT NULL,
@@ -819,7 +843,8 @@ const char* kTableDocs[][3] = {
     {"voice", "detail", "Voice files, from the path: Sound\\Voice\\<plugin>\\<voicetype>\\<x>_<formid>_<n>.<ext>."},
     {"facegen", "detail", "FaceGen files, from the path: FaceGenData\\FaceGeom|FaceTint\\<plugin>\\<formid>.nif|.dds."},
     {"pex", "detail", "Compiled Papyrus scripts: the script and the script it extends."},
-    {"hkx", "detail", "Havok packfile headers."},
+    {"hkx", "detail", "Havok packfiles: header, content kind, animation duration / frames / annotations, behaviour variables."},
+    {"lip", "detail", "Lip-sync (.lip) headers; the keyframe stream is not decoded."},
     {"tri", "detail", "FaceGen TRI (morph) headers."},
     {"tri_morphs", "detail", "The named morphs (difference morphs) and modifiers (stat morphs) of each TRI."},
     {"st_tables", "core", "The data dictionary: tables."},
@@ -872,8 +897,8 @@ const char* kColumnDocs[][5] = {
     {"nif", "version", "\"20.2.0.7\"", nullptr, nullptr},
     {"nif", "bs_version", "Bethesda header version (83 LE, 100 LE and vanilla SE, 130 FO4)", nullptr, "not the game: see game"},
     {"nif", "shape_count", "geometry blocks (BSTriShape family, NiTriShape, NiTriStrips)", nullptr, nullptr},
-    {"nif", "vertex_count", "not filled yet", nullptr, "needs beth-asset-metadata support"},
-    {"nif", "triangle_count", "not filled yet", nullptr, "needs beth-asset-metadata support"},
+    {"nif", "vertex_count", "every shape's vertices (skinned SE shapes: from the skin partition); NULL when a shape's layout did not check out", nullptr, nullptr},
+    {"nif", "triangle_count", "every shape's triangles, same rules as vertex_count", nullptr, nullptr},
     {"nif", "game", "le | se | both | unknown, by Cathedral Assets Optimizer's rule: se = BSTriShape family; le = strips (NiTriStrips or skin-partition strips), which SE cannot use; both = NiTriShape without strips, or no geometry", nullptr, nullptr},
     {"nif_textures", "file_id", "the mesh", "files.file_id", nullptr},
     {"nif_textures", "idx", "position within the mesh", nullptr, nullptr},
@@ -886,6 +911,9 @@ const char* kColumnDocs[][5] = {
     {"audio", "avg_bit_rate", "bits per second", nullptr, nullptr},
     {"audio", "duration", "seconds; NULL when unknown", nullptr, nullptr},
     {"audio", "lip_size", "fuz: bytes of embedded lip data", nullptr, nullptr},
+    {"audio", "lip_units", "fuz: the embedded lip block's unit count (grows with the line's length)", nullptr, nullptr},
+    {"lip", "version", "always 1", nullptr, nullptr},
+    {"lip", "units", "(size field - 28) / 132; grows with the line's length (unit unknown)", nullptr, nullptr},
     {"voice", "plugin", "the plugin folder in the path", nullptr, nullptr},
     {"voice", "voice_type", "the voice type folder", nullptr, nullptr},
     {"voice", "object_id", "INFO object id in that plugin (low 24 bits of the FormID in the name)", nullptr, nullptr},
@@ -899,6 +927,11 @@ const char* kColumnDocs[][5] = {
     {"hkx", "pointer_size", "4 or 8", nullptr, nullptr},
     {"hkx", "game", "le (4-byte pointers) | se (8)", nullptr, nullptr},
     {"hkx", "is_valid", "1 = a binary packfile the game can load", nullptr, nullptr},
+    {"hkx", "content", "animation | behavior | character | project | skeleton | other", nullptr, nullptr},
+    {"hkx", "duration", "animation: seconds", nullptr, nullptr},
+    {"hkx", "frame_count", "spline-compressed animation: frames", nullptr, nullptr},
+    {"hkx", "annotation_count", "animation: annotations (events such as weaponSwing, SoundPlay.*)", nullptr, nullptr},
+    {"hkx", "variable_count", "behaviour graph: variables", nullptr, nullptr},
     {"tri", "version", "\"FRTRI003\"", nullptr, nullptr},
     {"tri", "uv_count", "texture coordinates", nullptr, nullptr},
     {"tri", "morph_count", "difference morphs", nullptr, nullptr},

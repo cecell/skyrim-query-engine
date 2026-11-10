@@ -245,39 +245,6 @@ bool ReadPex(const uint8_t* d, size_t n, PexInfo* out, std::string* error) {
     return true;
 }
 
-// ---- Havok ----
-
-bool ReadHkx(const uint8_t* d, size_t n, HkxInfo* out, std::string* error) {
-    Cursor c{d, n};
-    uint32_t m0 = c.U32(), m1 = c.U32();
-    if (c.bad) {
-        *error = "hkx: truncated";
-        return false;
-    }
-    if (m0 == 0x57E0E057 && m1 == 0x10C0C010) {  // binary packfile
-        if (n < kHkxProbeBytes) {
-            *error = "hkx: truncated packfile header";
-            return false;
-        }
-        out->pointerSize = d[16];
-        const bool little = d[17] == 1;
-        out->havokVersion = TextToUtf8(d + 40, strnlen(reinterpret_cast<const char*>(d + 40), 16));
-        out->valid = little && (out->pointerSize == 4 || out->pointerSize == 8) && !out->havokVersion.empty();
-        if (!out->valid) *error = "hkx: unexpected packfile layout";
-        return true;
-    }
-    if ((m0 == 0xCAB00D1E && m1 == 0xD011FACE) || (m0 == 0x1E0DB0CA)) {
-        *error = "hkx: tagfile (the game loads packfiles)";
-        return true;
-    }
-    if (n >= 5 && (memcmp(d, "<?xml", 5) == 0 || memcmp(d, "\xEF\xBB\xBF<?x", 6) == 0)) {
-        *error = "hkx: XML (the game loads binary packfiles)";
-        return true;
-    }
-    *error = "hkx: not a Havok file";
-    return false;
-}
-
 // ---- FaceGen TRI ----
 
 bool ReadTri(const uint8_t* d, size_t n, TriInfo* out, std::string* error) {

@@ -524,29 +524,6 @@ void TestPex() {
     CHECK(!assets::ReadPex(le, sizeof(le), &k, &err) && err.find("little-endian") != std::string::npos);
 }
 
-void TestHkx() {
-    Bytes h;
-    h.u32(0x57E0E057).u32(0x10C0C010).u32(0).u32(8).u8(8).u8(1).u8(0).u8(1).u32(3).u32(2).u32(0).u32(0).u32(0x4B);
-    h.raw("hk_2010.2.0-r1\0\0", 16).u32(0).u32(0xFFFFFFFF);
-    assets::HkxInfo i;
-    std::string err;
-    CHECK(h.size() == 64);
-    CHECK(assets::ReadHkx(h.b.data(), h.size(), &i, &err) && i.valid && i.pointerSize == 8 &&
-          i.havokVersion == "hk_2010.2.0-r1" && err.empty());
-    h.b[16] = 4;
-    assets::HkxInfo le;
-    CHECK(assets::ReadHkx(h.b.data(), h.size(), &le, &err) && le.valid && le.pointerSize == 4);
-    h.b[16] = 7;
-    assets::HkxInfo odd;
-    CHECK(assets::ReadHkx(h.b.data(), h.size(), &odd, &err) && !odd.valid);
-    assets::HkxInfo t;
-    CHECK(!assets::ReadHkx(h.b.data(), 40, &t, &err));
-    const char xml[] = "<?xml version=\"1.0\"?><hkpackfile/>";
-    assets::HkxInfo x;
-    err.clear();
-    CHECK(assets::ReadHkx(reinterpret_cast<const uint8_t*>(xml), sizeof(xml), &x, &err) && !x.valid && !err.empty());
-}
-
 Bytes FaceGenTri() {
     Bytes t;
     const uint32_t v = 3, tris = 1, x = 3, md = 2, ms = 1, k = 2;
@@ -1222,7 +1199,6 @@ int wmain(int argc, wchar_t** argv) {
     TestAssetPaths();
     TestPlanArchives();
     TestPex();
-    TestHkx();
     TestTri();
     TestBuildAssetsStaging();
     TestBuildAssetsMo2();

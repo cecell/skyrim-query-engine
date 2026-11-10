@@ -248,12 +248,15 @@ writes. Data and staging folders are only read.
   `error` (why the file or its header could not be read).
 - `archives`: per BSA, its header facts and whether, why (`ini` / `plugin`)
   and in which order (`load_rank`) the game loads it.
-- Header facts, loose and packed alike: `dds`, `tga`, `nif`, `audio` (from
+- Header facts, loose and packed alike: `dds`, `tga`, `nif` (with vertex and
+  triangle counts), `audio` (with a FUZ's lip units), `lip`, `hkx` (Havok
+  version, pointer size = LE / SE, content kind, animation duration /
+  frames / annotation count, behaviour variable count) (all from
   [beth-asset-metadata](https://github.com/cecell/beth-asset-metadata)),
-  `pex` (script and parent), `hkx` (Havok version, pointer size = LE / SE),
-  `tri` / `tri_morphs` (FaceGen and BodySlide morph names); `voice` and
-  `facegen` from their path conventions (plugin + object id).
-  `nif.game` comes from the block types, never the BS version.
+  `pex` (script and parent), `tri` / `tri_morphs` (FaceGen and BodySlide
+  morph names); `voice` and `facegen` from their path conventions (plugin +
+  object id). `nif.game` follows Cathedral Assets Optimizer's rule, never
+  the BS version. assets.db schema version 2.
 - Extras, on by default (`--skip` leaves them out): `nif_textures` (every
   texture path a mesh expects, `path_id` NULL when no such file exists) and
   the indexes `files_path`, `files_root`, `files_archive`, `paths_kind`.
