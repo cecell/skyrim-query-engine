@@ -29,7 +29,7 @@
 namespace skqe {
 namespace {
 
-constexpr int kAssetSchemaVersion = 2;
+constexpr int kAssetSchemaVersion = 3;
 constexpr size_t kBatchRows = 20000;
 // Header reads: how much of a file a reader may need. Whole files are read
 // for NIF texture paths, PEX and TRI (names at the end), up to these caps.
@@ -245,10 +245,10 @@ void WalkRoot(Root* root, std::vector<Loose>* out, int rootIndex, std::atomic<in
 
 // ---- Rows flowing from the read workers to the writer ----
 
-enum Table { kArchives, kDds, kTga, kNif, kNifTextures, kAudio, kPex, kHkx, kTri, kTriMorphs, kLip, kTableCount };
+enum Table { kArchives, kDds, kTga, kNif, kNifTextures, kAudio, kPex, kHkx, kTri, kTriMorphs, kLip, kHkxNames, kTableCount };
 const char* kTableNames[kTableCount] = {"archives", "dds", "tga", "nif", "nif_textures", "audio", "pex", "hkx", "tri",
-                                        "tri_morphs", "lip"};
-const int kTableColumns[kTableCount] = {9, 11, 7, 9, 6, 10, 3, 10, 7, 4, 3};
+                                        "tri_morphs", "lip", "hkx_names"};
+const int kTableColumns[kTableCount] = {9, 11, 7, 11, 6, 10, 3, 15, 7, 4, 3, 7};
 
 struct FileRow {
     int64_t id = 0;
@@ -358,7 +358,9 @@ std::string ReadFacts(int64_t id, const std::string& ext, const uint8_t* d, size
                          {Cell::Int(id), Cell::Text(asset::nif_version_string(i.version)), Cell::Int(i.userVersion),
                           OptInt(i.hasBsHeader, i.bsVersion), Cell::Int(i.blockCount), Cell::Int(shapes),
                           OptInt(counted, static_cast<int64_t>(body.vertices)),
-                          OptInt(counted, static_cast<int64_t>(body.triangles)), Cell::Text(game)}});
+                          OptInt(counted, static_cast<int64_t>(body.triangles)), Cell::Text(game),
+                          OptInt(ts == asset::Status::Ok, body.skinStrips ? 1 : 0),
+                          OptInt(ts == asset::Status::Ok, body.shapesUnread)}});
         if (ts != asset::Status::Ok && i.engine != asset::NifEngine::Unknown) return st(ts, "nif body");
         if (textures) {
             int64_t idx = 0;
@@ -413,8 +415,33 @@ std::string ReadFacts(int64_t id, const std::string& ext, const uint8_t* d, size
                           valid ? Cell::Text(asset::to_string(i.content)) : Cell(),
                           anim ? Cell::Real(i.duration) : Cell(), OptInt(anim && i.frameCount >= 0, i.frameCount),
                           OptInt(anim, static_cast<int64_t>(i.annotations.size())),
-                          OptInt(beh, static_cast<int64_t>(i.variables.size()))}});
-        if (valid) return {};
+                          OptInt(beh, static_cast<int64_t>(i.variables.size())),
+                          OptInt(anim, i.transformTracks), OptInt(anim, i.floatTracks),
+                          OptInt(beh, static_cast<int64_t>(i.events.size())),
+                          OptInt(valid && !i.clipAnimations.empty(), static_cast<int64_t>(i.clipAnimations.size())),
+                          OptInt(valid && !i.animationNames.empty(), static_cast<int64_t>(i.animationNames.size()))}});
+        if (valid) {
+            // Every name the packfile carries, for searching and for a viewer:
+            // kind, name, then a time (annotation) or a type (variable).
+            int64_t idx = 0;
+            auto name = [&](const char* kind, const std::string& text, Cell value, Cell type, Cell track) {
+                rows->push_back({kHkxNames, {Cell::Int(id), Cell::Int(idx++), Cell::Text(kind),
+                                             Cell::Text(TextToUtf8(reinterpret_cast<const uint8_t*>(text.data()), text.size())),
+                                             value, type, track}});
+            };
+            for (const auto& c : i.classes) name("class", c, Cell(), Cell(), Cell());
+            for (const auto& a : i.annotations) name("annotation", a.text, Cell::Real(a.time), Cell(), Cell::Int(a.track));
+            for (const auto& e : i.events) name("event", e, Cell(), Cell(), Cell());
+            for (size_t v = 0; v < i.variables.size(); ++v) {
+                const bool typed = v < i.variableTypes.size();
+                name("variable", i.variables[v], Cell(),
+                     typed ? Cell::Text(asset::hkx_variable_type_name(i.variableTypes[v])) : Cell(), Cell());
+            }
+            for (const auto& c : i.characterProperties) name("character_property", c, Cell(), Cell(), Cell());
+            for (const auto& c : i.clipAnimations) name("clip_animation", c, Cell(), Cell(), Cell());
+            for (const auto& c : i.animationNames) name("animation", c, Cell(), Cell(), Cell());
+            return {};
+        }
         const bool xml = (n >= 5 && memcmp(d, "<?xml", 5) == 0) || (n >= 6 && memcmp(d, "\xEF\xBB\xBF<?x", 6) == 0);
         if (xml) return "hkx: XML (the game loads binary packfiles)";
         if (s == asset::Status::Unsupported) return "hkx: tagfile or other unsupported layout";
@@ -725,7 +752,7 @@ CREATE TABLE tga(file_id INTEGER PRIMARY KEY, width INTEGER, height INTEGER, bit
   image_type INTEGER, has_alpha INTEGER, rle INTEGER);
 CREATE TABLE nif(file_id INTEGER PRIMARY KEY, version TEXT, user_version INTEGER,
   bs_version INTEGER, block_count INTEGER, shape_count INTEGER, vertex_count INTEGER,
-  triangle_count INTEGER, game TEXT);
+  triangle_count INTEGER, game TEXT, skin_strips INTEGER, unread_shapes INTEGER);
 CREATE TABLE nif_textures(
   file_id INTEGER NOT NULL, idx INTEGER NOT NULL, block TEXT, slot INTEGER,
   texture TEXT NOT NULL,
@@ -745,7 +772,10 @@ CREATE TABLE facegen(
 CREATE TABLE pex(file_id INTEGER PRIMARY KEY, script_name TEXT, parent_script TEXT);
 CREATE TABLE hkx(file_id INTEGER PRIMARY KEY, havok_version TEXT, pointer_size INTEGER,
   game TEXT, is_valid INTEGER, content TEXT, duration REAL, frame_count INTEGER,
-  annotation_count INTEGER, variable_count INTEGER);
+  annotation_count INTEGER, variable_count INTEGER, transform_tracks INTEGER, float_tracks INTEGER,
+  event_count INTEGER, clip_count INTEGER, animation_count INTEGER);
+CREATE TABLE hkx_names(file_id INTEGER NOT NULL, idx INTEGER NOT NULL, kind TEXT NOT NULL,
+  name TEXT NOT NULL, time REAL, type TEXT, track INTEGER, PRIMARY KEY(file_id, idx)) WITHOUT ROWID;
 CREATE TABLE tri(file_id INTEGER PRIMARY KEY, version TEXT, vertex_count INTEGER,
   triangle_count INTEGER, uv_count INTEGER, morph_count INTEGER, modifier_count INTEGER);
 CREATE TABLE tri_morphs(file_id INTEGER NOT NULL, idx INTEGER NOT NULL,
@@ -843,7 +873,8 @@ const char* kTableDocs[][3] = {
     {"voice", "detail", "Voice files, from the path: Sound\\Voice\\<plugin>\\<voicetype>\\<x>_<formid>_<n>.<ext>."},
     {"facegen", "detail", "FaceGen files, from the path: FaceGenData\\FaceGeom|FaceTint\\<plugin>\\<formid>.nif|.dds."},
     {"pex", "detail", "Compiled Papyrus scripts: the script and the script it extends."},
-    {"hkx", "detail", "Havok packfiles: header, content kind, animation duration / frames / annotations, behaviour variables."},
+    {"hkx", "detail", "Havok packfiles: header, content kind, animation duration / frames / tracks, and how many annotations, behaviour events and variables, clip animations and character animations it holds."},
+    {"hkx_names", "detail", "Every name a Havok packfile carries: its object classes, animation annotations (with their times), behaviour events and variables (with their types), character properties, clip generators' animations and a character's animation list."},
     {"lip", "detail", "Lip-sync (.lip) headers; the keyframe stream is not decoded."},
     {"tri", "detail", "FaceGen TRI (morph) headers."},
     {"tri_morphs", "detail", "The named morphs (difference morphs) and modifiers (stat morphs) of each TRI."},
@@ -899,6 +930,8 @@ const char* kColumnDocs[][5] = {
     {"nif", "shape_count", "geometry blocks (BSTriShape family, NiTriShape, NiTriStrips)", nullptr, nullptr},
     {"nif", "vertex_count", "every shape's vertices (skinned SE shapes: from the skin partition); NULL when a shape's layout did not check out", nullptr, nullptr},
     {"nif", "triangle_count", "every shape's triangles, same rules as vertex_count", nullptr, nullptr},
+    {"nif", "skin_strips", "1 = a skin partition stores strips, which SE cannot use (CAO converts them)", nullptr, nullptr},
+    {"nif", "unread_shapes", "shapes whose layout did not check out; vertex_count and triangle_count are NULL when this is not 0", nullptr, nullptr},
     {"nif", "game", "le | se | both | unknown, by Cathedral Assets Optimizer's rule: se = BSTriShape family; le = strips (NiTriStrips or skin-partition strips), which SE cannot use; both = NiTriShape without strips, or no geometry", nullptr, nullptr},
     {"nif_textures", "file_id", "the mesh", "files.file_id", nullptr},
     {"nif_textures", "idx", "position within the mesh", nullptr, nullptr},
@@ -932,6 +965,17 @@ const char* kColumnDocs[][5] = {
     {"hkx", "frame_count", "spline-compressed animation: frames", nullptr, nullptr},
     {"hkx", "annotation_count", "animation: annotations (events such as weaponSwing, SoundPlay.*)", nullptr, nullptr},
     {"hkx", "variable_count", "behaviour graph: variables", nullptr, nullptr},
+    {"hkx", "transform_tracks", "animation: transform tracks (bones)", nullptr, nullptr},
+    {"hkx", "float_tracks", "animation: float tracks", nullptr, nullptr},
+    {"hkx", "event_count", "behaviour graph: events", nullptr, nullptr},
+    {"hkx", "clip_count", "behaviour graph: clip generators' animations", nullptr, nullptr},
+    {"hkx", "animation_count", "character: the animations it lists", nullptr, nullptr},
+    {"hkx_names", "idx", "order within the file", nullptr, nullptr},
+    {"hkx_names", "kind", "class | annotation | event | variable | character_property | clip_animation | animation", nullptr, nullptr},
+    {"hkx_names", "name", "the text (\"weaponSwing\", \"SoundPlay.FSTWalk\", \"Animations\\MT_Jump.hkx\", a class name...)", nullptr, nullptr},
+    {"hkx_names", "time", "annotation: seconds into the animation (can exceed the duration in a few mod files)", nullptr, nullptr},
+    {"hkx_names", "type", "variable: bool | int8 | int16 | int32 | real | pointer | vector3 | vector4 | quaternion", nullptr, nullptr},
+    {"hkx_names", "track", "annotation: its transform track (0 for nearly all)", nullptr, nullptr},
     {"tri", "version", "\"FRTRI003\"", nullptr, nullptr},
     {"tri", "uv_count", "texture coordinates", nullptr, nullptr},
     {"tri", "morph_count", "difference morphs", nullptr, nullptr},
