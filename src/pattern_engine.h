@@ -108,6 +108,14 @@ Value TraceSubrecord(const Pattern& pattern, const uint8_t* data, size_t size, c
 bool EncodeLeaf(const Pattern& leaf, const Value& input, const uint8_t* cur, size_t curSize, bool localized,
                 std::vector<uint8_t>* out, std::string* err);
 bool LeafIsFormId(const Pattern& leaf);
+// Format 2 leaf attributes, for writers: "default" (nullptr when none),
+// "range" (false when none; either bound may be absent), "target" (the record
+// types a FormID may point at; advisory).
+const Value* LeafDefault(const Pattern& leaf);
+bool LeafRange(const Pattern& leaf, std::optional<double>* lo, std::optional<double>* hi);
+const std::vector<std::string>& LeafTargets(const Pattern& leaf);
+// Every "default" in the pattern encodes for its leaf. False with *err.
+bool CheckDefaults(const Pattern& pattern, std::string* err);
 bool LeafIsByteRun(const Pattern& leaf);
 // The leaf's type, as the catalog names it: "uint32", "formid", "flags", "bytes"...
 std::string LeafTypeName(const Pattern& leaf);

@@ -27,7 +27,7 @@ using namespace skqe;
 namespace {
 
 // The features this engine implements.
-const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl", "range", "peek_offset", "write_arm", "packed", "unnamed_bits", "shared", "int64", "fourcc"};
+const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl", "range", "peek_offset", "write_arm", "packed", "unnamed_bits", "shared", "int64", "fourcc", "defaults"};
 
 int g_passed = 0, g_failed = 0, g_skipped = 0, g_notApplicable = 0;
 bool g_verbose = false;

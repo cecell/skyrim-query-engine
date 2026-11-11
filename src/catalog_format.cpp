@@ -116,7 +116,7 @@ public:
             return CheckCount(node, path, *bound, false);
         }
         if (t == "bytes") {
-            if (!Keys(node, path, {"n"})) return false;
+            if (!Keys(node, path, {"n", "default"})) return false;
             return CheckCount(node, path, *bound, false);
         }
         if (t == "window") {
@@ -171,6 +171,27 @@ private:
             bool ok = false;
             for (const char* a : allowed) ok = ok || k == a;
             if (!ok) return Err("E011", Join(path, k), "unknown key '" + k + "'");
+        }
+        return true;
+    }
+
+    // "range": [lo, hi], numbers or null.
+    bool CheckRange(const Value& node, const std::string& path) {
+        const Value* r = node.Find("range");
+        if (!r) return true;
+        auto ok = [](const Value& v) { return v.IsNull() || v.kind() == Value::Kind::Int || v.kind() == Value::Kind::Float; };
+        if (r->kind() != Value::Kind::List || r->Items().size() != 2 || !ok(r->Items()[0]) || !ok(r->Items()[1])) {
+            return Err("E013", Join(path, "range"), "'range' is [lo, hi], numbers or null");
+        }
+        return true;
+    }
+    // "target": record types.
+    bool CheckTarget(const Value& node, const std::string& path) {
+        const Value* t = node.Find("target");
+        if (!t) return true;
+        if (t->kind() != Value::Kind::List) return Err("E013", Join(path, "target"), "'target' is a list of record types");
+        for (const auto& x : t->Items()) {
+            if (!x.IsString() || x.AsString().size() != 4) return Err("E013", Join(path, "target"), "'target' is a list of record types");
         }
         return true;
     }
@@ -246,12 +267,16 @@ private:
         PrimKind k = KindOf(t);
         switch (k) {
             case PrimKind::Number:
+                if (!Keys(node, path, {"as", "default", "range"})) return false;
+                break;
             case PrimKind::Formid:
+                if (!Keys(node, path, {"as", "default", "target"})) return false;
+                break;
             case PrimKind::Text:
-                if (!Keys(node, path, {"as"})) return false;
+                if (!Keys(node, path, {"as", "default"})) return false;
                 break;
             case PrimKind::Fourcc:
-                if (!Keys(node, path, {"as", "trim", "other"})) return false;
+                if (!Keys(node, path, {"as", "trim", "other", "default"})) return false;
                 if (const Value* tr = node.Find("trim"); tr && tr->kind() != Value::Kind::Bool) {
                     return Err("E013", Join(path, "trim"), "'trim' must be true or false");
                 }
@@ -260,10 +285,10 @@ private:
                 }
                 break;
             case PrimKind::Enum:
-                if (!Keys(node, path, {"as", "enum"})) return false;
+                if (!Keys(node, path, {"as", "enum", "default"})) return false;
                 break;
             case PrimKind::Scaled:
-                if (!Keys(node, path, {"as", "read", "offset", "divisor"})) return false;
+                if (!Keys(node, path, {"as", "read", "offset", "divisor", "default", "range"})) return false;
                 if (const Value* r = node.Find("read")) {
                     static const std::set<std::string> reads = {"uint8", "int8", "uint16", "int16", "uint32", "int32", "float32"};
                     if (!r->IsString() || !reads.count(r->AsString())) return Err("E013", Join(path, "read"), "bad 'read' type");
@@ -289,6 +314,7 @@ private:
                 break;
             }
         }
+        if (!CheckRange(node, path) || !CheckTarget(node, path)) return false;
         if (t == "lstring") hasLstring_ = true;
         if (k == PrimKind::Enum) {
             const Value* e = node.Find("enum");
@@ -312,7 +338,7 @@ private:
     }
 
     bool CheckBitfield(const Value& node, const std::string& path, std::set<std::string>* bound) {
-        if (!Keys(node, path, {"size", "bits", "as", "unnamed"})) return false;
+        if (!Keys(node, path, {"size", "bits", "as", "unnamed", "default"})) return false;
         if (const Value* u = node.Find("unnamed"); u && (!u->IsString() || (u->AsString() != "show" && u->AsString() != "hide"))) {
             return Err("E013", Join(path, "unnamed"), "'unnamed' must be \"show\" or \"hide\"");
         }
@@ -357,7 +383,7 @@ private:
         for (const Value& m : d->Items()) {
             std::string mp = Join(Join(path, "do"), Idx(i++));
             if (m.kind() != Value::Kind::Map) return Err("E013", mp, "a member is an object");
-            static const std::set<std::string> kMemberKeys = {"id", "t", "lo", "n", "enum", "bits", "as", "note"};
+            static const std::set<std::string> kMemberKeys = {"id", "t", "lo", "n", "enum", "bits", "as", "note", "default", "range"};
             for (const auto& kv : m.Members())
                 if (!kMemberKeys.count(kv.first)) return Err("E011", Join(mp, kv.first), "unknown key '" + kv.first + "'");
             const Value* id = m.Find("id");
@@ -373,6 +399,8 @@ private:
                     return Err("E013", Join(mp, "t"), "member type is uint, int, bool, enum or flags");
                 }
             }
+            if (m.Find("range") && kind != "uint" && kind != "int") return Err("E011", Join(mp, "range"), "'range' is for number members");
+            if (!CheckRange(m, mp)) return false;
             uint64_t mask = 0;
             if (kind == "flags") {
                 if (m.Find("lo") || m.Find("n")) return Err("E011", mp, "a flags member owns its 'bits', not 'lo'/'n'");
@@ -724,6 +752,10 @@ bool PatternCatalog::LoadFormat2(const Value& root, const std::string& duplicate
             byKey_[key] = CompilePattern(tree, true, ub && ub->AsString() == "show", &shared_, &sharedCompiled_);
         } catch (const PatternError& e) {
             return fail("E010", key, "", e.what());
+        }
+        {
+            std::string derr;
+            if (!CheckDefaults(*byKey_[key], &derr)) return fail("E013", key, "", derr);
         }
         std::string text;
         WriteJson(tree, &text);

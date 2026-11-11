@@ -854,6 +854,22 @@ struct Editor::Impl {
         Value input = *val;
         if (!ResolveInput(*leaf->pattern, &input)) return false;
         const uint8_t* curBytes = b.subs[target].data + leaf->offset;
+        // The catalogue's "range" for this value: outside it only raw: or force.
+        std::optional<double> rangeLo, rangeHi;
+        if (!force && LeafRange(*leaf->pattern, &rangeLo, &rangeHi) &&
+            !(input.IsString() && input.AsString().rfind("raw:", 0) == 0)) {
+            double d = 0;
+            bool isNumber = input.kind() == Value::Kind::Int || input.kind() == Value::Kind::Float;
+            if (isNumber) d = input.kind() == Value::Kind::Int ? static_cast<double>(input.AsInt()) : input.AsFloat();
+            if (input.IsString()) {
+                char* end = nullptr;
+                d = strtod(input.AsString().c_str(), &end);
+                isNumber = !input.AsString().empty() && !*end;
+            }
+            if (isNumber && ((rangeLo && d < *rangeLo) || (rangeHi && d > *rangeHi))) {
+                return Fail("out_of_range", fieldText + ": " + JsonOf(input) + " is outside the catalog's range for it; use raw, or force");
+            }
+        }
 
         // Asking for what it already shows changes nothing, even where the
         // display rounds (degrees, colours): those bytes stay exact.
@@ -2530,7 +2546,8 @@ const char* OpHelp() {
       is Owner.esm:XXXXXX. Flags: a list of names, or {"add":[..],"remove":[..]}.
       Any value: "raw:<hex>" for exact bytes. Asking for the value it already
       shows changes nothing. Refused: a value later data depends on, a catalog
-      row whose layout is in question; force accepts these.
+      row whose layout is in question, a number outside the catalog's range for
+      the value; force accepts these.
   {"op":"set","form":F,"field":"DATA","raw":"0A0B..."}
       A whole subrecord's bytes; the catalog is not involved.
   {"op":"add-sub","form":F,"sig":"FULL","value":"Name"}   or "raw":"hex"

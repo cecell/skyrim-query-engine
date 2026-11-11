@@ -41,6 +41,11 @@ struct Pattern {
     std::string scaledRead = "uint8";
     double scaledOffset = 0.0;
     double scaledDivisor = 1.0;
+    // Format 2 leaf attributes for writers; decoding ignores them.
+    std::optional<Value> leafDefault;               // "default": the value a new field takes
+    std::optional<double> rangeLo, rangeHi;         // "range": [lo, hi], either may be null
+    bool hasRange = false;
+    std::vector<std::string> target;                // "target": record types a FormID may point at
     bool fourccTrim = false;  // format 2 fourcc "trim": no trailing zero bytes
     bool fourccHex = false;   // format 2 fourcc "other":"hex": unprintable codes as 0xXXXXXXXX
     std::optional<Value> refExpr;
@@ -144,6 +149,26 @@ std::shared_ptr<const Pattern> Compile(const Value& j);
 // Primitives format 1 does not know.
 bool IsFormat2Prim(Prim p) { return p == Prim::U64 || p == Prim::I64; }
 
+// "default", "range", "target" on a leaf (format 2; the catalogue check
+// has refused them where they do not belong).
+void LeafAttrs(const Value& j, Pattern* p) {
+    if (!g_format2 || j.kind() != Value::Kind::Map) return;
+    if (const Value* d = j.Find("default")) p->leafDefault = *d;
+    if (const Value* r = j.Find("range"); r && r->kind() == Value::Kind::List && r->Items().size() == 2) {
+        p->hasRange = true;
+        auto num = [](const Value& v, std::optional<double>* out) {
+            if (v.kind() == Value::Kind::Int) *out = static_cast<double>(v.AsInt());
+            else if (v.kind() == Value::Kind::Float) *out = v.AsFloat();
+        };
+        num(r->Items()[0], &p->rangeLo);
+        num(r->Items()[1], &p->rangeHi);
+    }
+    if (const Value* t = j.Find("target"); t && t->kind() == Value::Kind::List) {
+        for (const auto& x : t->Items())
+            if (x.IsString()) p->target.push_back(x.AsString());
+    }
+}
+
 }  // namespace
 
 // "lo..hi", "..hi", "lo..": decimal integers, a leading '-' allowed.
@@ -218,6 +243,7 @@ void CompilePacked(const Value& j, Pattern* p) {
         mp->member = kind == "int" ? MemberKind::Int : kind == "bool" ? MemberKind::Bool : kind == "enum" ? MemberKind::Enum
                    : kind == "flags" ? MemberKind::Flags : MemberKind::Uint;
         if (const Value* as = m.Find("as"); as && as->IsString()) mp->bindAs = as->AsString();
+        LeafAttrs(m, mp.get());
         if (mp->member == MemberKind::Flags) {
             if (const Value* bs = m.Find("bits"); bs && bs->kind() == Value::Kind::Map) {
                 for (const auto& b : bs->Members()) {
@@ -301,6 +327,7 @@ std::shared_ptr<const Pattern> Compile(const Value& j) {
     auto prim = PrimNames().find(t);
     if (prim != PrimNames().end() && (g_format2 || !IsFormat2Prim(prim->second))) {
         p->prim = prim->second;
+        LeafAttrs(j, p.get());
         if (g_format2 && p->prim == Prim::Fourcc) {
             if (const Value* tr = j.Find("trim"); tr && tr->kind() == Value::Kind::Bool) p->fourccTrim = tr->AsBool();
             if (const Value* o = j.Find("other"); o && o->IsString()) p->fourccHex = o->AsString() == "hex";
@@ -382,6 +409,7 @@ std::shared_ptr<const Pattern> Compile(const Value& j) {
     } else if (t == "bytes") {
         p->type = PType::Bytes;
         if (const Value* n = j.Find("n")) p->n = *n;
+        LeafAttrs(j, p.get());
     } else if (t == "window") {
         p->type = PType::Window;
         p->body = Compile(Required(j, "do", "window"));
@@ -403,6 +431,7 @@ std::shared_ptr<const Pattern> Compile(const Value& j) {
             }
         }
         if (const Value* as = j.Find("as"); as && as->IsString()) p->bindAs = as->AsString();
+        LeafAttrs(j, p.get());
         if (g_format2) {
             p->bitNames = true;
             const Value* u = j.Find("unnamed");
@@ -1482,6 +1511,39 @@ bool EncodeLeaf(const Pattern& p, const Value& in, const uint8_t* cur, size_t cu
 }
 
 bool LeafIsFormId(const Pattern& p) { return p.type == PType::Prim && p.prim == Prim::Formid; }
+
+const Value* LeafDefault(const Pattern& leaf) { return leaf.leafDefault ? &*leaf.leafDefault : nullptr; }
+
+bool LeafRange(const Pattern& leaf, std::optional<double>* lo, std::optional<double>* hi) {
+    if (!leaf.hasRange) return false;
+    *lo = leaf.rangeLo;
+    *hi = leaf.rangeHi;
+    return true;
+}
+
+const std::vector<std::string>& LeafTargets(const Pattern& leaf) { return leaf.target; }
+
+bool CheckDefaults(const Pattern& p, std::string* err) {
+    if (p.leafDefault) {
+        std::vector<uint8_t> out;
+        std::string e;
+        if (!EncodeLeaf(p, *p.leafDefault, nullptr, 0, true, &out, &e)) {
+            *err = "default " + [&] { std::string s; WriteJson(*p.leafDefault, &s); return s; }() + " does not encode: " + e;
+            return false;
+        }
+    }
+    for (const auto& item : p.items)
+        if (!CheckDefaults(*item.first, err)) return false;
+    for (const auto& c : p.cases)
+        if (!CheckDefaults(*c.second, err)) return false;
+    for (const auto& r : p.ranges)
+        if (!CheckDefaults(*r.arm, err)) return false;
+    for (const auto& m : p.members)
+        if (!CheckDefaults(*m, err)) return false;
+    if (p.deflt && !CheckDefaults(*p.deflt, err)) return false;
+    if (p.body && p.type != PType::Packed && !CheckDefaults(*p.body, err)) return false;
+    return true;
+}
 bool LeafIsByteRun(const Pattern& p) { return p.type == PType::Bytes; }
 std::string LeafTypeName(const Pattern& p) {
     if (p.type == PType::Bytes) return "bytes";
