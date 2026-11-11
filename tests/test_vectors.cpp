@@ -27,7 +27,7 @@ using namespace skqe;
 namespace {
 
 // The features this engine implements.
-const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl", "range", "peek_offset", "write_arm", "packed", "unnamed_bits"};
+const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl", "range", "peek_offset", "write_arm", "packed", "unnamed_bits", "shared"};
 
 int g_passed = 0, g_failed = 0, g_skipped = 0, g_notApplicable = 0;
 bool g_verbose = false;
@@ -430,7 +430,9 @@ int main(int argc, char** argv) {
     };
     if (const Value* fv = root.Find("field_vectors")) {
         for (const Value& v : fv->Items()) {
-            if (enabled(v)) RunField(v);
+            // fourcc options anywhere in the vector need that feature too.
+            bool fourcc = Json(v).find("\"trim\"") != std::string::npos;
+            if (enabled(v) && (!fourcc || features.count("fourcc"))) RunField(v);
             else ++g_skipped;
         }
     }

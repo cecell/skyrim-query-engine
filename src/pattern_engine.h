@@ -68,6 +68,10 @@ std::shared_ptr<const Pattern> CompilePattern(const Value& json);
 std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2);
 // `unnamedShow`: the catalogue's "_options": {"unnamed_bits": "show"}.
 std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2, bool unnamedShow);
+// `shared`: the catalogue's "_shared" object, for {"t":"ref"}; each shared
+// pattern is compiled once into `sharedCompiled` and every ref uses that object.
+std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2, bool unnamedShow, const Value* shared,
+                                              std::map<std::string, std::shared_ptr<const Pattern>>* sharedCompiled);
 // Format 2 syntax helpers, shared by the compiler and the catalogue check.
 bool ParseCaseRange(const std::string& key, std::optional<int64_t>* lo, std::optional<int64_t>* hi);
 bool ParsePeek(const std::string& name, int* width, size_t* offset);
@@ -225,6 +229,7 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::string>>> names_;
     std::set<std::string> multi_;
     Value shared_, records_, options_, meta_;
+    std::map<std::string, std::shared_ptr<const Pattern>> sharedCompiled_;
     std::map<std::string, std::vector<ContextVar>> context_;
 };
 

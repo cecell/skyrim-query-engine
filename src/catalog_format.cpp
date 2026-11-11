@@ -4,6 +4,7 @@
 // check runs on the JSON tree before it is compiled; format 1 never comes
 // here.
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <set>
 
@@ -58,8 +59,10 @@ PrimKind KindOf(const std::string& t) {
 
 class NodeChecker {
 public:
-    NodeChecker(const std::string& key, const std::set<std::string>& contextNames, std::vector<CatalogFinding>* warnings)
-        : key_(key), rt_(key.substr(0, key.find('.'))), ctxNames_(contextNames), warnings_(warnings) {}
+    NodeChecker(const std::string& key, const std::set<std::string>& contextNames, std::vector<CatalogFinding>* warnings,
+                const Value* shared = nullptr, std::set<std::string>* sharedUsed = nullptr)
+        : key_(key), rt_(key.substr(0, key.find('.'))), ctxNames_(contextNames), warnings_(warnings), shared_(shared),
+          sharedUsed_(sharedUsed) {}
 
     // False with err_ set at the first error.
     bool Check(const Value& node, const std::string& path, std::set<std::string>* bound) {
@@ -126,6 +129,23 @@ public:
             return Check(*d, Join(path, "do"), bound);
         }
         if (t == "bitfield") return CheckBitfield(node, path, bound);
+        if (t == "ref") {
+            // As if the shared pattern stood here: same names, checked at every use.
+            if (!Keys(node, path, {"to"})) return false;
+            const Value* to = node.Find("to");
+            if (!to) return Err("E012", path, "ref without 'to'");
+            if (!to->IsString()) return Err("E013", Join(path, "to"), "'to' must be a shared pattern's name");
+            const Value* body = shared_ && shared_->kind() == Value::Kind::Map ? shared_->Find(to->AsString()) : nullptr;
+            if (!body) return Err("E018", Join(path, "to"), "no shared pattern named '" + to->AsString() + "'");
+            if (std::find(refStack_.begin(), refStack_.end(), to->AsString()) != refStack_.end()) {
+                return Err("E018", Join(path, "to"), "shared pattern '" + to->AsString() + "' refers to itself");
+            }
+            if (sharedUsed_) sharedUsed_->insert(to->AsString());
+            refStack_.push_back(to->AsString());
+            bool ok = Check(*body, Join(path, "(" + to->AsString() + ")"), bound);
+            refStack_.pop_back();
+            return ok;
+        }
         if (t == "packed") return CheckPacked(node, path, bound);
         return Err("E010", path, "unknown node type: " + t);
     }
@@ -477,7 +497,22 @@ private:
     CatalogFinding err_;
     bool hasLstring_ = false;
     std::set<std::string> ctxRead_;
+    const Value* shared_;
+    std::set<std::string>* sharedUsed_;
+    std::vector<std::string> refStack_;
 };
+
+// Every {"t":"ref","to":X} under a JSON node.
+void CollectRefs(const Value& n, std::vector<std::string>* out) {
+    if (n.kind() == Value::Kind::List) {
+        for (const auto& x : n.Items()) CollectRefs(x, out);
+    } else if (n.kind() == Value::Kind::Map) {
+        const Value* t = n.Find("t");
+        const Value* to = n.Find("to");
+        if (t && t->IsString() && t->AsString() == "ref" && to && to->IsString()) out->push_back(to->AsString());
+        for (const auto& m : n.Members()) CollectRefs(m.second, out);
+    }
+}
 
 bool KeyShape(const std::string& key) {
     size_t dot = key.find('.');
@@ -585,6 +620,31 @@ bool PatternCatalog::LoadFormat2(const Value& root, const std::string& duplicate
     }
     if (const Value* s = section("_shared")) {
         if (s->kind() != Value::Kind::Map) return fail("E005", "_shared", "", "must be an object");
+        for (const auto& [name, body] : s->Members()) {
+            if (name.empty() || name.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos) {
+                return fail("E018", "_shared", name, "a shared pattern's name is letters, digits and _");
+            }
+        }
+        // Refs to nothing and cycles, whether or not a key uses them.
+        std::map<std::string, std::vector<std::string>> refs;
+        for (const auto& [name, body] : s->Members()) {
+            CollectRefs(body, &refs[name]);
+            for (const auto& to : refs[name])
+                if (!s->Find(to)) return fail("E018", "_shared", name, "ref to no shared pattern named '" + to + "'");
+        }
+        std::map<std::string, int> state;  // 1 visiting, 2 done
+        std::function<bool(const std::string&)> visit = [&](const std::string& n) {
+            if (state[n] == 1) return false;
+            if (state[n] == 2) return true;
+            state[n] = 1;
+            for (const auto& to : refs[n])
+                if (!visit(to)) return false;
+            state[n] = 2;
+            return true;
+        };
+        for (const auto& [name, body] : s->Members()) {
+            if (!visit(name)) return fail("E018", "_shared", name, "a cycle of shared patterns");
+        }
         shared_ = *s;
     }
     if (const Value* r = section("_records")) {
@@ -613,6 +673,7 @@ bool PatternCatalog::LoadFormat2(const Value& root, const std::string& duplicate
     }
 
     // Pass 2: every pattern, checked, then compiled.
+    std::set<std::string> sharedUsed;
     std::map<std::string, std::vector<std::string>> byText;   // structured pattern text -> keys
     std::map<std::string, std::set<std::string>> byFs;        // field signature -> distinct pattern texts
     for (const auto& [key, val] : patterns) {
@@ -632,7 +693,7 @@ bool PatternCatalog::LoadFormat2(const Value& root, const std::string& duplicate
         std::set<std::string> ctxNames;
         std::string rt = key.substr(0, 4);
         for (const ContextVar& v : DeclaredContext(rt)) ctxNames.insert(v.name);
-        NodeChecker check(key, ctxNames, &warnings_);
+        NodeChecker check(key, ctxNames, &warnings_, &shared_, &sharedUsed);
         std::set<std::string> bound;
         if (!check.Check(tree, "", &bound)) {
             if (error) *error = check.error().Text();
@@ -652,14 +713,21 @@ bool PatternCatalog::LoadFormat2(const Value& root, const std::string& duplicate
         }
         try {
             const Value* ub = options_.kind() == Value::Kind::Map ? options_.Find("unnamed_bits") : nullptr;
-            byKey_[key] = CompilePattern(tree, true, ub && ub->AsString() == "show");
+            byKey_[key] = CompilePattern(tree, true, ub && ub->AsString() == "show", &shared_, &sharedCompiled_);
         } catch (const PatternError& e) {
             return fail("E010", key, "", e.what());
         }
         std::string text;
         WriteJson(tree, &text);
-        if (tree.kind() != Value::Kind::String) byText[text].push_back(key);
+        const Value* tt = tree.kind() == Value::Kind::Map ? tree.Find("t") : nullptr;
+        bool isRef = tt && tt->IsString() && tt->AsString() == "ref";
+        if (tree.kind() != Value::Kind::String && !isRef) byText[text].push_back(key);
         byFs[key.substr(5)].insert(text);
+    }
+    if (shared_.kind() == Value::Kind::Map) {
+        for (const auto& m : shared_.Members()) {
+            if (!sharedUsed.count(m.first)) warnings_.push_back({"W111", "_shared", m.first, "a shared pattern nothing refers to"});
+        }
     }
     for (const auto& [text, ks] : byText) {
         if (ks.size() > 1) {

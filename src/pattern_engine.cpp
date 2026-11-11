@@ -92,6 +92,9 @@ namespace {
 thread_local bool g_format2 = false;
 // Format 2 "_options": {"unnamed_bits": "show"}, for bitfields without their own "unnamed".
 thread_local bool g_unnamedShow = false;
+// Format 2 "_shared": name -> pattern, and each one compiled once.
+thread_local const Value* g_shared = nullptr;
+thread_local std::map<std::string, std::shared_ptr<const Pattern>>* g_sharedCompiled = nullptr;
 
 const std::map<std::string, Prim>& PrimNames() {
     static const std::map<std::string, Prim> names = {
@@ -272,6 +275,19 @@ std::shared_ptr<const Pattern> Compile(const Value& j) {
     const Value* tv = j.Find("t");
     if (!tv || !tv->IsString()) BadShape("dict node missing 't' key");
     const std::string& t = tv->AsString();
+    if (t == "ref" && g_format2) {  // the shared pattern itself: one object for every use
+        const Value* to = j.Find("to");
+        if (!to || !to->IsString()) BadShape("ref missing 'to'");
+        if (g_sharedCompiled) {
+            auto it = g_sharedCompiled->find(to->AsString());
+            if (it != g_sharedCompiled->end()) return it->second;
+        }
+        const Value* body = g_shared ? g_shared->Find(to->AsString()) : nullptr;
+        if (!body) BadShape("ref to an unknown shared pattern: " + to->AsString());
+        std::shared_ptr<const Pattern> sp = Compile(*body);
+        if (g_sharedCompiled) (*g_sharedCompiled)[to->AsString()] = sp;
+        return sp;
+    }
     auto prim = PrimNames().find(t);
     if (prim != PrimNames().end()) {
         p->prim = prim->second;
@@ -945,15 +961,26 @@ std::shared_ptr<const Pattern> CompilePattern(const Value& json) { return Compil
 std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2) { return CompilePattern(json, format2, false); }
 
 std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2, bool unnamedShow) {
+    return CompilePattern(json, format2, unnamedShow, nullptr, nullptr);
+}
+
+std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2, bool unnamedShow, const Value* shared,
+                                              std::map<std::string, std::shared_ptr<const Pattern>>* sharedCompiled) {
     struct Flag {
         bool saved = g_format2, savedShow = g_unnamedShow;
+        const Value* savedShared = g_shared;
+        std::map<std::string, std::shared_ptr<const Pattern>>* savedCompiled = g_sharedCompiled;
         ~Flag() {
             g_format2 = saved;
             g_unnamedShow = savedShow;
+            g_shared = savedShared;
+            g_sharedCompiled = savedCompiled;
         }
     } flag;
     g_format2 = format2;
     g_unnamedShow = unnamedShow;
+    g_shared = shared;
+    g_sharedCompiled = sharedCompiled;
     return Compile(json);
 }
 
@@ -1411,6 +1438,7 @@ void PatternCatalog::Clear() {
     names_.clear();
     multi_.clear();
     shared_ = records_ = options_ = meta_ = Value();
+    sharedCompiled_.clear();
     context_.clear();
 }
 
