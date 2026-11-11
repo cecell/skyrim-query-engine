@@ -35,7 +35,7 @@ multi = {f"{rt}.{fs}" for rt, fs, m, _ in rows if m}
 # repeats without being listed lands in subrecord_overflow.
 ALWAYS_MULTI = {"CTDA", "CIS1", "CIS2", "COED", "XAPR", "XLKR", "PDTO", "ATKD", "ATKE"}
 for key in cat:
-    if not key.startswith("_") and key.split(".", 1)[1] in ALWAYS_MULTI:
+    if not key.startswith(("_", "$")) and key.split(".", 1)[1] in ALWAYS_MULTI:
         multi.add(key)
 multi |= {"LENS.DNAM", "LENS.LFSD"}
 # Destruction stage fields (one set per stage) on record types where no
