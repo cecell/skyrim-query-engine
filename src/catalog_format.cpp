@@ -131,6 +131,7 @@ public:
 
     const CatalogFinding& error() const { return err_; }
     bool hasLstring() const { return hasLstring_; }
+    const std::set<std::string>& contextRead() const { return ctxRead_; }
 
 private:
     bool Err(const char* code, const std::string& path, const std::string& msg) {
@@ -168,7 +169,11 @@ private:
             std::string v = name.substr(1);
             for (const char* b : kBuiltinContext)
                 if (v == b) return true;
-            if (ctxNames_.count(v)) return true;
+            if (v == "Prev") return true;
+            if (ctxNames_.count(v)) {
+                ctxRead_.insert(v);
+                return true;
+            }
             return Err("E019", path, "context variable $@" + v + " is not declared for " + rt_);
         }
         if (name == "_remaining" || name == "_pos" || name == "_peek_u8" || name == "_peek_u16" || name == "_peek_u32") return true;
@@ -356,6 +361,7 @@ private:
     std::vector<CatalogFinding>* warnings_;
     CatalogFinding err_;
     bool hasLstring_ = false;
+    std::set<std::string> ctxRead_;
 };
 
 bool KeyShape(const std::string& key) {
@@ -516,6 +522,15 @@ bool PatternCatalog::LoadFormat2(const Value& root, const std::string& duplicate
         if (!check.Check(tree, "", &bound)) {
             if (error) *error = check.error().Text();
             return false;
+        }
+        // A field may not read a variable its own field signature updates.
+        for (const ContextVar& v : DeclaredContext(rt)) {
+            if (!check.contextRead().count(v.name)) continue;
+            for (const auto& action : v.on) {
+                if (action.first == key.substr(5)) {
+                    return fail("E020", key, "", "reads $@" + v.name + ", which " + action.first + " itself updates");
+                }
+            }
         }
         if (check.hasLstring() && !lstringClass_.count(key)) {
             warnings_.push_back({"W106", key, "", "an lstring leaf in a key with no _lstrings entry"});

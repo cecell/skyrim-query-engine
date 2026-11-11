@@ -267,6 +267,7 @@ public:
         root.emplace_back("@FSIG", Value::Str(ctx.fsig));
         root.emplace_back("@FormVersion", Value::Int(ctx.formVersion));
         root.emplace_back("@Localized", Value::Bool(ctx.localized));
+        if (ctx.prev) root.emplace_back("@Prev", Value::Str(*ctx.prev));
         for (const auto& [name, v] : ctx.vars) root.emplace_back("@" + name, v);
     }
     void Bind(const std::string& name, Value v) { frames_.back().emplace_back(name, std::move(v)); }
@@ -1192,7 +1193,7 @@ void ApplyAction(const ContextAction& a, const uint8_t* data, size_t size, Value
 }  // namespace
 
 RecordContext::RecordContext(const PatternCatalog& cat, std::string rt, int64_t formVersion, bool localized)
-    : decl_(&cat.ContextVars(rt)) {
+    : decl_(&cat.ContextVars(rt)), format2_(cat.format() == 2) {
     ctx_.rt = std::move(rt);
     ctx_.formVersion = formVersion;
     ctx_.localized = localized;
@@ -1202,6 +1203,7 @@ RecordContext::RecordContext(const PatternCatalog& cat, std::string rt, int64_t 
 
 const DecodeContext& RecordContext::Before(const std::string& fsig) {
     ctx_.fsig = fsig;
+    if (format2_) ctx_.prev = prev_;
     return ctx_;
 }
 
@@ -1214,7 +1216,10 @@ void RecordContext::After(const std::string& fsig, const uint8_t* data, size_t s
     prev_ = fsig;
 }
 
-const std::vector<ContextVar>& PatternCatalog::ContextVars(const std::string& rt) const { return LegacyContextVars(rt); }
+// Format 2: what "_context" declares, nothing else. Format 1: the built-in table.
+const std::vector<ContextVar>& PatternCatalog::ContextVars(const std::string& rt) const {
+    return format_ == 2 ? DeclaredContext(rt) : LegacyContextVars(rt);
+}
 
 // ---- shapes -----------------------------------------------------------------
 

@@ -27,7 +27,7 @@ using namespace skqe;
 namespace {
 
 // The features this engine implements.
-const char* const kDefaultFeatures[] = {"current", "context", "load"};
+const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl"};
 
 int g_passed = 0, g_failed = 0, g_skipped = 0;
 bool g_verbose = false;
@@ -104,6 +104,7 @@ DecodeContext ContextOf(const Value* c) {
     ctx.fsig = Str(*c, "fsig");
     if (const Value* fv = c->Find("form_version")) fv->ToInt(&ctx.formVersion);
     if (const Value* l = c->Find("localized"); l && l->kind() == Value::Kind::Bool) ctx.localized = l->AsBool();
+    if (const Value* p = c->Find("prev"); p && p->IsString()) ctx.prev = p->AsString();
     if (const Value* vars = c->Find("vars"); vars && vars->kind() == Value::Kind::Map) {
         for (const auto& [name, v] : vars->Members()) ctx.vars.emplace_back(name, v);
     }
@@ -202,8 +203,13 @@ void RunRecord(const Value& v) {
         const Value& want = expect[i];
         std::string at = "field " + std::to_string(i) + " " + fs + ": ";
         const DecodeContext& ctx = rc.Before(fs);
+        if (cat.format() == 2 && (!ctx.prev || *ctx.prev != rc.Prev())) return Fail(id, at + "$@Prev not bound to the previous field");
         if (const Value* p = want.Find("prev"); p && p->AsString() != rc.Prev()) {
             return Fail(id, at + "prev \"" + rc.Prev() + "\", expected \"" + p->AsString() + "\"");
+        }
+        if (const Value* vars = want.Find("vars"); vars && cat.format() == 2 && vars->Members().size() != ctx.vars.size()) {
+            return Fail(id, at + std::to_string(ctx.vars.size()) + " context variables, expected " +
+                                std::to_string(vars->Members().size()));
         }
         if (const Value* vars = want.Find("vars")) {
             for (const auto& [name, val] : vars->Members()) {
@@ -366,7 +372,10 @@ int main(int argc, char** argv) {
         for (const Value& v : rv->Items()) {
             // A format 2 catalogue needs the format 2 loader and its context.
             bool v2 = v.Find("catalog") && v.Find("catalog")->Find("$format");
-            if (enabled(v) && (!v2 || features.count("format2"))) RunRecord(v);
+            // Range keys in a catalogue need the range feature too.
+            std::string cj = v.Find("catalog") ? Json(*v.Find("catalog")) : "";
+            bool ranges = cj.find("\"..") != std::string::npos || cj.find("..\"") != std::string::npos;
+            if (enabled(v) && (!v2 || features.count("format2")) && (!ranges || features.count("range"))) RunRecord(v);
             else ++g_skipped;
         }
     }

@@ -40,6 +40,9 @@ struct DecodeContext {
     // The record's context variables as the fields before this one left
     // them, each bound as $@name. A RecordContext fills them.
     std::vector<std::pair<std::string, Value>> vars;
+    // $@Prev, the signature of the field before this one ("" for the first).
+    // Format 2 only: unset, $@Prev does not exist.
+    std::optional<std::string> prev;
 };
 
 // A context variable: its value before the record's first field, and what
@@ -139,6 +142,7 @@ private:
     const std::vector<ContextVar>* decl_;
     DecodeContext ctx_;
     std::string prev_;
+    bool format2_ = false;
 };
 
 // True for a primitive type name ("uint8", "formid", ...); "bytes" is not one.
