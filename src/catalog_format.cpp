@@ -126,6 +126,7 @@ public:
             return Check(*d, Join(path, "do"), bound);
         }
         if (t == "bitfield") return CheckBitfield(node, path, bound);
+        if (t == "packed") return CheckPacked(node, path, bound);
         return Err("E010", path, "unknown node type: " + t);
     }
 
@@ -299,6 +300,91 @@ private:
             }
             if (!bv.IsString()) return Err("E013", bp, "a bit name must be text");
             if (!names.insert(bv.AsString()).second) return Err("E015", bp, "duplicate bit name '" + bv.AsString() + "'");
+        }
+        return CheckAs(node, path, bound);
+    }
+
+    // A word split into members (spec B.1).
+    bool CheckPacked(const Value& node, const std::string& path, std::set<std::string>* bound) {
+        if (!Keys(node, path, {"size", "do", "as"})) return false;
+        const Value* size = node.Find("size");
+        if (!size) return Err("E012", path, "packed without 'size'");
+        if (!size->IsString() || !WidthOf(size->AsString())) return Err("E013", Join(path, "size"), "'size' must be uint8, uint16 or uint32");
+        const Value* d = node.Find("do");
+        if (!d) return Err("E012", path, "packed without 'do'");
+        if (d->kind() != Value::Kind::List) return Err("E013", Join(path, "do"), "'do' must be a list of members");
+        if (d->Items().empty()) return Err("E016", Join(path, "do"), "packed without members");
+        int width = WidthOf(size->AsString()) * 8;
+        std::set<std::string> ids;
+        uint64_t owned = 0;
+        size_t i = 0;
+        for (const Value& m : d->Items()) {
+            std::string mp = Join(Join(path, "do"), Idx(i++));
+            if (m.kind() != Value::Kind::Map) return Err("E013", mp, "a member is an object");
+            static const std::set<std::string> kMemberKeys = {"id", "t", "lo", "n", "enum", "bits", "as", "note"};
+            for (const auto& kv : m.Members())
+                if (!kMemberKeys.count(kv.first)) return Err("E011", Join(mp, kv.first), "unknown key '" + kv.first + "'");
+            const Value* id = m.Find("id");
+            if (!id) return Err("E012", mp, "member without 'id'");
+            if (!id->IsString() || id->AsString().empty()) return Err("E013", Join(mp, "id"), "'id' must be text");
+            if (id->AsString() == "_rest") return Err("E015", Join(mp, "id"), "'_rest' is reserved");
+            if (!ids.insert(id->AsString()).second) return Err("E015", Join(mp, "id"), "duplicate id '" + id->AsString() + "'");
+            std::string kind = "uint";
+            if (const Value* t = m.Find("t")) {
+                if (!t->IsString()) return Err("E013", Join(mp, "t"), "member type must be text");
+                kind = t->AsString();
+                if (kind != "uint" && kind != "int" && kind != "bool" && kind != "enum" && kind != "flags") {
+                    return Err("E013", Join(mp, "t"), "member type is uint, int, bool, enum or flags");
+                }
+            }
+            uint64_t mask = 0;
+            if (kind == "flags") {
+                if (m.Find("lo") || m.Find("n")) return Err("E011", mp, "a flags member owns its 'bits', not 'lo'/'n'");
+                if (m.Find("enum")) return Err("E011", Join(mp, "enum"), "'enum' is for enum members");
+                const Value* bits = m.Find("bits");
+                if (!bits) return Err("E012", mp, "flags member without 'bits'");
+                if (bits->kind() != Value::Kind::Map) return Err("E013", Join(mp, "bits"), "'bits' must be an object");
+                std::set<std::string> names;
+                for (const auto& [bk, bv] : bits->Members()) {
+                    std::string bp = Join(Join(mp, "bits"), bk);
+                    if (!IsCanonicalDecimal(bk) || std::stoull(bk) >= static_cast<uint64_t>(width)) {
+                        return Err("E014", bp, "bit number must be a decimal number below the width, without leading zeros");
+                    }
+                    if (!bv.IsString()) return Err("E013", bp, "a bit name must be text");
+                    if (!names.insert(bv.AsString()).second) return Err("E015", bp, "duplicate bit name '" + bv.AsString() + "'");
+                    mask |= uint64_t{1} << std::stoull(bk);
+                }
+            } else {
+                if (m.Find("bits")) return Err("E011", Join(mp, "bits"), "'bits' is for flags members");
+                if (kind != "enum" && m.Find("enum")) return Err("E011", Join(mp, "enum"), "'enum' is for enum members");
+                const Value* lo = m.Find("lo");
+                const Value* n = m.Find("n");
+                if (!lo || !n) return Err("E012", mp, "member without 'lo' and 'n'");
+                if (lo->kind() != Value::Kind::Int) return Err("E013", Join(mp, "lo"), "'lo' must be an integer");
+                if (n->kind() != Value::Kind::Int) return Err("E013", Join(mp, "n"), "'n' must be an integer");
+                if (n->AsInt() < 1 || lo->AsInt() < 0 || lo->AsInt() + n->AsInt() > width) {
+                    return Err("E016", mp, "member bits leave the word");
+                }
+                if (kind == "bool" && n->AsInt() != 1) return Err("E016", Join(mp, "n"), "a bool member is 1 bit");
+                mask = ((n->AsInt() == 64 ? ~uint64_t{0} : (uint64_t{1} << n->AsInt()) - 1)) << lo->AsInt();
+                if (kind == "enum") {
+                    const Value* e = m.Find("enum");
+                    if (!e) return Err("E012", mp, "enum member without 'enum'");
+                    if (e->kind() != Value::Kind::Map) return Err("E013", Join(mp, "enum"), "'enum' must be an object");
+                    std::set<std::string> names;
+                    for (const auto& [ek, ev] : e->Members()) {
+                        std::string ep = Join(Join(mp, "enum"), ek);
+                        if (!IsCanonicalDecimal(ek) || std::stoull(ek) >= (uint64_t{1} << n->AsInt())) {
+                            return Err("E014", ep, "enum key must be a decimal number that fits the member");
+                        }
+                        if (!ev.IsString()) return Err("E013", ep, "an enum name must be text");
+                        if (!names.insert(ev.AsString()).second) return Err("E015", ep, "duplicate enum name '" + ev.AsString() + "'");
+                    }
+                }
+            }
+            if (owned & mask) return Err("E016", mp, "members overlap");
+            owned |= mask;
+            if (!CheckAs(m, mp, bound)) return false;
         }
         return CheckAs(node, path, bound);
     }

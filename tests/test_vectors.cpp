@@ -27,9 +27,9 @@ using namespace skqe;
 namespace {
 
 // The features this engine implements.
-const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl", "range", "peek_offset", "write_arm"};
+const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl", "range", "peek_offset", "write_arm", "packed"};
 
-int g_passed = 0, g_failed = 0, g_skipped = 0;
+int g_passed = 0, g_failed = 0, g_skipped = 0, g_notApplicable = 0;
 bool g_verbose = false;
 
 void Fail(const std::string& id, const std::string& why) {
@@ -179,6 +179,37 @@ void RunField(const Value& v) {
             return Fail(id, "value-only encode " + ToHex(enc.data(), enc.size()) + ", expected " + Str(v, "encode_plain_hex"));
         }
     }
+    Pass(id);
+}
+
+// An encode vector: a value with no capture events. This engine encodes
+// whole fields only through EncodeLeaf, so a vector whose pattern is not a
+// single leaf (or a packed word) does not apply.
+void RunEncode(const Value& v) {
+    std::string id = Str(v, "id");
+    std::shared_ptr<const Pattern> pat;
+    try {
+        pat = CompilePattern(*v.Find("pattern"), true);
+    } catch (const PatternError& e) {
+        return Fail(id, std::string("pattern does not compile: ") + e.what());
+    }
+    if (!PatternIsLeaf(*pat)) {
+        ++g_notApplicable;
+        if (g_verbose) printf("n/a  %s (needs a whole-field encoder)\n", id.c_str());
+        return;
+    }
+    DecodeContext ctx = ContextOf(v.Find("ctx"));
+    std::vector<uint8_t> enc;
+    std::string err;
+    bool ok = EncodeLeaf(*pat, *v.Find("value"), nullptr, 0, ctx.localized, &enc, &err);
+    std::string want = Str(v, "error_contains");
+    if (!want.empty()) {
+        if (ok) return Fail(id, "encoded " + ToHex(enc.data(), enc.size()) + ", expected an error");
+        if (err.find(want) == std::string::npos) fprintf(stderr, "note %s: message \"%s\", hint \"%s\"\n", id.c_str(), err.c_str(), want.c_str());
+        return Pass(id);
+    }
+    if (!ok) return Fail(id, "does not encode: " + err);
+    if (ToHex(enc.data(), enc.size()) != Str(v, "hex")) return Fail(id, "encoded " + ToHex(enc.data(), enc.size()) + ", expected " + Str(v, "hex"));
     Pass(id);
 }
 
@@ -404,9 +435,12 @@ int main(int argc, char** argv) {
             else ++g_skipped;
         }
     }
-    for (const char* sec : {"encode_vectors"}) {
-        if (const Value* s = root.Find(sec)) g_skipped += static_cast<int>(s->Items().size());
+    if (const Value* ev = root.Find("encode_vectors")) {
+        for (const Value& v : ev->Items()) {
+            if (enabled(v)) RunEncode(v);
+            else ++g_skipped;
+        }
     }
-    printf("%d passed, %d failed, %d not run\n", g_passed, g_failed, g_skipped);
+    printf("%d passed, %d failed, %d not applicable, %d not run\n", g_passed, g_failed, g_notApplicable, g_skipped);
     return g_failed ? 1 : 0;
 }

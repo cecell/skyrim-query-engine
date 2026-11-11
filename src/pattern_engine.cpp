@@ -16,7 +16,10 @@ float BitsToFloat(uint32_t u) {
 
 }  // namespace
 
-enum class PType : uint8_t { Prim, Seq, Repeat, Union, Opt, Skip, Bytes, Window, Bitfield };
+enum class PType : uint8_t { Prim, Seq, Repeat, Union, Opt, Skip, Bytes, Window, Bitfield, Packed, PackedMember };
+
+// What a member of a `packed` word holds.
+enum class MemberKind : uint8_t { Uint, Int, Bool, Enum, Flags, Rest };
 
 enum class Prim : uint8_t {
     U8, U16, U32, I8, I16, I32, F32, Bool, HexU8, EmptyMarker, Lstring, Formid,
@@ -64,9 +67,18 @@ struct Pattern {
     int peekWidth = 0;     // format 2: `on` is $_peek_uW+N, read N bytes ahead
     size_t peekOffset = 0;
 
-    // Bitfield
+    // Bitfield; Packed and PackedMember: `size` is the word's width in bytes
     int size = 4;
     std::map<int, std::string> bits;
+
+    // Packed: the members in order, and the bits none of them owns
+    std::vector<std::shared_ptr<const Pattern>> members;
+    uint32_t restMask = 0;
+    // PackedMember (also the "_rest" pseudo-member): its bits of the word
+    MemberKind member = MemberKind::Uint;
+    std::string memberId;
+    int lo = 0, nbits = 0;
+    uint32_t memberMask = 0;  // the bits it owns, in place
 };
 
 namespace {
@@ -168,6 +180,68 @@ const Value& Required(const Value& obj, const char* key, const char* node) {
     const Value* v = obj.Find(key);
     if (!v) BadShape(std::string(node) + " missing '" + key + "'");
     return *v;
+}
+
+// A `packed` word (format 2): members over bit ranges of one integer. The
+// catalogue check has already refused overlaps and bad widths.
+void CompilePacked(const Value& j, Pattern* p) {
+    p->type = PType::Packed;
+    int w = Width(j.Find("size"));
+    if (!w) BadShape("packed missing 'size'");
+    p->size = w;
+    uint32_t wordMask = w == 4 ? 0xFFFFFFFFu : (1u << (8 * w)) - 1;
+    uint32_t owned = 0;
+    const Value* d = j.Find("do");
+    if (!d || d->kind() != Value::Kind::List) BadShape("packed missing 'do'");
+    for (const Value& m : d->Items()) {
+        auto mp = std::make_shared<Pattern>();
+        mp->type = PType::PackedMember;
+        mp->size = w;
+        if (const Value* id = m.Find("id"); id && id->IsString()) mp->memberId = id->AsString();
+        std::string kind = "uint";
+        if (const Value* k = m.Find("t"); k && k->IsString()) kind = k->AsString();
+        mp->member = kind == "int" ? MemberKind::Int : kind == "bool" ? MemberKind::Bool : kind == "enum" ? MemberKind::Enum
+                   : kind == "flags" ? MemberKind::Flags : MemberKind::Uint;
+        if (const Value* as = m.Find("as"); as && as->IsString()) mp->bindAs = as->AsString();
+        if (mp->member == MemberKind::Flags) {
+            if (const Value* bs = m.Find("bits"); bs && bs->kind() == Value::Kind::Map) {
+                for (const auto& b : bs->Members()) {
+                    int bit = std::stoi(b.first);
+                    mp->bits[bit] = b.second.AsString();
+                    mp->memberMask |= 1u << bit;
+                }
+            }
+        } else {
+            int64_t lo = 0, n = 0;
+            if (const Value* v = m.Find("lo")) v->ToInt(&lo);
+            if (const Value* v = m.Find("n")) v->ToInt(&n);
+            if (n < 1 || lo < 0 || lo + n > 8 * w) BadShape("packed member out of the word");
+            mp->lo = static_cast<int>(lo);
+            mp->nbits = static_cast<int>(n);
+            mp->memberMask = static_cast<uint32_t>(((n == 32 ? 0xFFFFFFFFull : (1ull << n) - 1)) << lo);
+            if (mp->member == MemberKind::Enum) {
+                mp->enumMap.emplace();
+                if (const Value* e = m.Find("enum"); e && e->kind() == Value::Kind::Map)
+                    for (const auto& x : e->Members()) (*mp->enumMap)[x.first] = x.second.AsString();
+            }
+        }
+        if (owned & mp->memberMask) BadShape("packed members overlap");
+        owned |= mp->memberMask;
+        p->members.push_back(mp);
+    }
+    p->restMask = wordMask & ~owned;
+    if (const Value* as = j.Find("as"); as && as->IsString()) p->bindAs = as->AsString();
+}
+
+// The "_rest" pseudo-member of a packed word: the bits no member owns.
+std::shared_ptr<const Pattern> RestMember(const Pattern& packed) {
+    auto r = std::make_shared<Pattern>();
+    r->type = PType::PackedMember;
+    r->member = MemberKind::Rest;
+    r->memberId = "_rest";
+    r->size = packed.size;
+    r->memberMask = packed.restMask;
+    return r;
 }
 
 std::shared_ptr<const Pattern> Compile(const Value& j) {
@@ -295,6 +369,9 @@ std::shared_ptr<const Pattern> Compile(const Value& j) {
             }
         }
         if (const Value* as = j.Find("as"); as && as->IsString()) p->bindAs = as->AsString();
+    } else if (t == "packed" && g_format2) {
+        CompilePacked(j, p.get());
+        if (p->restMask) p->body = RestMember(*p);  // the "_rest" leaf's pattern
     } else {
         throw PatternError(false, "Unknown structural node type: " + t);
     }
@@ -586,6 +663,50 @@ void PrefixLeaves(std::vector<TraceLeaf>* leaves, size_t from, size_t to, const 
     }
 }
 
+// A packed member's bits, unsigned and shifted down.
+uint32_t MemberBits(const Pattern& m, uint32_t word) { return (word & m.memberMask) >> m.lo; }
+
+int64_t MemberSigned(const Pattern& m, uint32_t word) {
+    int64_t v = MemberBits(m, word);
+    if (m.nbits < 64 && (v >> (m.nbits - 1)) & 1) v -= int64_t{1} << m.nbits;
+    return v;
+}
+
+// What `as` binds for a member.
+Value MemberNumber(const Pattern& m, uint32_t word) {
+    switch (m.member) {
+        case MemberKind::Int: return Value::Int(MemberSigned(m, word));
+        case MemberKind::Flags:
+        case MemberKind::Rest: return Value::Int(word & m.memberMask);
+        default: return Value::Int(MemberBits(m, word));
+    }
+}
+
+// A member's decoded value.
+Value MemberValue(const Pattern& m, uint32_t word) {
+    switch (m.member) {
+        case MemberKind::Uint: return Value::Int(MemberBits(m, word));
+        case MemberKind::Int: return Value::Int(MemberSigned(m, word));
+        case MemberKind::Bool: return Value::Bool(MemberBits(m, word) != 0);
+        case MemberKind::Enum: {
+            uint32_t raw = MemberBits(m, word);
+            auto it = m.enumMap->find(std::to_string(raw));
+            if (it != m.enumMap->end()) return Value::Str(it->second);
+            char buf[16];
+            snprintf(buf, sizeof(buf), "0x%X", raw);
+            return Value::Str(buf);
+        }
+        case MemberKind::Flags: {
+            std::vector<Value> flags;
+            for (const auto& [bit, name] : m.bits)
+                if (word & (1u << bit)) flags.push_back(Value::Str(name));
+            return Value::List(std::move(flags));
+        }
+        case MemberKind::Rest: return Value::Int(word & m.memberMask);
+    }
+    return Value();
+}
+
 // nullopt = a skip, which an enclosing seq drops.
 std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
     switch (p.type) {
@@ -760,6 +881,30 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
             return r ? std::move(*r) : Value();
         }
 
+        case PType::Packed: {
+            size_t start = cur.pos;
+            uint32_t word = cur.ReadUint(p.size);
+            Value m = Value::Map();
+            for (const auto& mp : p.members) {
+                Value v = MemberValue(*mp, word);
+                if (mp->bindAs) scope.Bind(*mp->bindAs, MemberNumber(*mp, word));
+                if (scope.trace) {
+                    scope.trace->push_back({mp->memberId, start, cur.pos - start, mp.get(), v,
+                                            mp->bindAs.has_value() || p.bindAs.has_value()});
+                }
+                m.Set(mp->memberId, std::move(v));
+            }
+            if (word & p.restMask) {
+                Value v = Value::Int(word & p.restMask);
+                if (scope.trace) scope.trace->push_back({"_rest", start, cur.pos - start, p.body.get(), v, p.bindAs.has_value()});
+                m.Set("_rest", std::move(v));
+            }
+            if (p.bindAs) scope.Bind(*p.bindAs, Value::Int(word));
+            return m;
+        }
+
+        case PType::PackedMember: BadShape("a packed member outside its word");
+
         case PType::Bitfield: {
             size_t start = cur.pos;
             uint32_t raw = cur.ReadUint(p.size);
@@ -903,6 +1048,80 @@ std::string TextToFile(const std::string& utf8, const uint8_t* old, size_t oldSi
     return out;
 }
 
+// Puts one packed member's value into `word`. `edit`: flags also take
+// {"add":[...],"remove":[...]}.
+bool PutMember(const Pattern& m, const Value& in, uint32_t* word, bool edit, std::string* err) {
+    uint32_t bits = 0;
+    switch (m.member) {
+        case MemberKind::Uint:
+        case MemberKind::Int:
+        case MemberKind::Enum:
+        case MemberKind::Bool: {
+            int64_t i = 0;
+            if (m.member == MemberKind::Bool && in.kind() == Value::Kind::Bool) {
+                i = in.AsBool() ? 1 : 0;
+            } else if (m.member == MemberKind::Enum && in.IsString() && m.enumMap &&
+                       std::any_of(m.enumMap->begin(), m.enumMap->end(), [&](const auto& e) { return e.second == in.AsString(); })) {
+                for (const auto& e : *m.enumMap)
+                    if (e.second == in.AsString()) i = std::stoll(e.first);
+            } else if (!ToInteger(in, &i)) {
+                return Fail(err, m.member == MemberKind::Enum ? "expected a name from the list or a number" : "expected an integer");
+            }
+            int64_t lo = 0, hi = (int64_t{1} << m.nbits) - 1;
+            if (m.member == MemberKind::Int) {
+                lo = -(int64_t{1} << (m.nbits - 1));
+                hi = (int64_t{1} << (m.nbits - 1)) - 1;
+            }
+            if (m.member == MemberKind::Bool) hi = 1;
+            if (i < lo || i > hi) return Fail(err, std::to_string(i) + " does not fit " + std::to_string(m.nbits) + " bits");
+            bits = (static_cast<uint32_t>(static_cast<uint64_t>(i)) << m.lo) & m.memberMask;
+            break;
+        }
+        case MemberKind::Flags: {
+            auto bitOf = [&m](const Value& n, uint32_t* b) {
+                if (!n.IsString()) return false;
+                for (const auto& [bit, name] : m.bits)
+                    if (name == n.AsString()) {
+                        *b = 1u << bit;
+                        return true;
+                    }
+                return false;
+            };
+            uint32_t cur = *word & m.memberMask;
+            if (edit && in.kind() == Value::Kind::Map) {
+                for (const char* part : {"add", "remove"}) {
+                    const Value* list = in.Find(part);
+                    if (!list) continue;
+                    for (const auto& n : list->Items()) {
+                        uint32_t b;
+                        if (!bitOf(n, &b)) return Fail(err, "no flag named " + (n.IsString() ? n.AsString() : std::string("?")));
+                        cur = part[0] == 'a' ? cur | b : cur & ~b;
+                    }
+                }
+                bits = cur;
+            } else if (in.kind() == Value::Kind::List) {
+                for (const auto& n : in.Items()) {
+                    uint32_t b;
+                    if (!bitOf(n, &b)) return Fail(err, "no flag named " + (n.IsString() ? n.AsString() : std::string("?")));
+                    bits |= b;
+                }
+            } else {
+                return Fail(err, "expected flag names");
+            }
+            break;
+        }
+        case MemberKind::Rest: {
+            int64_t i;
+            if (!ToInteger(in, &i)) return Fail(err, "expected an integer");
+            if (i < 0 || (static_cast<uint64_t>(i) & ~static_cast<uint64_t>(m.memberMask)) != 0) return Fail(err, "_rest has bits a member owns");
+            bits = static_cast<uint32_t>(i);
+            break;
+        }
+    }
+    *word = (*word & ~m.memberMask) | bits;
+    return true;
+}
+
 bool FromHex(const std::string& s, std::vector<uint8_t>* out) {
     if (s.size() % 2) return false;
     auto nib = [](char c) {
@@ -923,6 +1142,36 @@ bool EncodeLeaf(const Pattern& p, const Value& in, const uint8_t* cur, size_t cu
     out->clear();
     if (in.IsString() && in.AsString().rfind("raw:", 0) == 0) {
         if (!FromHex(in.AsString().substr(4), out)) return Fail(err, "raw: needs hex digits");
+        return true;
+    }
+    if (p.type == PType::PackedMember) {  // the whole word, with only this member's bits replaced
+        uint32_t word = 0;
+        for (size_t i = 0; i < curSize && i < static_cast<size_t>(p.size); ++i) word |= static_cast<uint32_t>(cur[i]) << (8 * i);
+        if (!PutMember(p, in, &word, true, err)) return false;
+        PutLE(word, p.size, out);
+        return true;
+    }
+    if (p.type == PType::Packed) {  // a map of members, as decoded
+        if (!in.IsNull() && in.kind() != Value::Kind::Map) return Fail(err, "expected an object of members");
+        uint32_t word = 0;
+        for (const auto& mp : p.members) {
+            const Value* v = in.IsNull() ? nullptr : in.Find(mp->memberId);
+            if (!v || v->IsNull()) {
+                if (mp->member == MemberKind::Flags) continue;
+                return Fail(err, "a value is missing: " + mp->memberId);
+            }
+            if (!PutMember(*mp, *v, &word, false, err)) return Fail(err, mp->memberId + ": " + *err);
+        }
+        if (const Value* r = in.IsNull() ? nullptr : in.Find("_rest"); r && !r->IsNull()) {
+            int64_t i;
+            if (!ToInteger(*r, &i)) return Fail(err, "_rest: expected an integer");
+            uint64_t wordMask = p.size == 4 ? 0xFFFFFFFFull : (1ull << (8 * p.size)) - 1;
+            if (i < 0 || (static_cast<uint64_t>(i) & ~(static_cast<uint64_t>(p.restMask))) != 0 || static_cast<uint64_t>(i) > wordMask) {
+                return Fail(err, "_rest has bits a member owns");
+            }
+            word |= static_cast<uint32_t>(i);
+        }
+        PutLE(word, p.size, out);
         return true;
     }
     if (p.type == PType::Bytes) {
@@ -1094,13 +1343,26 @@ bool LeafIsFormId(const Pattern& p) { return p.type == PType::Prim && p.prim == 
 bool LeafIsByteRun(const Pattern& p) { return p.type == PType::Bytes; }
 std::string LeafTypeName(const Pattern& p) {
     if (p.type == PType::Bytes) return "bytes";
+    if (p.type == PType::Packed) return "packed";
+    if (p.type == PType::PackedMember) {
+        switch (p.member) {
+            case MemberKind::Uint: return "packed_uint";
+            case MemberKind::Int: return "packed_int";
+            case MemberKind::Bool: return "packed_bool";
+            case MemberKind::Enum: return "packed_enum";
+            case MemberKind::Flags: return "packed_flags";
+            case MemberKind::Rest: return "packed_rest";
+        }
+    }
     if (p.type == PType::Bitfield) return "flags";
     if (p.type != PType::Prim) return "structure";
     for (const auto& e : PrimNames())
         if (e.second == p.prim && e.first != "float32_disp_rad2deg") return e.first;
     return "?";
 }
-bool PatternIsLeaf(const Pattern& p) { return p.type == PType::Prim || p.type == PType::Bytes || p.type == PType::Bitfield; }
+bool PatternIsLeaf(const Pattern& p) {
+    return p.type == PType::Prim || p.type == PType::Bytes || p.type == PType::Bitfield || p.type == PType::Packed;
+}
 
 bool IsPrimitiveName(const std::string& name) { return PrimNames().count(name) != 0; }
 
@@ -1432,6 +1694,18 @@ std::optional<Shape> Walk(const Pattern& p) {
         case PType::Skip: return std::nullopt;
         case PType::Bytes: return Leaf(K::Bytes);
         case PType::Bitfield: return Leaf(K::Flags);
+        case PType::Packed: {
+            Shape s = Leaf(K::Map);
+            for (const auto& m : p.members) {
+                K k = m->member == MemberKind::Bool ? K::Bool : m->member == MemberKind::Enum ? K::Text
+                    : m->member == MemberKind::Flags ? K::Flags : K::Int;
+                s.fields.emplace_back(m->memberId, Leaf(k));
+            }
+            if (p.restMask) s.fields.emplace_back("_rest", Leaf(K::Int));
+            return s;
+        }
+        case PType::PackedMember: return Leaf(p.member == MemberKind::Bool ? K::Bool : p.member == MemberKind::Enum ? K::Text
+                                              : p.member == MemberKind::Flags ? K::Flags : K::Int);
     }
     return Leaf(K::Unknown);
 }
