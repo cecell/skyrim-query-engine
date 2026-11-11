@@ -1185,6 +1185,7 @@ const char* kReferenceTables[][2] = {
     {"ut_flag_kinds", "Named flag sets; st_columns.flag_kind binds a column to one. <type>_record_flags name the record header flags (view record_flags_v)."},
     {"ut_flag_values", "The bits of each flag set: bit number and label."},
     {"ut_stored_formats", "Stored formats of the old database's field dictionary."},
+    {"ut_field_links", "Which field of which record type used which enumeration or flag set in the old database; build-db binds st_columns by these first."},
 };
 
 const char* kCoreTables[][2] = {
@@ -1412,16 +1413,34 @@ bool LoadReference(Db& db, const std::wstring& patterns, std::string* error) {
 // database's rule: <table>_<column>, optionally with _flags / _type.
 // Record flags (<type>_record_flags) name forms.flags bits per type.
 const char kBindReference[] = R"SQL(
+-- 1. The earlier database's own links (ut_field_links): record type,
+--    subrecord and field, also when the field is the whole subrecord or sits
+--    in a nested struct.
+UPDATE st_columns SET (enum_kind, flag_kind) = (
+  SELECT l.enum_kind, l.flag_kind FROM ut_field_links l
+  JOIN st_tables t ON t.record_type = l.record_type
+  WHERE t.table_name = st_columns.table_name AND l.subrecord = st_columns.subrecord
+    AND (st_columns.path = l.subrecord || '.' || l.leaf OR st_columns.path = l.subrecord
+         OR st_columns.path GLOB l.subrecord || '.*.' || l.leaf)
+  LIMIT 1)
+WHERE EXISTS (
+  SELECT 1 FROM ut_field_links l
+  JOIN st_tables t ON t.record_type = l.record_type
+  WHERE t.table_name = st_columns.table_name AND l.subrecord = st_columns.subrecord
+    AND (st_columns.path = l.subrecord || '.' || l.leaf OR st_columns.path = l.subrecord
+         OR st_columns.path GLOB l.subrecord || '.*.' || l.leaf));
+-- 2. Columns with no link, by name: <table>_<column>[_flags] for flag sets,
+--    then <table>_<column>[_type] for enumerations.
 UPDATE st_columns SET flag_kind = (
   SELECT k.kind_name FROM ut_flag_kinds k
   WHERE k.kind_name IN (st_columns.table_name || '_' || st_columns.column_name,
                         st_columns.table_name || '_' || st_columns.column_name || '_flags'))
-WHERE kind IN ('int', 'flags');
+WHERE kind IN ('int', 'flags') AND enum_kind IS NULL AND flag_kind IS NULL;
 UPDATE st_columns SET enum_kind = (
   SELECT k.kind_name FROM ut_enum_kinds k
   WHERE k.kind_name IN (st_columns.table_name || '_' || st_columns.column_name,
                         st_columns.table_name || '_' || st_columns.column_name || '_type'))
-WHERE kind IN ('int', 'text');
+WHERE kind IN ('int', 'text') AND enum_kind IS NULL AND flag_kind IS NULL;
 UPDATE st_columns SET flag_kind = 'ut_record_flags'
 WHERE table_name = 'forms' AND column_name = 'flags';
 )SQL";
