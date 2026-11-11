@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SkyrimQueryEngine VERSION 0.94 LANGUAGES C CXX)
+project(SkyrimQueryEngine VERSION 0.95 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -75,6 +75,9 @@ endif()
 target_link_libraries(skqe PUBLIC sqlite3 PRIVATE bsa::reader asset::metadata bcrypt shell32 ole32 advapi32)
 
 add_executable(skqe_cli tools/skqe.cpp)
+if(WIN32)
+    target_sources(skqe_cli PRIVATE res/skqe.rc)  # the icon
+endif()
 set_target_properties(skqe_cli PROPERTIES OUTPUT_NAME skqe)
 target_link_libraries(skqe_cli PRIVATE skqe)
 target_compile_definitions(skqe_cli PRIVATE SKQE_VERSION="${PROJECT_VERSION}")
