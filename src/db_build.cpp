@@ -30,7 +30,7 @@
 namespace skqe {
 namespace {
 
-constexpr int kSchemaVersion = 8;
+constexpr int kSchemaVersion = 9;
 constexpr size_t kBatchRows = 50000;
 constexpr int64_t kKeyShift = 1 << 24;
 
@@ -648,6 +648,8 @@ CREATE TABLE st_columns(
   refers_to   TEXT,
   description TEXT,
   notes       TEXT,
+  flag_kind   TEXT,  -- the ut_flag_kinds entry naming this column's bits
+  enum_kind   TEXT,  -- the ut_enum_kinds entry naming this column's values
   PRIMARY KEY(table_name, column_name)
 ) WITHOUT ROWID;
 
@@ -1173,6 +1175,18 @@ bool BuildExtras(ExtraContext& c, const std::set<std::string>& extras, const std
     return true;
 }
 
+// Lookup tables carried forward from the old database (data/ut_reference.sql).
+const char* kReferenceTables[][2] = {
+    {"ut_ctda_functions", "Condition (CTDA) functions: index, name and the format of each parameter."},
+    {"ut_data_types", "Data types of the old database's field dictionary."},
+    {"ut_disp_transforms", "Display transforms (float rounding, radians to degrees, ...)."},
+    {"ut_enum_kinds", "Named enumerations; st_columns.enum_kind binds a column to one."},
+    {"ut_enum_values", "The values of each enumeration (position = stored code)."},
+    {"ut_flag_kinds", "Named flag sets; st_columns.flag_kind binds a column to one. <type>_record_flags name the record header flags (view record_flags_v)."},
+    {"ut_flag_values", "The bits of each flag set: bit number and label."},
+    {"ut_stored_formats", "Stored formats of the old database's field dictionary."},
+};
+
 const char* kCoreTables[][2] = {
     {"plugins", "Every plugin in the load order, plus masters it lacks (load_order NULL) and SkyrimSE.exe (load_order -1, the engine's own forms). load_error: why a plugin could not be read (it then has no rows)."},
     {"plugin_masters", "Each plugin's masters, in order."},
@@ -1284,6 +1298,19 @@ JOIN plugins p ON p.plugin_no = m.plugin_no
 JOIN plugins x ON x.plugin_no = m.master_no
 WHERE p.load_order >= 0 AND x.load_order IS NULL;
 
+-- Record header flag names per record type (ut_flag_kinds <type>_record_flags),
+-- and every set flag of every form occurrence by name.
+CREATE VIEW record_flags_v AS
+SELECT t.record_type, v.bit, v.label
+FROM ut_flag_kinds k
+JOIN ut_flag_values v ON v.fk_kind = k.id
+JOIN st_tables t ON t.kind = 'type' AND t.table_name = substr(k.kind_name, 1, length(k.kind_name) - 13)
+WHERE k.kind_name LIKE '%\_record\_flags' ESCAPE '\';
+CREATE VIEW form_flag_names_v AS
+SELECT f.form_key, f.plugin_no, f.type, r.bit, r.label
+FROM forms f JOIN record_flags_v r ON r.record_type = f.type
+WHERE f.flags & (1 << r.bit);
+
 -- The shell extension's columns per plugin, by name. dirty: deleted placed
 -- objects or ITM records (NULL until both extras that decide it are built).
 CREATE VIEW plugin_facts_v AS
@@ -1361,6 +1388,43 @@ struct RowSink {
         }
     }
 };
+
+// The lookup tables carried forward from the old database (ut_*: CTDA
+// functions, enum and flag kinds with their values, data types, stored
+// formats, display transforms), ut_reference.sql next to the catalog.
+bool LoadReference(Db& db, const std::wstring& patterns, std::string* error) {
+    const std::wstring path = patterns.substr(0, patterns.find_last_of(L"\\/") + 1) + L"ut_reference.sql";
+    FILE* fp = nullptr;
+    std::string text;
+    if (_wfopen_s(&fp, path.c_str(), L"rb") == 0 && fp) {
+        char buf[65536];
+        for (size_t n; (n = fread(buf, 1, sizeof(buf), fp)) > 0;) text.append(buf, n);
+        fclose(fp);
+    }
+    if (text.empty()) {
+        *error = "cannot read " + Utf8(path) + " (it ships next to patterns.json)";
+        return false;
+    }
+    return db.Exec(text, error);
+}
+
+// Binds data-dictionary columns to the lookup tables by name, the old
+// database's rule: <table>_<column>, optionally with _flags / _type.
+// Record flags (<type>_record_flags) name forms.flags bits per type.
+const char kBindReference[] = R"SQL(
+UPDATE st_columns SET flag_kind = (
+  SELECT k.kind_name FROM ut_flag_kinds k
+  WHERE k.kind_name IN (st_columns.table_name || '_' || st_columns.column_name,
+                        st_columns.table_name || '_' || st_columns.column_name || '_flags'))
+WHERE kind IN ('int', 'flags');
+UPDATE st_columns SET enum_kind = (
+  SELECT k.kind_name FROM ut_enum_kinds k
+  WHERE k.kind_name IN (st_columns.table_name || '_' || st_columns.column_name,
+                        st_columns.table_name || '_' || st_columns.column_name || '_type'))
+WHERE kind IN ('int', 'text');
+UPDATE st_columns SET flag_kind = 'ut_record_flags'
+WHERE table_name = 'forms' AND column_name = 'flags';
+)SQL";
 
 bool LoadCatalog(const std::wstring& path, PatternCatalog* catalog, std::string* error) {
     FILE* fp = nullptr;
@@ -1493,7 +1557,7 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
         if (!db.Exec("PRAGMA page_size=8192; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;"
                      "PRAGMA locking_mode=EXCLUSIVE; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-262144;",
                      error) ||
-            !db.Exec(kSchema, error) || !db.Exec("BEGIN", error))
+            !db.Exec(kSchema, error) || !db.Exec("BEGIN", error) || !LoadReference(db, opt.patterns, error))
             return 1;
         for (const auto& td : schema.tables())
             if (!db.Exec(TableDdl(td), error)) return 1;
@@ -1670,17 +1734,37 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             sql += "CREATE VIEW " + Quote("winning_" + t.name) + " AS SELECT t.* FROM " + Quote(t.name) +
                    " t JOIN forms f ON f.form_key = t.form_key AND f.plugin_no = t.plugin_no WHERE f.is_winner;\n";
         }
+        // Every condition of every record type in one view, with the
+        // function's name (ut_ctda_functions).
+        std::string conditions;
+        for (const auto& t : schema.tables()) {
+            if (t.fs != "CTDA") continue;
+            std::set<std::string> have;
+            for (const auto& c : t.columns) have.insert(c.name);
+            auto col = [&](const char* name) { return have.count(name) ? Quote(name) : std::string("NULL"); };
+            conditions += std::string(conditions.empty() ? "" : "UNION ALL ") + "SELECT c.form_key, c.plugin_no, '" +
+                          t.rt + "' AS type, c.idx, " + col("type_flags") + " AS type_flags, " + col("func_idx") +
+                          " AS func_idx, " + col("comp_value") + " AS comp_value, " + col("param1") + " AS param1, " +
+                          col("param2") + " AS param2, " + col("run_on") + " AS run_on, " + col("reference") +
+                          " AS reference FROM " + Quote(t.name) + " c\n";
+        }
+        if (!conditions.empty())
+            sql += "CREATE VIEW conditions_v AS SELECT x.*, u.name AS function, u.param1_fmt, u.param2_fmt FROM (\n" +
+                   conditions + ") x LEFT JOIN ut_ctda_functions u ON u.func_index = x.func_idx;\n";
         if (!db.Exec(sql, error)) return 1;
 
         // The data dictionary.
         Stmt insT{db.Prepare("INSERT INTO st_tables VALUES(?,?,?,?,?,?)", error)};
-        Stmt insC{db.Prepare("INSERT INTO st_columns VALUES(?,?,?,?,?,?,?,?,?,?)", error)};
+        Stmt insC{db.Prepare("INSERT INTO st_columns VALUES(?,?,?,?,?,?,?,?,?,?,NULL,NULL)", error)};
         if (!insT.st || !insC.st) return 1;
         for (const auto& ct : kCoreTables)
             insT.Text(1, ct[0]).Text(2, "core").Null(3).Null(4).Null(5).Text(6, ct[1]).Run();
         for (const auto& et : kExtraTables)
             insT.Text(1, et[0]).Text(2, "extra").Null(3).Null(4).Text(5, et[1]).Text(6, et[2]).Run();
-        if (!db.Exec("INSERT INTO st_columns SELECT m.table_name, p.name, p.cid, p.type, NULL, NULL, NULL, NULL, NULL, NULL "
+        for (const auto& rt : kReferenceTables)
+            insT.Text(1, rt[0]).Text(2, "reference").Null(3).Null(4).Null(5).Text(6, rt[1]).Run();
+        if (!db.Exec("INSERT INTO st_columns SELECT m.table_name, p.name, p.cid, p.type, NULL, NULL, NULL, NULL, NULL, NULL, "
+                     "NULL, NULL "
                      "FROM st_tables m, pragma_table_info(m.table_name) p;"
                      "UPDATE st_columns SET notes = '" + std::string(kBlobNote) + "' "
                      "WHERE table_name = 'subrecord_raw' AND column_name = 'bytes'",
@@ -1719,6 +1803,8 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
                 insC.Run();
             }
         }
+
+        if (!db.Exec(kBindReference, error)) return 1;
 
         Stmt meta{db.Prepare("INSERT INTO skqe_meta VALUES(?,?)", error)};
         auto putMeta = [&](const char* k, const std::string& v) { meta.Text(1, k).Text(2, v).Run(); };

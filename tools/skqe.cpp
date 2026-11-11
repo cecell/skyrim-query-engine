@@ -698,7 +698,7 @@ OPTIONS
   --threads <n>            decode threads (default: logical cores - 1).
   --quiet                  no progress output.
 
-WHAT IS IN IT (schema version 7)
+WHAT IS IN IT (schema version 9)
   plugins         one row per plugin: plugin_no (its number in this DB),
                   load_order, mod_index (light slot for light plugins),
                   is_light, is_master, header facts, size, mtime, crc32.
@@ -783,6 +783,16 @@ WHAT IS IN IT (schema version 7)
   subrecord_overflow  extra occurrences of subrecords expected once.
   subrecord_raw       subrecords with no pattern or bytes that did not fit
                       (bytes: a BLOB).
+  ut_*            lookup tables carried forward from the old database:
+                  ut_ctda_functions (condition functions and their
+                  parameter formats), ut_enum_kinds / ut_enum_values,
+                  ut_flag_kinds / ut_flag_values, ut_data_types,
+                  ut_stored_formats, ut_disp_transforms.
+                  st_columns.flag_kind / enum_kind bind a column to its
+                  names. record_flags_v: record header flag names per type;
+                  form_flag_names_v: every set flag of every form by name;
+                  conditions_v: every condition (CTDA) of every record type
+                  with its function's name.
   st_tables, st_columns  the data dictionary: every table and column, with
                   its subrecord, its skqe export path, what a key column
                   refers to, xEdit's name for the subrecord, and notes

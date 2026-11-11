@@ -69,6 +69,11 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/search_filters.txt
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/search_filters.txt ${CMAKE_CURRENT_BINARY_DIR}/search_filters.txt
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data/search_filters.txt)
 add_custom_target(skqe_search_filters ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/search_filters.txt)
+# The lookup tables build-db loads (ut_*), next to the exe.
+add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ut_reference.sql
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/ut_reference.sql ${CMAKE_CURRENT_BINARY_DIR}/ut_reference.sql
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data/ut_reference.sql)
+add_custom_target(skqe_ut_reference ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/ut_reference.sql)
 
 # Unit tests: hand-built valid and damaged plugins / strings files.
 enable_testing()
