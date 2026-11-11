@@ -67,8 +67,11 @@ jobs:
           mkdir alone && copy build\skqe.exe alone\ >nul || exit /b 1
           alone\skqe.exe --version > alone\version.txt || exit /b 1
           type alone\version.txt
-          findstr /C:"NOT FOUND" alone\version.txt >nul && exit /b 1
+          rem findstr exits 1 when it finds nothing, which is the good case here.
+          findstr /C:"NOT FOUND" alone\version.txt >nul
+          if not errorlevel 1 exit /b 1
           rmdir /s /q alone
+          exit /b 0
 
       - name: Package and hash
         id: package
