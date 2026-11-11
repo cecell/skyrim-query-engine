@@ -673,13 +673,13 @@ OPTIONS
                             when a key's raw-fallback count rose, a key's
                             decoded values changed in any plugin, or a record
                             type has more grammar diagnostics of one kind
+  --expect-changed K,K,...  keys whose values may change in this run; a listed
+                            key that did not change is an error
+  --threads <n>             plugins decoded at once (default: half the cores)
 
 A catalogue with "_records" also matches every record against its type's
 grammar: fields missing, out of order, repeated too often or unknown, and
 count fields that disagree with what they count, per record type.
-  --expect-changed K,K,...  keys whose values may change in this run; a listed
-                            key that did not change is an error
-  --threads <n>             plugins decoded at once (default: half the cores)
 
 EXIT CODES
   0 clean, 1 findings at error level, 2 bad usage or unreadable input
