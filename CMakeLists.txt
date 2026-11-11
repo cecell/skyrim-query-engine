@@ -101,6 +101,10 @@ enable_testing()
 add_executable(skqe_tests tests/test_skqe.cpp)
 target_link_libraries(skqe_tests PRIVATE skqe)
 add_test(NAME unit COMMAND skqe_tests ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json)
+# The pattern-language test vectors: the file lives beside the language
+# specification, so it is given on the command line.
+add_executable(skqe_vectors tests/test_vectors.cpp)
+target_link_libraries(skqe_vectors PRIVATE skqe)
 
 # The plugin writer: an editable model over a plugin's bytes, field edits, and
 # skqeedit.exe. A separate library and exe, so skqe.exe stays read-only and
