@@ -284,7 +284,10 @@ private:
     }
 
     bool CheckBitfield(const Value& node, const std::string& path, std::set<std::string>* bound) {
-        if (!Keys(node, path, {"size", "bits", "as"})) return false;
+        if (!Keys(node, path, {"size", "bits", "as", "unnamed"})) return false;
+        if (const Value* u = node.Find("unnamed"); u && (!u->IsString() || (u->AsString() != "show" && u->AsString() != "hide"))) {
+            return Err("E013", Join(path, "unnamed"), "'unnamed' must be \"show\" or \"hide\"");
+        }
         const Value* size = node.Find("size");
         if (!size) return Err("E012", path, "bitfield without 'size'");
         if (!size->IsString() || !WidthOf(size->AsString())) return Err("E013", Join(path, "size"), "'size' must be uint8, uint16 or uint32");
@@ -300,6 +303,11 @@ private:
             }
             if (!bv.IsString()) return Err("E013", bp, "a bit name must be text");
             if (!names.insert(bv.AsString()).second) return Err("E015", bp, "duplicate bit name '" + bv.AsString() + "'");
+            const std::string& nm = bv.AsString();
+            if (nm.size() > 3 && nm.compare(0, 3, "bit") == 0 && nm.find_first_not_of("0123456789", 3) == std::string::npos &&
+                nm.substr(3) != bk) {
+                return Err("E015", bp, "'" + nm + "' names a different bit");
+            }
         }
         return CheckAs(node, path, bound);
     }
@@ -643,7 +651,8 @@ bool PatternCatalog::LoadFormat2(const Value& root, const std::string& duplicate
             warnings_.push_back({"W106", key, "", "an lstring leaf in a key with no _lstrings entry"});
         }
         try {
-            byKey_[key] = CompilePattern(tree, true);
+            const Value* ub = options_.kind() == Value::Kind::Map ? options_.Find("unnamed_bits") : nullptr;
+            byKey_[key] = CompilePattern(tree, true, ub && ub->AsString() == "show");
         } catch (const PatternError& e) {
             return fail("E010", key, "", e.what());
         }

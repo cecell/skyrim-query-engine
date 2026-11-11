@@ -70,6 +70,8 @@ struct Pattern {
     // Bitfield; Packed and PackedMember: `size` is the word's width in bytes
     int size = 4;
     std::map<int, std::string> bits;
+    bool showUnnamed = false;  // format 2 "unnamed":"show": set bits without a name read as "bit<N>"
+    bool bitNames = false;     // format 2: "bit<N>" is accepted as a flag name on encode
 
     // Packed: the members in order, and the bits none of them owns
     std::vector<std::shared_ptr<const Pattern>> members;
@@ -88,6 +90,8 @@ namespace {
 // Compiling a format 2 catalogue: its features are on. Format 1 compiles
 // exactly as it always did.
 thread_local bool g_format2 = false;
+// Format 2 "_options": {"unnamed_bits": "show"}, for bitfields without their own "unnamed".
+thread_local bool g_unnamedShow = false;
 
 const std::map<std::string, Prim>& PrimNames() {
     static const std::map<std::string, Prim> names = {
@@ -369,6 +373,11 @@ std::shared_ptr<const Pattern> Compile(const Value& j) {
             }
         }
         if (const Value* as = j.Find("as"); as && as->IsString()) p->bindAs = as->AsString();
+        if (g_format2) {
+            p->bitNames = true;
+            const Value* u = j.Find("unnamed");
+            p->showUnnamed = u && u->IsString() ? u->AsString() == "show" : g_unnamedShow;
+        }
     } else if (t == "packed" && g_format2) {
         CompilePacked(j, p.get());
         if (p->restMask) p->body = RestMember(*p);  // the "_rest" leaf's pattern
@@ -909,8 +918,16 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
             size_t start = cur.pos;
             uint32_t raw = cur.ReadUint(p.size);
             std::vector<Value> flags;
-            for (const auto& [bit, name] : p.bits) {
-                if (bit < 32 && (raw & (1u << bit))) flags.push_back(Value::Str(name));
+            if (p.showUnnamed) {  // every set bit, in bit order; a bit without a name as bit<N>
+                for (int bit = 0; bit < 8 * p.size; ++bit) {
+                    if (!(raw & (1u << bit))) continue;
+                    auto it = p.bits.find(bit);
+                    flags.push_back(Value::Str(it != p.bits.end() ? it->second : "bit" + std::to_string(bit)));
+                }
+            } else {
+                for (const auto& [bit, name] : p.bits) {
+                    if (bit < 32 && (raw & (1u << bit))) flags.push_back(Value::Str(name));
+                }
             }
             if (p.bindAs) scope.Bind(*p.bindAs, Value::Int(raw));
             Value v = Value::List(std::move(flags));
@@ -925,12 +942,18 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
 
 std::shared_ptr<const Pattern> CompilePattern(const Value& json) { return Compile(json); }
 
-std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2) {
+std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2) { return CompilePattern(json, format2, false); }
+
+std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2, bool unnamedShow) {
     struct Flag {
-        bool saved = g_format2;
-        ~Flag() { g_format2 = saved; }
+        bool saved = g_format2, savedShow = g_unnamedShow;
+        ~Flag() {
+            g_format2 = saved;
+            g_unnamedShow = savedShow;
+        }
     } flag;
     g_format2 = format2;
+    g_unnamedShow = unnamedShow;
     return Compile(json);
 }
 
@@ -1188,6 +1211,15 @@ bool EncodeLeaf(const Pattern& p, const Value& in, const uint8_t* cur, size_t cu
                     return true;
                 }
             }
+            // Format 2: bit<N> for any bit of the word.
+            if (p.bitNames && name.size() > 3 && name.size() <= 5 && name.compare(0, 3, "bit") == 0 &&
+                name.find_first_not_of("0123456789", 3) == std::string::npos && (name.size() == 4 || name[3] != '0')) {
+                int n = std::stoi(name.substr(3));
+                if (n < 8 * p.size) {
+                    *bit = 1u << n;
+                    return true;
+                }
+            }
             return false;
         };
         auto apply = [&](const Value& list, bool set) {
@@ -1204,8 +1236,12 @@ bool EncodeLeaf(const Pattern& p, const Value& in, const uint8_t* cur, size_t cu
             if (const Value* a = in.Find("add"); a && !apply(*a, true)) return false;
             if (const Value* r = in.Find("remove"); r && !apply(*r, false)) return false;
         } else if (in.kind() == Value::Kind::List) {  // the named bits become exactly these; unnamed bits stay
-            for (const auto& b : p.bits)
-                if (b.first < 32) raw &= ~(1u << b.first);
+            if (p.showUnnamed) {
+                raw = 0;  // the value shows every set bit: the list is the whole word
+            } else {
+                for (const auto& b : p.bits)
+                    if (b.first < 32) raw &= ~(1u << b.first);
+            }
             if (!apply(in, true)) return false;
         } else {
             int64_t i;

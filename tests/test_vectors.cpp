@@ -27,7 +27,7 @@ using namespace skqe;
 namespace {
 
 // The features this engine implements.
-const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl", "range", "peek_offset", "write_arm", "packed"};
+const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl", "range", "peek_offset", "write_arm", "packed", "unnamed_bits"};
 
 int g_passed = 0, g_failed = 0, g_skipped = 0, g_notApplicable = 0;
 bool g_verbose = false;
@@ -111,12 +111,29 @@ DecodeContext ContextOf(const Value* c) {
     return ctx;
 }
 
+// A field vector's pattern. With "shared" or "options" it is loaded as the
+// one key of a format 2 catalogue that carries them; otherwise compiled
+// directly (as format 1 for today's behaviour).
+std::shared_ptr<const Pattern> CompileVector(const Value& v) {
+    const Value* pj = v.Find("pattern");
+    if (!v.Find("shared") && !v.Find("options")) return CompilePattern(*pj, Str(v, "feature") != "current");
+    Value cat = Value::Map();
+    cat.Set("$format", Value::Str("spf-patterns/2"));
+    if (const Value* s = v.Find("shared")) cat.Set("_shared", *s);
+    if (const Value* o = v.Find("options")) cat.Set("_options", *o);
+    cat.Set("TEST.TEST", *pj);
+    PatternCatalog* c = new PatternCatalog;  // kept alive with the pattern below
+    std::string err;
+    if (!c->Load(Json(cat), &err)) throw PatternError(false, "catalogue: " + err);
+    const Pattern* p = c->Find("TEST", "TEST");
+    return std::shared_ptr<const Pattern>(std::shared_ptr<PatternCatalog>(c), p);
+}
+
 void RunField(const Value& v) {
     std::string id = Str(v, "id");
-    const Value* pj = v.Find("pattern");
     std::shared_ptr<const Pattern> pat;
     try {
-        pat = CompilePattern(*pj, Str(v, "feature") != "current");
+        pat = CompileVector(v);
     } catch (const PatternError& e) {
         return Fail(id, std::string("pattern does not compile: ") + e.what());
     }

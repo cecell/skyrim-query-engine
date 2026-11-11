@@ -66,6 +66,8 @@ struct ContextVar {
 // read-ahead at an offset, ...); without it, as format 1.
 std::shared_ptr<const Pattern> CompilePattern(const Value& json);
 std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2);
+// `unnamedShow`: the catalogue's "_options": {"unnamed_bits": "show"}.
+std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2, bool unnamedShow);
 // Format 2 syntax helpers, shared by the compiler and the catalogue check.
 bool ParseCaseRange(const std::string& key, std::optional<int64_t>* lo, std::optional<int64_t>* hi);
 bool ParsePeek(const std::string& name, int* width, size_t* offset);
