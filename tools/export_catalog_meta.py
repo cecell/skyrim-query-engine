@@ -38,6 +38,21 @@ for key in cat:
     if not key.startswith("_") and key.split(".", 1)[1] in ALWAYS_MULTI:
         multi.add(key)
 multi |= {"LENS.DNAM", "LENS.LFSD"}
+# Destruction stage fields (one set per stage) on record types where no
+# Bethesda plugin has them: they repeat as they do on the types that have.
+multi |= {
+    "ALCH.DMDL", "ALCH.DMDT", "ALCH.DSTD", "ALCH.DSTF", "AMMO.DMDL", "AMMO.DMDT", "AMMO.DSTD",
+    "AMMO.DSTF", "ARMO.DMDL", "ARMO.DMDT", "ARMO.DSTD", "ARMO.DSTF", "BOOK.DMDL", "BOOK.DMDT",
+    "CONT.DMDL", "CONT.DMDT", "CONT.DSTD", "CONT.DSTF", "DOOR.DMDL", "DOOR.DMDT", "DOOR.DSTD",
+    "DOOR.DSTF", "FLOR.DMDL", "FLOR.DMDT", "FLOR.DSTD", "FLOR.DSTF", "FURN.DMDL", "FURN.DMDT",
+    "INGR.DMDL", "INGR.DMDT", "INGR.DSTD", "INGR.DSTF", "KEYM.DMDL", "KEYM.DMDT", "KEYM.DSTD",
+    "KEYM.DSTF", "LIGH.DMDL", "LIGH.DMDT", "LIGH.DSTD", "LIGH.DSTF", "MISC.DMDL", "MISC.DMDT",
+    "MISC.DSTD", "MISC.DSTF", "NPC_.DMDL", "NPC_.DMDT", "PROJ.DMDL", "PROJ.DMDT", "SCRL.DMDL",
+    "SCRL.DMDT", "SCRL.DSTD", "SCRL.DSTF", "TACT.DMDL", "TACT.DMDT", "TACT.DSTD", "TACT.DSTF",
+    "WEAP.DMDL", "WEAP.DMDT", "WEAP.DSTD", "WEAP.DSTF",
+}
+# DMDS, the stage's alternate textures, repeats per stage like DMDL and DMDT.
+multi |= {"ALCH.DMDS", "AMMO.DMDS", "ARMO.DMDS", "BOOK.DMDS", "CONT.DMDS", "DOOR.DMDS", "FLOR.DMDS", "FURN.DMDS", "INGR.DMDS", "KEYM.DMDS", "LIGH.DMDS", "MISC.DMDS", "MSTT.DMDS", "NPC_.DMDS", "PROJ.DMDS", "SCRL.DMDS", "SLGM.DMDS", "TACT.DMDS", "WEAP.DMDS"}
 multi = sorted(multi)
 
 # Names for unlabeled tuple items, from xEdit's definitions
@@ -59,7 +74,7 @@ NAMES = {
     "*.XPPA": {"": ["present"]},
     "*.XRGD": {"": ["bones"]},
     "*.XWCU": {"": ["velocities"]},
-    "REFR.XLOC": {"": ["level", "unused1", "key", "flags", "unused2", "unused3"]},
+    "REFR.XLOC": {"": ["level", "unused1", "key", "flags", "unused2", "unknown1", "unknown2"]},
     "SHOU.SNAM": {"": ["word", "spell", "recovery_time"]},
     "IPDS.PNAM": {"": ["material", "impact"]},
     "CPTH.ANAM": {"": ["parent", "previous"]},
