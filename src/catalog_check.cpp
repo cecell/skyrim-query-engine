@@ -74,7 +74,7 @@ struct KeyAcc {
 
 // One field: decode, count, hash.
 void Visit(const PatternCatalog& cat, const std::string& rt, const std::string& fs, const uint8_t* data,
-           size_t len, const DecodeContext& ctx, std::map<std::string, KeyAcc>* acc) {
+           size_t len, const DecodeContext& ctx, std::map<std::string, KeyAcc>* acc, Value* decoded = nullptr) {
     KeyAcc& a = (*acc)[rt + "." + fs];
     ++a.st.n;
     std::string text;
@@ -88,6 +88,7 @@ void Visit(const PatternCatalog& cat, const std::string& rt, const std::string& 
             Value v = DecodeSubrecord(*pat, data, len, ctx, &used);
             if (used < len) ++a.st.left;
             WriteJson(v, &text);
+            if (decoded) *decoded = std::move(v);
         } catch (const std::exception&) {
             ++a.st.raw;
             text = Hex(data, len);
@@ -118,6 +119,11 @@ PluginStats CheckOne(const PatternCatalog& cat, const std::wstring& path) {
         if (!plugin->Body(r, &scratch, &body, &size)) continue;
         uint32_t big = 0;
         bool haveBig = false;
+        const RecordGrammar* grammar = cat.Grammar(r.type);
+        std::vector<std::string> sigs;
+        std::vector<Value> values;
+        std::vector<bool> decodedOk;
+        std::vector<size_t> sizes;
         for (size_t q = 0; q + 6 <= size;) {
             std::string fs(reinterpret_cast<const char*>(body + q), 4);
             size_t len = U16(body + q + 4);
@@ -134,8 +140,27 @@ PluginStats CheckOne(const PatternCatalog& cat, const std::wstring& path) {
                 haveBig = true;
                 continue;
             }
-            Visit(cat, r.type, fs, data, len, rc.Before(fs), &acc);
+            if (grammar) {
+                values.emplace_back();
+                Visit(cat, r.type, fs, data, len, rc.Before(fs), &acc, &values.back());
+                sigs.push_back(fs);
+                sizes.push_back(len);
+            } else {
+                Visit(cat, r.type, fs, data, len, rc.Before(fs), &acc);
+            }
             rc.After(fs, data, len);
+        }
+        if (grammar) {
+            std::vector<GrammarPlacement> placed;
+            std::vector<GrammarDiag> diags;
+            grammar->Match(sigs, &placed, &diags);
+            auto& g = out.grammar[r.type];
+            for (const auto& d : diags) ++g[d.code];
+            std::vector<const Value*> ptrs;
+            for (const Value& v : values) ptrs.push_back(&v);
+            for (const auto& c : grammar->Counts(sigs, ptrs, sizes, placed))
+                if (!c.ok) ++g[c.code];
+            ++g["records"];
         }
     }
     for (auto& [key, a] : acc) {
@@ -184,6 +209,7 @@ Value BaselineJson(const CheckRun& run) {
     doc.Set("format", Value::Str("skqe-catalog-baseline/1"));
     Value plugins = Value::Map();
     std::map<std::string, KeyStats> totals;
+    std::map<std::string, std::map<std::string, uint64_t>> grammarTotals;
     for (const auto& [name, p] : run.plugins) {
         Value pv = Value::Map();
         if (!p.error.empty()) pv.Set("error", Value::Str(p.error));
@@ -204,6 +230,18 @@ Value BaselineJson(const CheckRun& run) {
             t.nopat += k.nopat;
         }
         pv.Set("keys", std::move(keys));
+        if (!p.grammar.empty()) {
+            Value gv = Value::Map();
+            for (const auto& [rt, codes] : p.grammar) {
+                Value cv = Value::Map();
+                for (const auto& [code, n] : codes) {
+                    cv.Set(code, Value::Int(static_cast<int64_t>(n)));
+                    grammarTotals[rt][code] += n;
+                }
+                gv.Set(rt, std::move(cv));
+            }
+            pv.Set("grammar", std::move(gv));
+        }
         plugins.Set(name, std::move(pv));
     }
     Value tv = Value::Map();
@@ -216,6 +254,15 @@ Value BaselineJson(const CheckRun& run) {
         tv.Set(key, std::move(kv));
     }
     doc.Set("keys", std::move(tv));
+    if (!grammarTotals.empty()) {
+        Value gt = Value::Map();
+        for (const auto& [rt, codes] : grammarTotals) {
+            Value cv = Value::Map();
+            for (const auto& [code, n] : codes) cv.Set(code, Value::Int(static_cast<int64_t>(n)));
+            gt.Set(rt, std::move(cv));
+        }
+        doc.Set("grammar", std::move(gt));
+    }
     doc.Set("plugins", std::move(plugins));
     return doc;
 }
@@ -250,6 +297,10 @@ bool BaselineFromJson(const Value& doc, CheckRun* run, std::string* error) {
                 k.nopat = num(kv, "nopat");
                 if (const Value* s = kv.Find("sha"); s && s->IsString()) k.sha = s->AsString();
             }
+        }
+        if (const Value* g = pv.Find("grammar")) {
+            for (const auto& [rt, codes] : g->Members())
+                for (const auto& [code, n] : codes.Members()) p.grammar[rt][code] = num(codes, code.c_str());
         }
     }
     return true;
@@ -294,6 +345,18 @@ std::vector<std::string> CompareBaseline(const CheckRun& base, const CheckRun& n
                 changed.insert(key);
                 if (!expect.count(key)) out.push_back(name + ": " + key + ": decoded values changed");
             }
+        }
+    }
+    std::map<std::pair<std::string, std::string>, std::pair<uint64_t, uint64_t>> diag;  // (rt, code) -> (base, now)
+    for (const auto& [name, p] : base.plugins)
+        for (const auto& [rt, codes] : p.grammar)
+            for (const auto& [code, n] : codes) diag[{rt, code}].first += n;
+    for (const auto& [name, p] : now.plugins)
+        for (const auto& [rt, codes] : p.grammar)
+            for (const auto& [code, n] : codes) diag[{rt, code}].second += n;
+    for (const auto& [k, d] : diag) {
+        if (k.second != "records" && d.second > d.first) {
+            out.push_back(k.first + ": grammar " + k.second + " rose from " + std::to_string(d.first) + " to " + std::to_string(d.second));
         }
     }
     for (const auto& [key, r] : raw) {

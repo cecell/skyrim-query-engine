@@ -670,8 +670,13 @@ OPTIONS
   --plugins <folder>        decode every .esm/.esp/.esl in the folder
   --write-baseline <file>   with --plugins: write the baseline
   --baseline <file>         with --plugins: compare with a baseline. An error
-                            when a key's raw-fallback count rose or a key's
-                            decoded values changed in any plugin
+                            when a key's raw-fallback count rose, a key's
+                            decoded values changed in any plugin, or a record
+                            type has more grammar diagnostics of one kind
+
+A catalogue with "_records" also matches every record against its type's
+grammar: fields missing, out of order, repeated too often or unknown, and
+count fields that disagree with what they count, per record type.
   --expect-changed K,K,...  keys whose values may change in this run; a listed
                             key that did not change is an error
   --threads <n>             plugins decoded at once (default: half the cores)
@@ -1170,6 +1175,18 @@ int CatalogCommand(int argc, wchar_t** argv) {
     printf("raw fallbacks %llu in %zu keys, bytes left after the pattern %llu in %zu keys, no pattern %llu\n",
            static_cast<unsigned long long>(raw), rawKeys.size(), static_cast<unsigned long long>(left), leftKeys.size(),
            static_cast<unsigned long long>(nopat));
+    // Record grammars: per record type, diagnostics and failed count checks by code.
+    std::map<std::string, std::map<std::string, uint64_t>> grammar;
+    for (const auto& [name, p] : run.plugins)
+        for (const auto& [rt, codes] : p.grammar)
+            for (const auto& [code, cnt] : codes) grammar[rt][code] += cnt;
+    for (const auto& [rt, codes] : grammar) {
+        std::string line;
+        for (const auto& [code, cnt] : codes)
+            if (code != "records") line += " " + code + " " + std::to_string(cnt);
+        printf("grammar %s: %llu records,%s\n", rt.c_str(), static_cast<unsigned long long>(codes.count("records") ? codes.at("records") : 0),
+               line.empty() ? " no diagnostics" : line.c_str());
+    }
     if (!writeBase.empty()) {
         std::string text;
         WriteJson(BaselineJson(run), &text);

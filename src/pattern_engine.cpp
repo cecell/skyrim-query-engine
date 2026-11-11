@@ -1580,6 +1580,7 @@ void PatternCatalog::Clear() {
     multi_.clear();
     shared_ = records_ = options_ = meta_ = Value();
     sharedCompiled_.clear();
+    grammars_.clear();
     context_.clear();
 }
 

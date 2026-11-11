@@ -27,7 +27,7 @@ using namespace skqe;
 namespace {
 
 // The features this engine implements.
-const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl", "range", "peek_offset", "write_arm", "packed", "unnamed_bits", "shared", "int64", "fourcc", "defaults"};
+const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl", "range", "peek_offset", "write_arm", "packed", "unnamed_bits", "shared", "int64", "fourcc", "defaults", "grammar"};
 
 int g_passed = 0, g_failed = 0, g_skipped = 0, g_notApplicable = 0;
 bool g_verbose = false;
@@ -255,6 +255,9 @@ void RunRecord(const Value& v) {
     const auto& fields = v.Find("fields")->Items();
     const auto& expect = v.Find("expect_fields")->Items();
     if (fields.size() != expect.size()) return Fail(id, "fields and expect_fields differ in length");
+    std::vector<std::string> sigs;
+    std::vector<Value> values(fields.size());
+    std::vector<size_t> sizes;
     for (size_t i = 0; i < fields.size(); ++i) {
         std::string fs = Str(fields[i], "sig");
         std::vector<uint8_t> bytes = FromHex(Str(fields[i], "hex"));
@@ -287,6 +290,7 @@ void RunRecord(const Value& v) {
         } else {
             try {
                 Value got = DecodeSubrecord(*pat, bytes.data(), bytes.size(), ctx);
+                values[i] = got;
                 if (want.Find("decode_error")) return Fail(id, at + "decoded, an error was expected");
                 if (!Same(got, *want.Find("decoded"))) {
                     return Fail(id, at + "decoded " + Json(got) + ", expected " + Json(*want.Find("decoded")));
@@ -299,6 +303,51 @@ void RunRecord(const Value& v) {
             }
         }
         rc.After(fs, bytes.data(), bytes.size());
+        sigs.push_back(fs);
+        sizes.push_back(bytes.size());
+    }
+    if (const RecordGrammar* g = cat.Grammar(rt)) {
+        std::vector<GrammarPlacement> placed;
+        std::vector<GrammarDiag> diags;
+        g->Match(sigs, &placed, &diags);
+        for (size_t i = 0; i < expect.size(); ++i) {
+            const Value* slot = expect[i].Find("slot");
+            std::string want = slot && slot->IsString() ? slot->AsString() : "(none)";
+            std::string got = placed[i].slot ? *placed[i].slot : "(none)";
+            if (slot && want != got) return Fail(id, "field " + std::to_string(i) + ": slot " + got + ", expected " + want);
+            if (const Value* grp = expect[i].Find("group"); grp && grp->AsString() != placed[i].group) {
+                return Fail(id, "field " + std::to_string(i) + ": group " + placed[i].group + ", expected " + grp->AsString());
+            }
+        }
+        Value dv = Value::List();
+        for (const auto& d : diags) {
+            Value x = Value::Map();
+            x.Set("code", Value::Str(d.code));
+            x.Set("what", Value::Str(d.what));
+            if (d.code == "missing") x.Set("in", Value::Str(d.in));
+            if (d.at) x.Set("at", Value::Int(static_cast<int64_t>(*d.at)));
+            dv.Items().push_back(std::move(x));
+        }
+        if (const Value* wd = v.Find("expect_diagnostics"); wd && !Same(dv, *wd)) {
+            return Fail(id, "diagnostics " + Json(dv) + ", expected " + Json(*wd));
+        }
+        std::vector<const Value*> ptrs;
+        for (const Value& x : values) ptrs.push_back(x.IsNull() ? nullptr : &x);
+        Value cv = Value::List();
+        for (const auto& c : g->Counts(sigs, ptrs, sizes, placed)) {
+            Value x = Value::Map();
+            x.Set("count", Value::Str(c.count));
+            x.Set("stored", c.stored ? Value::Int(*c.stored) : Value());
+            x.Set("actual", Value::Int(c.actual));
+            x.Set("ok", Value::Bool(c.ok));
+            if (!c.ok) x.Set("code", Value::Str(c.code));
+            cv.Items().push_back(std::move(x));
+        }
+        if (const Value* wc = v.Find("expect_counts"); wc && !Same(cv, *wc)) {
+            return Fail(id, "counts " + Json(cv) + ", expected " + Json(*wc));
+        }
+    } else if (v.Find("catalog")->Find("_records")) {
+        return Fail(id, "the catalogue's grammar did not load");
     }
     Pass(id);
 }

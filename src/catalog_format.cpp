@@ -764,6 +764,33 @@ bool PatternCatalog::LoadFormat2(const Value& root, const std::string& duplicate
         if (tree.kind() != Value::Kind::String && !isRef) byText[text].push_back(key);
         byFs[key.substr(5)].insert(text);
     }
+    // Pass 3: the record grammars, now that the patterns (and their shapes) exist.
+    if (records_.kind() == Value::Kind::Map) {
+        for (const auto& [rt, g] : records_.Members()) {
+            std::map<std::string, Shape> shapes;
+            auto shapeOf = [&](const std::string& sig) -> const Shape* {
+                auto it = shapes.find(sig);
+                if (it != shapes.end()) return &it->second;
+                const Pattern* p = Find(rt, sig);
+                if (!p) return nullptr;
+                return &(shapes[sig] = ShapeOf(*p));
+            };
+            std::string gerr;
+            if (!grammars_[rt].Parse(g, shapeOf, &gerr)) {
+                if (error) *error = "_records: " + rt + ": " + gerr;
+                return false;
+            }
+            // _multi and the grammar must agree on which fields repeat.
+            const RecordGrammar& gr = grammars_[rt];
+            for (const std::string& k : keys) {
+                if (k.compare(0, 5, rt + ".") != 0 || k.size() != 9 || !gr.HasSig(k.substr(5))) continue;
+                bool derived = gr.MultiSigs().count(k.substr(5)) != 0;
+                if (derived != (multi_.count(k) != 0)) {
+                    warnings_.push_back({"W107", k, "", derived ? "repeats by the grammar, not in _multi" : "in _multi, does not repeat by the grammar"});
+                }
+            }
+        }
+    }
     if (shared_.kind() == Value::Kind::Map) {
         for (const auto& m : shared_.Members()) {
             if (!sharedUsed.count(m.first)) warnings_.push_back({"W111", "_shared", m.first, "a shared pattern nothing refers to"});
@@ -866,6 +893,11 @@ bool PatternCatalog::LoadContext(const Value& c, std::string* error) {
         }
     }
     return true;
+}
+
+const RecordGrammar* PatternCatalog::Grammar(const std::string& rt) const {
+    auto it = grammars_.find(rt);
+    return it == grammars_.end() ? nullptr : &it->second;
 }
 
 const std::vector<ContextVar>& PatternCatalog::DeclaredContext(const std::string& rt) const {

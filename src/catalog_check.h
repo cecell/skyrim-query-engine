@@ -30,6 +30,10 @@ struct PluginStats {
     std::string error;                     // the plugin could not be read
     uint64_t records = 0;
     std::map<std::string, KeyStats> keys;  // "RT.FS" (or "RT.Record Header")
+    // Record types with a grammar: diagnostics and failed count checks by
+    // code (missing, too_many, out_of_order, unknown_field, count_mismatch,
+    // count_missing).
+    std::map<std::string, std::map<std::string, uint64_t>> grammar;
 };
 
 struct CheckRun {
@@ -45,7 +49,8 @@ bool BaselineFromJson(const Value& doc, CheckRun* run, std::string* error);
 
 // Differences of `now` from `base` that are errors: a key's raw-fallback
 // count rose, or its hash changed in a plugin (unless the key is in
-// `expectChanged`); a key in `expectChanged` whose hash changed nowhere.
+// `expectChanged`); a key in `expectChanged` whose hash changed nowhere; a
+// record type's count of grammar diagnostics of one code rose.
 std::vector<std::string> CompareBaseline(const CheckRun& base, const CheckRun& now,
                                          const std::vector<std::string>& expectChanged);
 

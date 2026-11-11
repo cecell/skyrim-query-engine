@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "grammar.h"
 #include "pattern_value.h"
 
 namespace skqe {
@@ -222,6 +223,8 @@ public:
     const Value& Meta() const { return meta_; }
     // The variables "_context" declares for a record type (format 2).
     const std::vector<ContextVar>& DeclaredContext(const std::string& rt) const;
+    // The record type's grammar from "_records" (format 2), or nullptr.
+    const RecordGrammar* Grammar(const std::string& rt) const;
 
 private:
     void Clear();
@@ -239,6 +242,7 @@ private:
     Value shared_, records_, options_, meta_;
     std::map<std::string, std::shared_ptr<const Pattern>> sharedCompiled_;
     std::map<std::string, std::vector<ContextVar>> context_;
+    std::map<std::string, RecordGrammar> grammars_;
 };
 
 }  // namespace skqe
