@@ -39,6 +39,8 @@ jobs:
           path: |
             build/skqe.exe
             build/patterns.json
+            build/search_filters.txt
+            build/ut_reference.sql
 
   # libFuzzer + AddressSanitizer for 5 minutes on GitHub's runner (local
   # antivirus holds instrumented executables). Seeds are the unit tests'
