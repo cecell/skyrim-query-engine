@@ -5,6 +5,8 @@
 // here.
 #include <algorithm>
 #include <functional>
+#include <iterator>
+#include <optional>
 #include <map>
 #include <set>
 
@@ -12,6 +14,19 @@
 
 namespace skqe {
 namespace {
+
+// Limits that keep a hostile or broken catalogue from ending the process.
+// The check, the compiler and the decoder all recurse through a pattern and
+// through its refs, so without them a long chain of refs is a stack overflow
+// instead of a load error. Real layouts need a handful of refs and nest a few
+// dozen nodes (the published catalogue: no refs yet, 30 nodes at most); the
+// engine was tried and holds beyond 800 nested nodes. So:
+//   kMaxRefDepth: refs in one chain (a key's ref to a shared pattern, its ref
+//                 to another, ...);
+//   kMaxNesting:  nodes from a key's top to its deepest leaf, counted through
+//                 refs as if each shared pattern stood in its place.
+constexpr size_t kMaxRefDepth = 64;
+constexpr size_t kMaxNesting = 256;
 
 // A load error: the first one found ends the load.
 struct LoadError {
@@ -66,6 +81,25 @@ public:
 
     // False with err_ set at the first error.
     bool Check(const Value& node, const std::string& path, std::set<std::string>* bound) {
+        if (nesting_ >= kMaxNesting) {
+            return Err("E018", path, "the pattern nests deeper than " + std::to_string(kMaxNesting) + " nodes, counted through its refs");
+        }
+        ++nesting_;
+        bool ok = CheckNode(node, path, bound);
+        --nesting_;
+        return ok;
+    }
+
+    // A shared pattern no key uses, checked on its own: every rule except
+    // the names it reads, which only a using key could bind or declare.
+    void SetStandalone() { standalone_ = true; }
+
+    const CatalogFinding& error() const { return err_; }
+    bool hasLstring() const { return hasLstring_; }
+    const std::set<std::string>& contextRead() const { return ctxRead_; }
+
+private:
+    bool CheckNode(const Value& node, const std::string& path, std::set<std::string>* bound) {
         switch (node.kind()) {
             case Value::Kind::String:
                 if (node.AsString() == "bytes" || IsPrimitiveName(node.AsString())) {
@@ -150,11 +184,6 @@ public:
         return Err("E010", path, "unknown node type: " + t);
     }
 
-    const CatalogFinding& error() const { return err_; }
-    bool hasLstring() const { return hasLstring_; }
-    const std::set<std::string>& contextRead() const { return ctxRead_; }
-
-private:
     bool Err(const char* code, const std::string& path, const std::string& msg) {
         err_ = {code, key_, path, msg};
         return false;
@@ -183,7 +212,22 @@ private:
         if (r->kind() != Value::Kind::List || r->Items().size() != 2 || !ok(r->Items()[0]) || !ok(r->Items()[1])) {
             return Err("E013", Join(path, "range"), "'range' is [lo, hi], numbers or null");
         }
+        const Value& lo = r->Items()[0];
+        const Value& hi = r->Items()[1];
+        if (!lo.IsNull() && !hi.IsNull() && Less(hi, lo)) return Err("E013", Join(path, "range"), "'range' runs backwards: lo > hi");
+        // A numeric default must lie inside the range (spec I.1, I.2).
+        if (const Value* d = node.Find("default"); d && (d->kind() == Value::Kind::Int || d->kind() == Value::Kind::Float)) {
+            if ((!lo.IsNull() && Less(*d, lo)) || (!hi.IsNull() && Less(hi, *d))) {
+                return Err("E013", Join(path, "default"), "'default' lies outside its 'range'");
+            }
+        }
         return true;
+    }
+    // a < b for two JSON numbers: exact for two integers.
+    static bool Less(const Value& a, const Value& b) {
+        if (a.kind() == Value::Kind::Int && b.kind() == Value::Kind::Int) return a.AsInt() < b.AsInt();
+        auto d = [](const Value& v) { return v.kind() == Value::Kind::Int ? static_cast<double>(v.AsInt()) : v.AsFloat(); };
+        return d(a) < d(b);
     }
     // "target": record types.
     bool CheckTarget(const Value& node, const std::string& path) {
@@ -201,14 +245,19 @@ private:
         if (!as) return true;
         if (!as->IsString() || as->AsString().empty()) return Err("E013", Join(path, "as"), "'as' must be a name");
         bound->insert(as->AsString());
+        partial_.erase(as->AsString());
         return true;
     }
 
     // A "$..." reference: bound earlier, a built-in, or a declared variable.
-    bool CheckRef(const std::string& ref, const std::string& path, const std::set<std::string>& bound) {
+    // `peekOffset`: whether $_peek_uW+N may stand here. The engine reads ahead
+    // at an offset only for a union's `on`; elsewhere +N would load and then
+    // fail at every decode as an undefined name.
+    bool CheckRef(const std::string& ref, const std::string& path, const std::set<std::string>& bound, bool peekOffset = false) {
         std::string name = ref.substr(1);
         if (!name.empty() && name[0] == '@') {
             std::string v = name.substr(1);
+            if (standalone_) return true;  // no key, so no record type to check against
             for (const char* b : kBuiltinContext)
                 if (v == b) return true;
             if (v == "Prev") return true;
@@ -220,10 +269,19 @@ private:
         }
         int pw;
         size_t po;
-        if (name == "_remaining" || name == "_pos" || ParsePeek(name, &pw, &po)) return true;
+        if (name == "_remaining" || name == "_pos") return true;
+        if (ParsePeek(name, &pw, &po)) {
+            if (po != 0 && !peekOffset) return Err("E019", path, ref + ": read-ahead at an offset works only as a union's 'on'");
+            return true;
+        }
         if (name.rfind("_popcount_", 0) == 0) name = name.substr(10);
         else if (!name.empty() && name[0] == '_') return Err("E019", path, "unknown reference " + ref);
+        if (standalone_) return true;  // a name the using key would bind before the ref
         if (!bound.count(name)) return Err("E019", path, "$" + name + " is used before an 'as' binds it");
+        if (auto it = partial_.find(name); it != partial_.end() && warnedPartial_.insert(name).second) {
+            Warn("W112", path, "$" + name + " is bound in only some arms of the union at " + (it->second.empty() ? "the top" : it->second) +
+                                   ", and read after it");
+        }
         return true;
     }
 
@@ -426,7 +484,8 @@ private:
                 if (!lo || !n) return Err("E012", mp, "member without 'lo' and 'n'");
                 if (lo->kind() != Value::Kind::Int) return Err("E013", Join(mp, "lo"), "'lo' must be an integer");
                 if (n->kind() != Value::Kind::Int) return Err("E013", Join(mp, "n"), "'n' must be an integer");
-                if (n->AsInt() < 1 || lo->AsInt() < 0 || lo->AsInt() + n->AsInt() > width) {
+                // Each bound on its own first, so lo + n cannot overflow.
+                if (n->AsInt() < 1 || n->AsInt() > width || lo->AsInt() < 0 || lo->AsInt() > width - n->AsInt()) {
                     return Err("E016", mp, "member bits leave the word");
                 }
                 if (kind == "bool" && n->AsInt() != 1) return Err("E016", Join(mp, "n"), "a bool member is 1 bit");
@@ -478,7 +537,7 @@ private:
         if (!on->IsString() || on->AsString().empty() || on->AsString()[0] != '$') {
             return Err("E013", Join(path, "on"), "'on' must be a $ reference");
         }
-        if (!CheckRef(on->AsString(), Join(path, "on"), *bound)) return false;
+        if (!CheckRef(on->AsString(), Join(path, "on"), *bound, true)) return false;
         const Value* cases = node.Find("cases");
         if (!cases) return Err("E012", path, "union without 'cases'");
         if (cases->kind() != Value::Kind::Map) return Err("E013", Join(path, "cases"), "'cases' must be an object");
@@ -503,7 +562,23 @@ private:
             spans.emplace_back(a, b);
         }
         // Names an arm binds stay visible after the union, as at run time.
+        // One that only some arms bind is remembered: reading it later is
+        // W112 (bound or not depends on the arm the data picked).
         std::set<std::string> after = *bound;
+        const std::map<std::string, std::string> partialBefore = partial_;
+        std::map<std::string, std::string> armPartial;  // still partial at the end of some arm
+        std::optional<std::set<std::string>> every;  // bound by every arm
+        auto meet = [&](const std::set<std::string>& inner) {
+            armPartial.insert(partial_.begin(), partial_.end());
+            partial_ = partialBefore;  // the next arm starts from the state before the union
+            if (!every) {
+                every = inner;
+                return;
+            }
+            std::set<std::string> both;
+            std::set_intersection(every->begin(), every->end(), inner.begin(), inner.end(), std::inserter(both, both.end()));
+            every = std::move(both);
+        };
         int pw = 0;
         size_t po = 0;
         bool peek = ParsePeek(on->AsString().substr(1), &pw, &po) && po == 0;
@@ -512,17 +587,26 @@ private:
             std::set<std::string> inner = *bound;
             if (!Check(cv, Join(Join(path, "cases"), ck), &inner)) return false;
             after.insert(inner.begin(), inner.end());
+            meet(inner);
             skipsDiscriminator = skipsDiscriminator || (peek && StartsWithSkip(cv));
         }
         if (const Value* d = node.Find("default")) {
             std::set<std::string> inner = *bound;
             if (!Check(*d, Join(path, "default"), &inner)) return false;
             after.insert(inner.begin(), inner.end());
+            meet(inner);
             skipsDiscriminator = skipsDiscriminator || (peek && StartsWithSkip(*d));
         } else {
             Warn("W101", path, "union without a default: a value no case names leaves the field raw");
         }
         if (skipsDiscriminator) Warn("W103", path, "a read-ahead arm skips over its own discriminator");
+        partial_ = partialBefore;
+        for (const auto& n : after) {
+            if (auto it = armPartial.find(n); it != armPartial.end()) partial_[n] = it->second;  // partial within an arm
+            else if (every && every->count(n)) partial_.erase(n);  // every arm binds it
+            else if (!bound->count(n)) partial_[n] = path;         // new, from some arms only
+            // else: bound before the union, whatever the arm
+        }
         *bound = std::move(after);
         return true;
     }
@@ -536,6 +620,10 @@ private:
     const Value* shared_;
     std::set<std::string>* sharedUsed_;
     std::vector<std::string> refStack_;
+    bool standalone_ = false;
+    size_t nesting_ = 0;
+    std::map<std::string, std::string> partial_;  // name -> path of the union only some arms of which bind it
+    std::set<std::string> warnedPartial_;
 };
 
 // Every {"t":"ref","to":X} under a JSON node.
@@ -668,18 +756,31 @@ bool PatternCatalog::LoadFormat2(const Value& root, const std::string& duplicate
             for (const auto& to : refs[name])
                 if (!s->Find(to)) return fail("E018", "_shared", name, "ref to no shared pattern named '" + to + "'");
         }
+        // Cycles, and chains deeper than kMaxRefDepth: the check, the compiler
+        // and the decoder all recurse through refs, so an unbounded chain
+        // would end the process (a stack overflow) instead of the load.
         std::map<std::string, int> state;  // 1 visiting, 2 done
-        std::function<bool(const std::string&)> visit = [&](const std::string& n) {
-            if (state[n] == 1) return false;
-            if (state[n] == 2) return true;
+        std::map<std::string, size_t> height;  // refs in the longest chain from a shared pattern
+        std::string why;
+        std::function<bool(const std::string&, size_t)> visit = [&](const std::string& n, size_t depth) {
+            if (state[n] == 1) return why = "a cycle of shared patterns", false;
+            if (state[n] == 2) {
+                if (depth + height[n] > kMaxRefDepth) return why = "refs nest deeper than " + std::to_string(kMaxRefDepth), false;
+                return true;
+            }
+            if (depth > kMaxRefDepth) return why = "refs nest deeper than " + std::to_string(kMaxRefDepth), false;
             state[n] = 1;
-            for (const auto& to : refs[n])
-                if (!visit(to)) return false;
+            size_t h = 0;
+            for (const auto& to : refs[n]) {
+                if (!visit(to, depth + 1)) return false;
+                h = std::max(h, height[to] + 1);
+            }
+            height[n] = h;
             state[n] = 2;
             return true;
         };
         for (const auto& [name, body] : s->Members()) {
-            if (!visit(name)) return fail("E018", "_shared", name, "a cycle of shared patterns");
+            if (!visit(name, 1)) return fail("E018", "_shared", name, why);
         }
         shared_ = *s;
     }
@@ -792,8 +893,31 @@ bool PatternCatalog::LoadFormat2(const Value& root, const std::string& duplicate
         }
     }
     if (shared_.kind() == Value::Kind::Map) {
+        // An unused shared pattern is still checked and compiled, so it
+        // cannot hide an error until the day a key first uses it.
         for (const auto& m : shared_.Members()) {
-            if (!sharedUsed.count(m.first)) warnings_.push_back({"W111", "_shared", m.first, "a shared pattern nothing refers to"});
+            if (sharedUsed.count(m.first)) continue;
+            warnings_.push_back({"W111", "_shared", m.first, "a shared pattern nothing refers to"});
+            std::vector<CatalogFinding> ignored;  // its warnings belong to the keys that will use it
+            static const std::set<std::string> kNoContext;
+            NodeChecker check("_shared." + m.first, kNoContext, &ignored, &shared_, nullptr);
+            check.SetStandalone();
+            std::set<std::string> bound;
+            if (!check.Check(m.second, "", &bound)) {
+                if (error) *error = check.error().Text();
+                return false;
+            }
+            try {
+                Value ref = Value::Map();
+                ref.Set("t", Value::Str("ref"));
+                ref.Set("to", Value::Str(m.first));
+                const Value* ub = options_.kind() == Value::Kind::Map ? options_.Find("unnamed_bits") : nullptr;
+                auto p = CompilePattern(ref, true, ub && ub->AsString() == "show", &shared_, &sharedCompiled_);
+                std::string derr;
+                if (!CheckDefaults(*p, &derr)) return fail("E013", "_shared." + m.first, "", derr);
+            } catch (const PatternError& e) {
+                return fail("E010", "_shared." + m.first, "", e.what());
+            }
         }
     }
     for (const auto& [text, ks] : byText) {

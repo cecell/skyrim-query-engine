@@ -15,7 +15,7 @@
   "field_vectors": 71,
   "encode_vectors": 24,
   "record_vectors": 33,
-  "load_vectors": 42,
+  "load_vectors": 59,
   "by_feature": {
    "context": 13,
    "context+grammar": 1,
@@ -19404,6 +19404,214 @@
    "format1": {
     "result": "n/a"
    }
+  },
+  {
+   "id": "load-peekoff-in-n",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": {\"t\": \"repeat\", \"n\": \"$_peek_u8+2\", \"do\": \"uint8\"}}",
+   "format2": {
+    "result": "error",
+    "code": "E019"
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "Read-ahead at an offset works only as a union's 'on'. As a count it loaded and then failed at every decode as an undefined name."
+  },
+  {
+   "id": "load-peekoff-in-value-ref",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": [{\"t\": \"value_ref\", \"ref\": \"$_peek_u16+1\", \"id\": \"a\"}]}",
+   "format2": {
+    "result": "error",
+    "code": "E019"
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "The same for a value_ref's 'ref'."
+  },
+  {
+   "id": "load-peekoff-in-on-ok",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": {\"t\": \"union\", \"on\": \"$_peek_u8+2\", \"cases\": {\"1\": \"uint8\"}, \"default\": \"uint16\"}}",
+   "format2": {
+    "result": "ok",
+    "warnings": []
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "A union's 'on' is where it works."
+  },
+  {
+   "id": "load-peekoff-plain-in-n-ok",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": {\"t\": \"repeat\", \"n\": \"$_peek_u8\", \"do\": \"uint8\"}}",
+   "format2": {
+    "result": "ok",
+    "warnings": []
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "Without an offset, a read-ahead stays allowed anywhere a count takes a value (format 1)."
+  },
+  {
+   "id": "load-packed-lo-overflow",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": {\"t\": \"packed\", \"size\": \"uint8\", \"do\": [{\"id\": \"a\", \"lo\": 9223372036854775807, \"n\": 1}]}}",
+   "format2": {
+    "result": "error",
+    "code": "E016"
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "lo + n overflows a 64-bit integer; the bounds are checked one at a time, so this cannot pass as a member inside the word."
+  },
+  {
+   "id": "load-packed-n-overflow",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": {\"t\": \"packed\", \"size\": \"uint8\", \"do\": [{\"id\": \"a\", \"lo\": 1, \"n\": 9223372036854775807}]}}",
+   "format2": {
+    "result": "error",
+    "code": "E016"
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "The same with the large number in n."
+  },
+  {
+   "id": "load-ref-chain-at-limit",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"_shared\": {\"s0\": {\"t\": \"ref\", \"to\": \"s1\"}, \"s1\": {\"t\": \"ref\", \"to\": \"s2\"}, \"s2\": {\"t\": \"ref\", \"to\": \"s3\"}, \"s3\": {\"t\": \"ref\", \"to\": \"s4\"}, \"s4\": {\"t\": \"ref\", \"to\": \"s5\"}, \"s5\": {\"t\": \"ref\", \"to\": \"s6\"}, \"s6\": {\"t\": \"ref\", \"to\": \"s7\"}, \"s7\": {\"t\": \"ref\", \"to\": \"s8\"}, \"s8\": {\"t\": \"ref\", \"to\": \"s9\"}, \"s9\": {\"t\": \"ref\", \"to\": \"s10\"}, \"s10\": {\"t\": \"ref\", \"to\": \"s11\"}, \"s11\": {\"t\": \"ref\", \"to\": \"s12\"}, \"s12\": {\"t\": \"ref\", \"to\": \"s13\"}, \"s13\": {\"t\": \"ref\", \"to\": \"s14\"}, \"s14\": {\"t\": \"ref\", \"to\": \"s15\"}, \"s15\": {\"t\": \"ref\", \"to\": \"s16\"}, \"s16\": {\"t\": \"ref\", \"to\": \"s17\"}, \"s17\": {\"t\": \"ref\", \"to\": \"s18\"}, \"s18\": {\"t\": \"ref\", \"to\": \"s19\"}, \"s19\": {\"t\": \"ref\", \"to\": \"s20\"}, \"s20\": {\"t\": \"ref\", \"to\": \"s21\"}, \"s21\": {\"t\": \"ref\", \"to\": \"s22\"}, \"s22\": {\"t\": \"ref\", \"to\": \"s23\"}, \"s23\": {\"t\": \"ref\", \"to\": \"s24\"}, \"s24\": {\"t\": \"ref\", \"to\": \"s25\"}, \"s25\": {\"t\": \"ref\", \"to\": \"s26\"}, \"s26\": {\"t\": \"ref\", \"to\": \"s27\"}, \"s27\": {\"t\": \"ref\", \"to\": \"s28\"}, \"s28\": {\"t\": \"ref\", \"to\": \"s29\"}, \"s29\": {\"t\": \"ref\", \"to\": \"s30\"}, \"s30\": {\"t\": \"ref\", \"to\": \"s31\"}, \"s31\": {\"t\": \"ref\", \"to\": \"s32\"}, \"s32\": {\"t\": \"ref\", \"to\": \"s33\"}, \"s33\": {\"t\": \"ref\", \"to\": \"s34\"}, \"s34\": {\"t\": \"ref\", \"to\": \"s35\"}, \"s35\": {\"t\": \"ref\", \"to\": \"s36\"}, \"s36\": {\"t\": \"ref\", \"to\": \"s37\"}, \"s37\": {\"t\": \"ref\", \"to\": \"s38\"}, \"s38\": {\"t\": \"ref\", \"to\": \"s39\"}, \"s39\": {\"t\": \"ref\", \"to\": \"s40\"}, \"s40\": {\"t\": \"ref\", \"to\": \"s41\"}, \"s41\": {\"t\": \"ref\", \"to\": \"s42\"}, \"s42\": {\"t\": \"ref\", \"to\": \"s43\"}, \"s43\": {\"t\": \"ref\", \"to\": \"s44\"}, \"s44\": {\"t\": \"ref\", \"to\": \"s45\"}, \"s45\": {\"t\": \"ref\", \"to\": \"s46\"}, \"s46\": {\"t\": \"ref\", \"to\": \"s47\"}, \"s47\": {\"t\": \"ref\", \"to\": \"s48\"}, \"s48\": {\"t\": \"ref\", \"to\": \"s49\"}, \"s49\": {\"t\": \"ref\", \"to\": \"s50\"}, \"s50\": {\"t\": \"ref\", \"to\": \"s51\"}, \"s51\": {\"t\": \"ref\", \"to\": \"s52\"}, \"s52\": {\"t\": \"ref\", \"to\": \"s53\"}, \"s53\": {\"t\": \"ref\", \"to\": \"s54\"}, \"s54\": {\"t\": \"ref\", \"to\": \"s55\"}, \"s55\": {\"t\": \"ref\", \"to\": \"s56\"}, \"s56\": {\"t\": \"ref\", \"to\": \"s57\"}, \"s57\": {\"t\": \"ref\", \"to\": \"s58\"}, \"s58\": {\"t\": \"ref\", \"to\": \"s59\"}, \"s59\": {\"t\": \"ref\", \"to\": \"s60\"}, \"s60\": {\"t\": \"ref\", \"to\": \"s61\"}, \"s61\": {\"t\": \"ref\", \"to\": \"s62\"}, \"s62\": {\"t\": \"ref\", \"to\": \"s63\"}, \"s63\": \"uint8\"}, \"CLMT.TNAM\": {\"t\": \"ref\", \"to\": \"s0\"}}",
+   "format2": {
+    "result": "ok",
+    "warnings": []
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "A chain of 64 refs, the most a catalogue may have."
+  },
+  {
+   "id": "load-ref-chain-too-deep",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"_shared\": {\"s0\": {\"t\": \"ref\", \"to\": \"s1\"}, \"s1\": {\"t\": \"ref\", \"to\": \"s2\"}, \"s2\": {\"t\": \"ref\", \"to\": \"s3\"}, \"s3\": {\"t\": \"ref\", \"to\": \"s4\"}, \"s4\": {\"t\": \"ref\", \"to\": \"s5\"}, \"s5\": {\"t\": \"ref\", \"to\": \"s6\"}, \"s6\": {\"t\": \"ref\", \"to\": \"s7\"}, \"s7\": {\"t\": \"ref\", \"to\": \"s8\"}, \"s8\": {\"t\": \"ref\", \"to\": \"s9\"}, \"s9\": {\"t\": \"ref\", \"to\": \"s10\"}, \"s10\": {\"t\": \"ref\", \"to\": \"s11\"}, \"s11\": {\"t\": \"ref\", \"to\": \"s12\"}, \"s12\": {\"t\": \"ref\", \"to\": \"s13\"}, \"s13\": {\"t\": \"ref\", \"to\": \"s14\"}, \"s14\": {\"t\": \"ref\", \"to\": \"s15\"}, \"s15\": {\"t\": \"ref\", \"to\": \"s16\"}, \"s16\": {\"t\": \"ref\", \"to\": \"s17\"}, \"s17\": {\"t\": \"ref\", \"to\": \"s18\"}, \"s18\": {\"t\": \"ref\", \"to\": \"s19\"}, \"s19\": {\"t\": \"ref\", \"to\": \"s20\"}, \"s20\": {\"t\": \"ref\", \"to\": \"s21\"}, \"s21\": {\"t\": \"ref\", \"to\": \"s22\"}, \"s22\": {\"t\": \"ref\", \"to\": \"s23\"}, \"s23\": {\"t\": \"ref\", \"to\": \"s24\"}, \"s24\": {\"t\": \"ref\", \"to\": \"s25\"}, \"s25\": {\"t\": \"ref\", \"to\": \"s26\"}, \"s26\": {\"t\": \"ref\", \"to\": \"s27\"}, \"s27\": {\"t\": \"ref\", \"to\": \"s28\"}, \"s28\": {\"t\": \"ref\", \"to\": \"s29\"}, \"s29\": {\"t\": \"ref\", \"to\": \"s30\"}, \"s30\": {\"t\": \"ref\", \"to\": \"s31\"}, \"s31\": {\"t\": \"ref\", \"to\": \"s32\"}, \"s32\": {\"t\": \"ref\", \"to\": \"s33\"}, \"s33\": {\"t\": \"ref\", \"to\": \"s34\"}, \"s34\": {\"t\": \"ref\", \"to\": \"s35\"}, \"s35\": {\"t\": \"ref\", \"to\": \"s36\"}, \"s36\": {\"t\": \"ref\", \"to\": \"s37\"}, \"s37\": {\"t\": \"ref\", \"to\": \"s38\"}, \"s38\": {\"t\": \"ref\", \"to\": \"s39\"}, \"s39\": {\"t\": \"ref\", \"to\": \"s40\"}, \"s40\": {\"t\": \"ref\", \"to\": \"s41\"}, \"s41\": {\"t\": \"ref\", \"to\": \"s42\"}, \"s42\": {\"t\": \"ref\", \"to\": \"s43\"}, \"s43\": {\"t\": \"ref\", \"to\": \"s44\"}, \"s44\": {\"t\": \"ref\", \"to\": \"s45\"}, \"s45\": {\"t\": \"ref\", \"to\": \"s46\"}, \"s46\": {\"t\": \"ref\", \"to\": \"s47\"}, \"s47\": {\"t\": \"ref\", \"to\": \"s48\"}, \"s48\": {\"t\": \"ref\", \"to\": \"s49\"}, \"s49\": {\"t\": \"ref\", \"to\": \"s50\"}, \"s50\": {\"t\": \"ref\", \"to\": \"s51\"}, \"s51\": {\"t\": \"ref\", \"to\": \"s52\"}, \"s52\": {\"t\": \"ref\", \"to\": \"s53\"}, \"s53\": {\"t\": \"ref\", \"to\": \"s54\"}, \"s54\": {\"t\": \"ref\", \"to\": \"s55\"}, \"s55\": {\"t\": \"ref\", \"to\": \"s56\"}, \"s56\": {\"t\": \"ref\", \"to\": \"s57\"}, \"s57\": {\"t\": \"ref\", \"to\": \"s58\"}, \"s58\": {\"t\": \"ref\", \"to\": \"s59\"}, \"s59\": {\"t\": \"ref\", \"to\": \"s60\"}, \"s60\": {\"t\": \"ref\", \"to\": \"s61\"}, \"s61\": {\"t\": \"ref\", \"to\": \"s62\"}, \"s62\": {\"t\": \"ref\", \"to\": \"s63\"}, \"s63\": {\"t\": \"ref\", \"to\": \"s64\"}, \"s64\": \"uint8\"}, \"CLMT.TNAM\": {\"t\": \"ref\", \"to\": \"s0\"}}",
+   "format2": {
+    "result": "error",
+    "code": "E018"
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "65 refs in one chain. Without the limit a long chain (about 3,000) ended the loader with a stack overflow."
+  },
+  {
+   "id": "load-ref-nesting-too-deep",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"_shared\": {\"s0\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[{\"t\": \"ref\", \"to\": \"s1\"}]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], \"s1\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[{\"t\": \"ref\", \"to\": \"s2\"}]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], \"s2\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[{\"t\": \"ref\", \"to\": \"s3\"}]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], \"s3\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[{\"t\": \"ref\", \"to\": \"s4\"}]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], \"s4\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[{\"t\": \"ref\", \"to\": \"s5\"}]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], \"s5\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[{\"t\": \"ref\", \"to\": \"s6\"}]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], \"s6\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[{\"t\": \"ref\", \"to\": \"s7\"}]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], \"s7\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\"uint8\"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}, \"CLMT.TNAM\": {\"t\": \"ref\", \"to\": \"s0\"}}",
+   "format2": {
+    "result": "error",
+    "code": "E018"
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "Eight refs, each shared pattern 40 lists deep: 320 nested nodes counted through the refs, more than the 256 allowed."
+  },
+  {
+   "id": "load-shared-unused-invalid",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"_shared\": {\"spare\": {\"t\": \"uint8\", \"bogus\": 1}}, \"CLMT.TNAM\": \"uint8\"}",
+   "format2": {
+    "result": "error",
+    "code": "E011"
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "A shared pattern no key uses is still checked, so its error shows now and not the day a key first uses it."
+  },
+  {
+   "id": "load-shared-unused-valid",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"_shared\": {\"spare\": {\"t\": \"repeat\", \"n\": \"$count\", \"do\": \"formid\"}}, \"CLMT.TNAM\": \"uint8\"}",
+   "format2": {
+    "result": "ok",
+    "warnings": [
+     "W111"
+    ]
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "Checked on its own, a shared pattern may read a name that the key using it would bind."
+  },
+  {
+   "id": "load-range-backwards",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": {\"t\": \"uint8\", \"range\": [5, 1]}}",
+   "format2": {
+    "result": "error",
+    "code": "E013"
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "A leaf 'range' with lo > hi."
+  },
+  {
+   "id": "load-range-default-outside",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": {\"t\": \"uint8\", \"range\": [1, 5], \"default\": 9}}",
+   "format2": {
+    "result": "error",
+    "code": "E013"
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "A default outside the leaf's own range."
+  },
+  {
+   "id": "load-range-default-outside-packed",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": {\"t\": \"packed\", \"size\": \"uint8\", \"do\": [{\"id\": \"a\", \"lo\": 0, \"n\": 4, \"range\": [0, 3], \"default\": 4}]}}",
+   "format2": {
+    "result": "error",
+    "code": "E013"
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "The same on a packed member."
+  },
+  {
+   "id": "load-range-default-inside-ok",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": {\"t\": \"float32\", \"range\": [0, null], \"default\": 1.5}}",
+   "format2": {
+    "result": "ok",
+    "warnings": []
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "A default inside a half-open range."
+  },
+  {
+   "id": "load-arm-name-some-arms",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": [{\"t\": \"uint8\", \"as\": \"k\", \"id\": \"k\"}, {\"t\": \"union\", \"on\": \"$k\", \"id\": \"u\", \"cases\": {\"1\": {\"t\": \"uint8\", \"as\": \"x\"}}, \"default\": \"uint16\"}, {\"t\": \"repeat\", \"n\": \"$x\", \"do\": \"uint8\", \"id\": \"r\"}]}",
+   "format2": {
+    "result": "ok",
+    "warnings": [
+     "W112"
+    ]
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "A name bound in only some arms of a union stays visible after it (as at run time), and reading it there is warning W112: whether it is bound depends on the arm the data picked."
+  },
+  {
+   "id": "load-arm-name-every-arm-ok",
+   "catalog_text": "{\"$format\": \"spf-patterns/2\", \"CLMT.TNAM\": [{\"t\": \"uint8\", \"as\": \"k\", \"id\": \"k\"}, {\"t\": \"union\", \"on\": \"$k\", \"id\": \"u\", \"cases\": {\"1\": {\"t\": \"uint8\", \"as\": \"x\"}}, \"default\": {\"t\": \"uint16\", \"as\": \"x\"}}, {\"t\": \"repeat\", \"n\": \"$x\", \"do\": \"uint8\", \"id\": \"r\"}]}",
+   "format2": {
+    "result": "ok",
+    "warnings": []
+   },
+   "format1": {
+    "result": "n/a"
+   },
+   "note": "Bound in every arm: no warning."
   }
  ]
 }
