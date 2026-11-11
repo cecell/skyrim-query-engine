@@ -48,6 +48,7 @@
 #include "../src/db_build.h"
 #include "../src/export_request.h"
 #include "../src/plugin.h"
+#include "sqlite3.h"
 #include "../src/staging_find.h"
 
 using namespace skqe;
@@ -598,6 +599,15 @@ is one list, and each row also says "plugin" (a leading plugin column in CSV).
                               "fields":{"EDID":"IronSword","DATA.damage":7}}]
                           With --fields, "fields" is keyed by the paths you
                           asked for; with all fields, by subrecord signature.
+  --labels                (JSON) names beside coded values, from
+                          ut_reference.sql next to skqe.exe: an enumeration
+                          field gets "<field>_label" with its value's name, a
+                          flag field the names of its set bits, and a condition
+                          (CTDA) "function", its function's name:
+                            "PKDT":{"type":18,"type_label":"Package",...}
+                            "CTDA":{"func_idx":59,"function":"GetStageDone",
+                                    "run_on":0,"run_on_label":"Subject",...}
+                          The same links build-db stores in st_columns.
   --psv                   the same as --csv, separated by | instead of commas.
                           Text with a |, a " or a line break is quoted, the
                           standard way. For long text such as book pages.
@@ -1429,6 +1439,145 @@ std::wstring WidenUtf8(const std::string& s) {
     return w;
 }
 
+// --labels: names for coded values, from ut_reference.sql next to the exe (the
+// tables build-db loads). A field bound to an enumeration gets a sibling
+// "<field>_label" with its value's name; a field bound to a flag set gets the
+// names of its set bits (an unnamed bit as "bit N"). A condition (CTDA) gets
+// "function", the condition function's name. Binding is build-db's: the
+// earlier database's field links first, then <type>_<subrecord>_<field> by name.
+struct Labels {
+    std::map<std::string, std::pair<std::string, std::string>> links;  // "RT|FS|leaf" -> enum kind, flag kind
+    std::map<std::string, std::map<int64_t, std::string>> enums, flags;
+    std::map<int64_t, std::string> functions;
+
+    bool Load(const std::wstring& path, std::string* error) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            *error = "cannot read " + Utf8(path) + " (it ships next to skqe.exe)";
+            return false;
+        }
+        std::stringstream ss;
+        ss << f.rdbuf();
+        sqlite3* db = nullptr;
+        if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
+            *error = "cannot open an in-memory database";
+            return false;
+        }
+        char* msg = nullptr;
+        bool ok = sqlite3_exec(db, ss.str().c_str(), nullptr, nullptr, &msg) == SQLITE_OK;
+        if (!ok) *error = std::string("ut_reference.sql: ") + (msg ? msg : "");
+        sqlite3_free(msg);
+        auto each = [&](const char* sql, auto&& row) {
+            sqlite3_stmt* st = nullptr;
+            if (sqlite3_prepare_v2(db, sql, -1, &st, nullptr) != SQLITE_OK) return;
+            while (sqlite3_step(st) == SQLITE_ROW) row(st);
+            sqlite3_finalize(st);
+        };
+        auto text = [](sqlite3_stmt* st, int i) {
+            const unsigned char* t = sqlite3_column_text(st, i);
+            return t ? std::string(reinterpret_cast<const char*>(t)) : std::string();
+        };
+        if (ok) {
+            each("SELECT record_type, subrecord, leaf, enum_kind, flag_kind FROM ut_field_links", [&](sqlite3_stmt* st) {
+                links[text(st, 0) + "|" + text(st, 1) + "|" + text(st, 2)] = {text(st, 3), text(st, 4)};
+            });
+            each("SELECT k.kind_name, v.position, v.label FROM ut_enum_values v JOIN ut_enum_kinds k ON k.id = v.fk_kind",
+                 [&](sqlite3_stmt* st) { enums[text(st, 0)][sqlite3_column_int64(st, 1)] = text(st, 2); });
+            each("SELECT k.kind_name, v.bit, v.label FROM ut_flag_values v JOIN ut_flag_kinds k ON k.id = v.fk_kind",
+                 [&](sqlite3_stmt* st) { flags[text(st, 0)][sqlite3_column_int64(st, 1)] = text(st, 2); });
+            each("SELECT func_index, name FROM ut_ctda_functions",
+                 [&](sqlite3_stmt* st) { functions[sqlite3_column_int64(st, 0)] = text(st, 1); });
+        }
+        sqlite3_close(db);
+        return ok;
+    }
+
+    // The label of `v` as field `leaf` of subrecord `fs` in record type `rt`;
+    // null when the field has no enumeration or flag set, or v isn't a number.
+    Value Label(const std::string& rt, const std::string& fs, const std::string& leaf, const Value& v) const {
+        if (v.kind() != Value::Kind::Int) return Value();
+        std::string e, g;
+        auto it = links.find(rt + "|" + fs + "|" + leaf);
+        if (it != links.end()) {
+            e = it->second.first;
+            g = it->second.second;
+        } else {
+            auto lower = [](std::string t) {
+                for (char& c : t) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c);
+                return t;
+            };
+            const std::string base = lower(rt) + "_" + lower(fs) + (leaf.empty() ? "" : "_" + leaf);
+            if (flags.count(base)) g = base;
+            else if (flags.count(base + "_flags")) g = base + "_flags";
+            else if (enums.count(base)) e = base;
+            else if (enums.count(base + "_type")) e = base + "_type";
+        }
+        if (!e.empty()) {
+            auto k = enums.find(e);
+            if (k == enums.end()) return Value();
+            auto n = k->second.find(v.AsInt());
+            return n == k->second.end() ? Value() : Value::Str(n->second);
+        }
+        if (!g.empty()) {
+            auto k = flags.find(g);
+            if (k == flags.end()) return Value();
+            Value list = Value::List();
+            const uint64_t bits = static_cast<uint64_t>(v.AsInt());
+            for (int b = 0; b < 64; ++b) {
+                if (!(bits >> b & 1)) continue;
+                auto n = k->second.find(b);
+                list.Items().push_back(Value::Str(n != k->second.end() ? n->second : "bit " + std::to_string(b)));
+            }
+            return list;
+        }
+        return Value();
+    }
+
+    // A subrecord's value with labels added beside its coded fields, at any depth.
+    Value Apply(const std::string& rt, const std::string& fs, const Value& v) const {
+        if (v.kind() == Value::Kind::List) {
+            Value out = Value::List();
+            for (const auto& item : v.Items()) out.Items().push_back(Apply(rt, fs, item));
+            return out;
+        }
+        if (v.kind() != Value::Kind::Map) return v;
+        Value out = Value::Map();
+        for (const auto& [key, member] : v.Members()) {
+            out.Set(key, Apply(rt, fs, member));
+            if (fs == "CTDA" && key == "func_idx" && member.kind() == Value::Kind::Int) {
+                auto n = functions.find(member.AsInt());
+                if (n != functions.end()) out.Set("function", Value::Str(n->second));
+            }
+            Value label = Label(rt, fs, key, member);
+            if (label.kind() != Value::Kind::Null) out.Set(key + "_label", std::move(label));
+        }
+        return out;
+    }
+
+    // A record's "fields" object: whole subrecords keyed by signature, or the
+    // paths --fields chose ("DATA.damage").
+    Value ApplyFields(const std::string& rt, const Value& fields) const {
+        Value out = Value::Map();
+        for (const auto& [key, v] : fields.Members()) {
+            const size_t dot = key.find('.');
+            const std::string fs = key.substr(0, dot);
+            const std::string leaf = dot == std::string::npos ? "" : key.substr(key.find_last_of('.') + 1);
+            out.Set(key, Apply(rt, fs, v));
+            Value label = Label(rt, fs, leaf, v);
+            if (label.kind() == Value::Kind::Null && leaf.empty()) {
+                // A one-value subrecord: its link names the subrecord's only field.
+                const std::string prefix = rt + "|" + fs + "|";
+                auto it = links.lower_bound(prefix);
+                if (it != links.end() && it->first.compare(0, prefix.size(), prefix) == 0)
+                    label = Label(rt, fs, it->first.substr(prefix.size()), v);
+            }
+            if (label.kind() != Value::Kind::Null) out.Set(key + "_label", std::move(label));
+        }
+        return out;
+    }
+};
+const Labels* gLabels = nullptr;  // set by export --labels
+
 // One exported record: form, type, in, deleted, fields.
 void RowJson(const Plugin& plugin, const Record& r, const std::vector<FieldSpec>& specs, Value* obj) {
     auto fields = plugin.Fields(r);
@@ -1442,6 +1591,10 @@ void RowJson(const Plugin& plugin, const Record& r, const std::vector<FieldSpec>
         Value sel = Value::Map();
         for (const auto& s : specs) sel.Set(s.text, Gather(fields, s));
         obj->Set("fields", std::move(sel));
+    }
+    if (gLabels) {
+        Value labelled = gLabels->ApplyFields(r.type, *obj->Find("fields"));
+        obj->Set("fields", std::move(labelled));
     }
 }
 
@@ -1797,7 +1950,7 @@ int ExportCommand(int argc, wchar_t** argv) {
     std::string types, fieldList, outPath, requestPath, formFile, explicitOrder;
     std::vector<std::string> looseForms;  // --form with no plugin before it: for a load order
     std::wstring patternsPath, dataDir, loadOrderFile;
-    bool csv = false, activeOnly = false, allPlugins = false, randomPick = false;
+    bool csv = false, activeOnly = false, allPlugins = false, randomPick = false, labels = false;
     size_t limit = 0;
     std::string limitText, seedText;
     auto conflicts = LoadOrderExport::Conflicts::Off;
@@ -1817,6 +1970,7 @@ int ExportCommand(int argc, wchar_t** argv) {
         else if (a == "--out") next(&outPath);
         else if (a == "--request") next(&requestPath);
         else if (a == "--form-file") next(&formFile);
+        else if (a == "--labels") labels = true;
         else if (a == "--conflicts") conflicts = LoadOrderExport::Conflicts::Values;
         else if (a == "--conflict-summary") conflicts = LoadOrderExport::Conflicts::Summary;
         else if (a == "--limit") next(&limitText);
@@ -1833,6 +1987,26 @@ int ExportCommand(int argc, wchar_t** argv) {
         else if (a == "--patterns" && i + 1 < argc) patternsPath = argv[++i];
         else if (a.rfind("--", 0) == 0) return Usage();
         else targets.push_back({a, {}});
+    }
+    Labels labelData;
+    if (labels) {
+        if (csv) {
+            fprintf(stderr, "--labels adds names to JSON output; it doesn't combine with --csv or --psv\n");
+            return 2;
+        }
+        std::wstring dir = patternsPath;
+        if (dir.empty()) {
+            wchar_t exe[MAX_PATH];
+            GetModuleFileNameW(nullptr, exe, MAX_PATH);
+            dir = exe;
+        }
+        dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
+        std::string error;
+        if (!labelData.Load(dir + L"ut_reference.sql", &error)) {
+            fprintf(stderr, "--labels: %s\n", error.c_str());
+            return 2;
+        }
+        gLabels = &labelData;
     }
     if (!limitText.empty()) {
         char* end = nullptr;
