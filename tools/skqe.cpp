@@ -45,6 +45,7 @@
 
 #include "../src/asset_build.h"
 #include "../src/asset_search.h"
+#include "../src/catalog_check.h"
 #include "../src/db_build.h"
 #include "../src/export_request.h"
 #include "../src/data_files.h"
@@ -53,6 +54,8 @@
 #include "../src/staging_find.h"
 
 using namespace skqe;
+
+bool LoadCatalog(std::wstring patternsPath, PatternCatalog* cat);
 
 std::wstring WidenUtf8(const std::string& s);
 
@@ -205,6 +208,8 @@ COMMANDS
   skqe search <text>               find files by name in Data and its BSAs;
                                   --all adds the staging folder, each file once
   skqe staging                     where Vortex or MO2 keeps this game's mods
+  skqe catalog check <patterns>    check a pattern catalogue; with --plugins, what it
+                                  decodes in a folder of plugins, against a baseline
   skqe help [command]              this text, or one command's details
                                   (also: skqe <command> --help)
 
@@ -642,6 +647,29 @@ Examples
   skqe export MyMod.esp --type REFR --fields NAME,DATA.pos_x,DATA.pos_y,DATA.pos_z --out refs.json
 )HELP";
 
+const char kHelpCatalog[] = R"HELP(skqe catalog check <patterns.json> [options]
+
+Checks a pattern catalogue. Reads only. With --plugins, decodes every field
+(and every record header that has a pattern) of every plugin in a folder and
+counts, per key (RT.FS): occurrences, raw fallbacks (a pattern that does not
+fit the bytes), occurrences with bytes left after the pattern, and fields with
+no pattern. A baseline holds those numbers per plugin and key, with a SHA-256
+over the decoded value of every occurrence in file order.
+
+OPTIONS
+  --plugins <folder>        decode every .esm/.esp/.esl in the folder
+  --write-baseline <file>   with --plugins: write the baseline
+  --baseline <file>         with --plugins: compare with a baseline. An error
+                            when a key's raw-fallback count rose or a key's
+                            decoded values changed in any plugin
+  --expect-changed K,K,...  keys whose values may change in this run; a listed
+                            key that did not change is an error
+  --threads <n>             plugins decoded at once (default: half the cores)
+
+EXIT CODES
+  0 clean, 1 findings at error level, 2 bad usage or unreadable input
+)HELP";
+
 const char kHelpDiff[] = R"HELP(skqe diff <copy> <copy> [<copy>...] [options]
 skqe diff --name <plugin> --in <folder> [--in <folder>...] [options]
 
@@ -994,7 +1022,7 @@ int Usage() {
 
 int Help(const std::string& topic) {
     const char* text = topic == "info" ? kHelpInfo : topic == "fields" ? kHelpFields : topic == "staging" ? kHelpStaging : topic == "search" ? kHelpSearch
-                     : topic == "export" ? kHelpExport : topic == "diff" ? kHelpDiff : topic == "build-db" ? kHelpBuildDb
+                     : topic == "export" ? kHelpExport : topic == "diff" ? kHelpDiff : topic == "catalog" ? kHelpCatalog : topic == "build-db" ? kHelpBuildDb
                      : topic == "db" ? kHelpDb : topic == "build-assets" ? kHelpBuildAssets : kHelp;
     _setmode(_fileno(stdout), _O_BINARY);
     fwrite(text, 1, strlen(text), stdout);
@@ -1010,6 +1038,102 @@ void CollectPaths(const Value& v, const std::string& prefix, std::set<std::strin
         for (const auto& it : v.Items())
             if (it.kind() == Value::Kind::Map) CollectPaths(it, prefix, out);
     }
+}
+
+// skqe catalog check <patterns.json> [--plugins <folder> [--write-baseline f | --baseline f
+// [--expect-changed K,..]]] [--threads n]
+int CatalogCommand(int argc, wchar_t** argv) {
+    std::string sub = argc > 2 ? Utf8(argv[2]) : "";
+    if (sub != "check" || argc < 4) {
+        fprintf(stderr, "usage: skqe catalog check <patterns.json> [options] (skqe catalog --help)\n");
+        return 2;
+    }
+    std::wstring patterns = argv[3], plugins, writeBase, readBase;
+    std::vector<std::string> expect;
+    int threads = std::max(1u, std::thread::hardware_concurrency() / 2);
+    for (int i = 4; i < argc; ++i) {
+        std::string a = Utf8(argv[i]);
+        bool hasNext = i + 1 < argc;
+        if (a == "--plugins" && hasNext) plugins = argv[++i];
+        else if (a == "--write-baseline" && hasNext) writeBase = argv[++i];
+        else if (a == "--baseline" && hasNext) readBase = argv[++i];
+        else if (a == "--expect-changed" && hasNext) {
+            for (const auto& k : SplitList(Utf8(argv[++i]))) expect.push_back(k);
+        } else if (a == "--threads" && hasNext) threads = std::max(1, _wtoi(argv[++i]));
+        else {
+            fprintf(stderr, "catalog check: unknown option %s (skqe catalog --help)\n", a.c_str());
+            return 2;
+        }
+    }
+    if ((!writeBase.empty() || !readBase.empty() || !expect.empty()) && plugins.empty()) {
+        fprintf(stderr, "catalog check: --write-baseline, --baseline and --expect-changed need --plugins\n");
+        return 2;
+    }
+    if (!expect.empty() && readBase.empty()) {
+        fprintf(stderr, "catalog check: --expect-changed needs --baseline\n");
+        return 2;
+    }
+    PatternCatalog cat;
+    if (!LoadCatalog(patterns, &cat)) return 2;
+    printf("catalogue: %zu patterns\n", cat.size());
+    if (plugins.empty()) return 0;
+    CheckRun base;
+    if (!readBase.empty()) {
+        std::ifstream f(readBase, std::ios::binary);
+        std::stringstream ss;
+        ss << f.rdbuf();
+        Value doc;
+        std::string err;
+        if (!f || !ParseJson(ss.str(), &doc, &err) || !BaselineFromJson(doc, &base, &err)) {
+            fprintf(stderr, "catalog check: %s: %s\n", Utf8(readBase).c_str(), err.empty() ? "cannot read" : err.c_str());
+            return 2;
+        }
+    }
+    CheckRun run = CheckPlugins(cat, plugins, threads);
+    uint64_t records = 0, n = 0, raw = 0, left = 0, nopat = 0;
+    std::set<std::string> keys, rawKeys, leftKeys;
+    int unreadable = 0;
+    for (const auto& [name, p] : run.plugins) {
+        if (!p.error.empty()) {
+            ++unreadable;
+            fprintf(stderr, "%s: %s\n", name.c_str(), p.error.c_str());
+        }
+        records += p.records;
+        for (const auto& [key, k] : p.keys) {
+            keys.insert(key);
+            n += k.n;
+            raw += k.raw;
+            left += k.left;
+            nopat += k.nopat;
+            if (k.raw) rawKeys.insert(key);
+            if (k.left) leftKeys.insert(key);
+        }
+    }
+    printf("plugins %zu (unreadable %d), records %llu, fields %llu in %zu keys\n", run.plugins.size(), unreadable,
+           static_cast<unsigned long long>(records), static_cast<unsigned long long>(n), keys.size());
+    printf("raw fallbacks %llu in %zu keys, bytes left after the pattern %llu in %zu keys, no pattern %llu\n",
+           static_cast<unsigned long long>(raw), rawKeys.size(), static_cast<unsigned long long>(left), leftKeys.size(),
+           static_cast<unsigned long long>(nopat));
+    if (!writeBase.empty()) {
+        std::string text;
+        WriteJson(BaselineJson(run), &text);
+        text.push_back('\n');
+        std::ofstream o(writeBase, std::ios::binary);
+        o << text;
+        if (!o) {
+            fprintf(stderr, "catalog check: cannot write %s\n", Utf8(writeBase).c_str());
+            return 2;
+        }
+        printf("baseline written: %s\n", Utf8(writeBase).c_str());
+    }
+    int rc = unreadable ? 1 : 0;
+    if (!readBase.empty()) {
+        std::vector<std::string> findings = CompareBaseline(base, run, expect);
+        for (const auto& f : findings) printf("error: %s\n", f.c_str());
+        printf("baseline: %zu findings\n", findings.size());
+        if (!findings.empty()) rc = 1;
+    }
+    return rc;
 }
 
 // skqe db add|drop <name>[,<name>...] --db <file.db>
@@ -2640,6 +2764,7 @@ int wmain(int argc, wchar_t** argv) {
     if (arg1 == "search") return SearchCommand(argc, argv);
     if (arg1 == "export") return ExportCommand(argc, argv);
     if (arg1 == "diff") return DiffCommand(argc, argv);
+    if (arg1 == "catalog") return CatalogCommand(argc, argv);
     if (argc < 3) return argc == 1 ? Help("") : Usage();
     std::string cmd = Utf8(argv[1]);
     std::wstring pluginPath = argv[2];

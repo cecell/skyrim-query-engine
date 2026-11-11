@@ -689,10 +689,12 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
 
 std::shared_ptr<const Pattern> CompilePattern(const Value& json) { return Compile(json); }
 
-Value DecodeSubrecord(const Pattern& pattern, const uint8_t* data, size_t size, const DecodeContext& ctx) {
+Value DecodeSubrecord(const Pattern& pattern, const uint8_t* data, size_t size, const DecodeContext& ctx,
+                      size_t* consumed) {
     Cursor cur{data, 0, size};
     Scope scope(ctx);
     std::optional<Value> v = Exec(pattern, cur, scope);
+    if (consumed) *consumed = cur.pos;
     return v ? std::move(*v) : Value();
 }
 

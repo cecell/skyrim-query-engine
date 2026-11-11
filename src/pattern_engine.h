@@ -46,8 +46,10 @@ struct DecodeContext {
 std::shared_ptr<const Pattern> CompilePattern(const Value& json);
 
 // Decodes one subrecord payload. Throws PatternError when the bytes do not
-// fit the pattern.
-Value DecodeSubrecord(const Pattern& pattern, const uint8_t* data, size_t size, const DecodeContext& ctx);
+// fit the pattern. `consumed`, when given, gets where the pattern stopped:
+// bytes from there to `size` are not in the value.
+Value DecodeSubrecord(const Pattern& pattern, const uint8_t* data, size_t size, const DecodeContext& ctx,
+                      size_t* consumed = nullptr);
 
 // One decoded value and where its bytes are. `path` follows the decoded value
 // the way Select does ("damage", "[2].level", "" for the value itself).
