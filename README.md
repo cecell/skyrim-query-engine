@@ -12,7 +12,7 @@ localized strings (loose or in BSAs) and fields whose layout depends on context.
 
 Get `skqe-<version>.zip` from [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/198184)
 or the [releases page](https://github.com/cecell/skyrim-query-engine/releases), and unzip it
-anywhere. Keep `skqe.exe` and `patterns.json` together. It needs 64-bit Windows and nothing else.
+anywhere: its data files are built in. It needs 64-bit Windows and nothing else.
 
 `skqe.exe` runs in a terminal. Double-clicking it only flashes a window, so open Command Prompt or
 PowerShell in its folder.
@@ -402,9 +402,17 @@ their own terms, listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 ## Building
 
 Visual Studio 2026 with the MSVC 14.44 toolset, CMake and Ninja: run
-`build.cmd`. Output: `build\skqe.exe` with `patterns.json` next to it. The
+`build.cmd`. Output: `build\skqe.exe` with its data files next to it. The
 first configure downloads bsa-reader and beth-asset-metadata from GitHub
 (pinned to commits in `CMakeLists.txt`).
+
+Data files: a local build reads `patterns.json`, `ut_reference.sql` and
+`search_filters.txt` from disk, so editing one needs no build. Set `SKQE_DATA`
+to the repository's `data` folder and an edit takes effect on the next run;
+otherwise the copies next to the exe are used (the build refreshes them).
+Releases are built with `-DSKQE_EMBED_DATA=ON`, which compiles the three
+files into the exe; a copy on disk still wins over the built-in one.
+`skqe --version` lists where each file came from.
 
 ## Testing
 

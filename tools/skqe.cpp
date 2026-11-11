@@ -12,7 +12,7 @@
 //                                 a field is a subrecord, then a dotted path inside it
 //       --csv | --psv | --json    output format (default json)
 //       --out <file>              write there instead of the console
-//   --patterns <file>             pattern catalog (default: patterns.json next to skqe.exe)
+//   --patterns <file>             pattern catalog (default: see DATA FILES in the help)
 //   skqe build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..]
 //                                               a SQLite database of a whole load order
 //   skqe staging [--data <Data>] [--manager vortex|mo2] [--json]   where Vortex or MO2 keeps the mods
@@ -47,6 +47,7 @@
 #include "../src/asset_search.h"
 #include "../src/db_build.h"
 #include "../src/export_request.h"
+#include "../src/data_files.h"
 #include "../src/plugin.h"
 #include "sqlite3.h"
 #include "../src/staging_find.h"
@@ -253,7 +254,13 @@ LIMITS
 
 EXIT CODES
   0 ok   1 the plugin could not be opened or is not a plugin   2 bad arguments
-  or the pattern catalog (patterns.json next to skqe.exe) could not be loaded
+  or the pattern catalog (patterns.json) could not be loaded
+
+DATA FILES
+  patterns.json (the catalog), ut_reference.sql (the lookup tables) and
+  search_filters.txt (search's rules) are built into the released skqe.exe.
+  A copy on disk wins: first in the folder SKQE_DATA names, then next to
+  skqe.exe. skqe --version says which copy of each is in use.
 
 OPTIONS FOR ALL COMMANDS
   --patterns <file>   use another pattern catalog
@@ -442,9 +449,9 @@ scripts, plugins directly in Data. A search for one type (*.dds, iron.dds) walks
 only those folders, which is much faster. A type with no rule is searched for
 everywhere. A file in an unusual place needs --anywhere.
 
-The rules are in search_filters.txt, next to skqe.exe. To change them, copy it
-to %LOCALAPPDATA%\skqe\search_filters.txt and edit the copy. --show-filters
-says which file is in use.
+The rules are in search_filters.txt, built into skqe.exe. To change them, put
+your own copy in %LOCALAPPDATA%\skqe\search_filters.txt (start from the one in
+the source, data\search_filters.txt). --show-filters says which is in use.
 )HELP";
 
 const char kHelpStaging[] = R"HELP(skqe staging [--data <folder>] [--manager vortex|mo2] [--json]
@@ -600,7 +607,7 @@ is one list, and each row also says "plugin" (a leading plugin column in CSV).
                           With --fields, "fields" is keyed by the paths you
                           asked for; with all fields, by subrecord signature.
   --labels                (JSON) names beside coded values, from
-                          ut_reference.sql next to skqe.exe: an enumeration
+                          ut_reference.sql (built in): an enumeration
                           field gets "<field>_label" with its value's name, a
                           flag field the names of its set bits, and a condition
                           (CTDA) "function", its function's name:
@@ -1005,13 +1012,6 @@ void CollectPaths(const Value& v, const std::string& prefix, std::set<std::strin
     }
 }
 
-std::wstring PatternsNextToExe() {
-    wchar_t exe[MAX_PATH];
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    std::wstring p = exe;
-    return p.substr(0, p.find_last_of(L"\\/") + 1) + L"patterns.json";
-}
-
 // skqe db add|drop <name>[,<name>...] --db <file.db>
 int DbCommand(int argc, wchar_t** argv) {
     std::string sub = argc > 2 ? Utf8(argv[2]) : "";
@@ -1038,7 +1038,6 @@ int DbCommand(int argc, wchar_t** argv) {
         fprintf(stderr, "db %s: a name and --db are required (skqe db --help)\n", sub.c_str());
         return 2;
     }
-    if (opt.patterns.empty()) opt.patterns = PatternsNextToExe();
     std::string err;
     int rc = sub == "add" ? AddModules(opt, &err) : DropExtras(opt, &err);
     if (rc) fprintf(stderr, "db %s: %s\n", sub.c_str(), err.c_str());
@@ -1076,12 +1075,6 @@ int BuildDbCommand(int argc, wchar_t** argv) {
     if (opt.out.empty() || opt.data.empty()) {
         fprintf(stderr, "build-db: --out and --data are required (skqe build-db --help)\n");
         return 2;
-    }
-    if (opt.patterns.empty()) {
-        wchar_t exe[MAX_PATH];
-        GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        opt.patterns = exe;
-        opt.patterns = opt.patterns.substr(0, opt.patterns.find_last_of(L"\\/") + 1) + L"patterns.json";
     }
     std::string err;
     int rc = BuildDb(opt, &err);
@@ -1137,22 +1130,24 @@ int SearchCommand(int argc, wchar_t** argv) {
     std::wstring dataDir;
     std::string err;
 
-    // A user's own copy, so an update can't replace it, else the one that ships.
+    // A user's own copy, so an update can't replace it, else the one that ships
+    // (SKQE_DATA, next to the exe, or built in: src/data_files.h).
     std::wstring filtersFile = env.localAppData + L"\\skqe\\search_filters.txt";
-    if (GetFileAttributesW(filtersFile.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        wchar_t exe[MAX_PATH * 2];
-        GetModuleFileNameW(nullptr, exe, MAX_PATH * 2);
-        filtersFile = exe;
-        filtersFile = filtersFile.substr(0, filtersFile.find_last_of(L'\\') + 1) + L"search_filters.txt";
-    }
-    SearchFilters filters;
+    std::string filtersText;
     bool haveFilters = false;
     if (GetFileAttributesW(filtersFile.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        if (!filters.LoadFile(filtersFile, &err)) {
-            fprintf(stderr, "search: %s\n", err.c_str());
-            return 1;
-        }
+        std::ifstream ff(filtersFile, std::ios::binary);
+        std::stringstream ss;
+        ss << ff.rdbuf();
+        filtersText = ss.str();
         haveFilters = true;
+    } else {
+        haveFilters = ReadDataFile(L"search_filters.txt", &filtersText, &filtersFile);
+    }
+    SearchFilters filters;
+    if (haveFilters && !filters.Parse(filtersText, &err)) {
+        fprintf(stderr, "search: %s: %s\n", Utf8(filtersFile).c_str(), err.c_str());
+        return 1;
     }
     if (showFilters) {
         if (!haveFilters) {
@@ -1415,17 +1410,18 @@ int BuildAssetsCommand(int argc, wchar_t** argv) {
 }  // namespace
 
 bool LoadCatalog(std::wstring patternsPath, PatternCatalog* cat) {
+    // --patterns, else SKQE_DATA, next to the exe, or built in (src/data_files.h).
+    std::string text;
     if (patternsPath.empty()) {
-        wchar_t exe[MAX_PATH];
-        GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        patternsPath = exe;
-        patternsPath = patternsPath.substr(0, patternsPath.find_last_of(L"\\/") + 1) + L"patterns.json";
+        ReadDataFile(L"patterns.json", &text);
+    } else {
+        std::ifstream pf(patternsPath, std::ios::binary);
+        std::stringstream ss;
+        ss << pf.rdbuf();
+        text = ss.str();
     }
-    std::ifstream pf(patternsPath, std::ios::binary);
-    std::stringstream ss;
-    ss << pf.rdbuf();
     std::string err;
-    if (!cat->Load(ss.str(), &err)) {
+    if (!cat->Load(text, &err)) {
         fprintf(stderr, "patterns: %s\n", err.empty() ? "cannot read patterns.json" : err.c_str());
         return false;
     }
@@ -1450,21 +1446,14 @@ struct Labels {
     std::map<std::string, std::map<int64_t, std::string>> enums, flags;
     std::map<int64_t, std::string> functions;
 
-    bool Load(const std::wstring& path, std::string* error) {
-        std::ifstream f(path, std::ios::binary);
-        if (!f) {
-            *error = "cannot read " + Utf8(path) + " (it ships next to skqe.exe)";
-            return false;
-        }
-        std::stringstream ss;
-        ss << f.rdbuf();
+    bool Load(const std::string& sql, std::string* error) {
         sqlite3* db = nullptr;
         if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
             *error = "cannot open an in-memory database";
             return false;
         }
         char* msg = nullptr;
-        bool ok = sqlite3_exec(db, ss.str().c_str(), nullptr, nullptr, &msg) == SQLITE_OK;
+        bool ok = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &msg) == SQLITE_OK;
         if (!ok) *error = std::string("ut_reference.sql: ") + (msg ? msg : "");
         sqlite3_free(msg);
         auto each = [&](const char* sql, auto&& row) {
@@ -1994,15 +1983,20 @@ int ExportCommand(int argc, wchar_t** argv) {
             fprintf(stderr, "--labels adds names to JSON output; it doesn't combine with --csv or --psv\n");
             return 2;
         }
-        std::wstring dir = patternsPath;
-        if (dir.empty()) {
-            wchar_t exe[MAX_PATH];
-            GetModuleFileNameW(nullptr, exe, MAX_PATH);
-            dir = exe;
+        // Next to an explicit --patterns first, else where data files are looked for.
+        std::string sql, error;
+        if (!patternsPath.empty()) {
+            std::ifstream f(patternsPath.substr(0, patternsPath.find_last_of(L"\\/") + 1) + L"ut_reference.sql",
+                            std::ios::binary);
+            std::stringstream ss;
+            ss << f.rdbuf();
+            sql = ss.str();
         }
-        dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
-        std::string error;
-        if (!labelData.Load(dir + L"ut_reference.sql", &error)) {
+        if (sql.empty() && !ReadDataFile(L"ut_reference.sql", &sql)) {
+            fprintf(stderr, "--labels: cannot find ut_reference.sql (in SKQE_DATA, next to skqe.exe, or built in)\n");
+            return 2;
+        }
+        if (!labelData.Load(sql, &error)) {
             fprintf(stderr, "--labels: %s\n", error.c_str());
             return 2;
         }
@@ -2624,6 +2618,12 @@ int wmain(int argc, wchar_t** argv) {
     std::string arg1 = argc > 1 ? Utf8(argv[1]) : "";
     if (arg1 == "--version" || arg1 == "version") {
         printf("skqe %s\nGPL-3.0. Credits and third-party notices: THIRD_PARTY_NOTICES.md\n", SKQE_VERSION);
+        printf("data files (SKQE_DATA, next to the exe, then %s):\n",
+               DataFilesEmbedded() ? "built in" : "none built into this build");
+        for (const wchar_t* name : {L"patterns.json", L"ut_reference.sql", L"search_filters.txt"}) {
+            const std::wstring from = DataFileSource(name);
+            printf("  %-20s %s\n", Utf8(name).c_str(), from.empty() ? "NOT FOUND" : Utf8(from).c_str());
+        }
         return 0;
     }
     if (arg1 == "help" || arg1 == "--help" || arg1 == "-h" || arg1 == "/?")

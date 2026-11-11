@@ -49,8 +49,29 @@ add_library(skqe STATIC
     src/asset_readers.cpp
     src/asset_build.cpp
     src/staging_find.cpp
-    src/asset_search.cpp)
+    src/asset_search.cpp
+    src/data_files.cpp)
 target_include_directories(skqe PUBLIC src)
+
+# The data files (patterns.json, ut_reference.sql, search_filters.txt) built
+# into the exe, so a release works on its own. Off for local builds: skqe then
+# reads them from SKQE_DATA or next to the exe, and editing one needs no build.
+# A file found on disk always wins over the built-in copy (see src/data_files.h).
+option(SKQE_EMBED_DATA "Build skqe's data files into the library" OFF)
+if(SKQE_EMBED_DATA)
+    set(SKQE_DATA_FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json
+        ${CMAKE_CURRENT_SOURCE_DIR}/data/ut_reference.sql
+        ${CMAKE_CURRENT_SOURCE_DIR}/data/search_filters.txt)
+    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/embedded_data.cpp
+        COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_CURRENT_BINARY_DIR}/embedded_data.cpp
+                "-DFILES=${SKQE_DATA_FILES}" -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_data.cmake
+        DEPENDS ${SKQE_DATA_FILES} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_data.cmake
+        COMMENT "Building the data files into skqe")
+    target_sources(skqe PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/embedded_data.cpp)
+else()
+    target_sources(skqe PRIVATE src/embedded_data_stub.cpp)
+endif()
 target_link_libraries(skqe PUBLIC sqlite3 PRIVATE bsa::reader asset::metadata bcrypt shell32 ole32 advapi32)
 
 add_executable(skqe_cli tools/skqe.cpp)

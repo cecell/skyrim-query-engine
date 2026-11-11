@@ -1,4 +1,5 @@
 #include "db_build.h"
+#include "data_files.h"
 
 #include <windows.h>
 
@@ -1394,16 +1395,20 @@ struct RowSink {
 // functions, enum and flag kinds with their values, data types, stored
 // formats, display transforms), ut_reference.sql next to the catalog.
 bool LoadReference(Db& db, const std::wstring& patterns, std::string* error) {
-    const std::wstring path = patterns.substr(0, patterns.find_last_of(L"\\/") + 1) + L"ut_reference.sql";
-    FILE* fp = nullptr;
+    // Next to an explicitly given catalog first, then where data files are
+    // looked for (src/data_files.h).
     std::string text;
-    if (_wfopen_s(&fp, path.c_str(), L"rb") == 0 && fp) {
-        char buf[65536];
-        for (size_t n; (n = fread(buf, 1, sizeof(buf), fp)) > 0;) text.append(buf, n);
-        fclose(fp);
+    if (!patterns.empty()) {
+        const std::wstring path = patterns.substr(0, patterns.find_last_of(L"\\/") + 1) + L"ut_reference.sql";
+        FILE* fp = nullptr;
+        if (_wfopen_s(&fp, path.c_str(), L"rb") == 0 && fp) {
+            char buf[65536];
+            for (size_t n; (n = fread(buf, 1, sizeof(buf), fp)) > 0;) text.append(buf, n);
+            fclose(fp);
+        }
     }
-    if (text.empty()) {
-        *error = "cannot read " + Utf8(path) + " (it ships next to patterns.json)";
+    if (text.empty() && !ReadDataFile(L"ut_reference.sql", &text)) {
+        *error = "cannot find ut_reference.sql (in SKQE_DATA, next to the exe, or built in)";
         return false;
     }
     return db.Exec(text, error);
@@ -1446,12 +1451,20 @@ WHERE table_name = 'forms' AND column_name = 'flags';
 )SQL";
 
 bool LoadCatalog(const std::wstring& path, PatternCatalog* catalog, std::string* error) {
-    FILE* fp = nullptr;
+    // An explicit path, else where data files are looked for (src/data_files.h).
     std::string text;
-    if (_wfopen_s(&fp, path.c_str(), L"rb") == 0 && fp) {
-        char buf[65536];
-        for (size_t n; (n = fread(buf, 1, sizeof(buf), fp)) > 0;) text.append(buf, n);
-        fclose(fp);
+    if (path.empty()) {
+        if (!ReadDataFile(L"patterns.json", &text)) {
+            *error = "patterns: cannot find patterns.json (in SKQE_DATA, next to the exe, or built in)";
+            return false;
+        }
+    } else {
+        FILE* fp = nullptr;
+        if (_wfopen_s(&fp, path.c_str(), L"rb") == 0 && fp) {
+            char buf[65536];
+            for (size_t n; (n = fread(buf, 1, sizeof(buf), fp)) > 0;) text.append(buf, n);
+            fclose(fp);
+        }
     }
     std::string perr;
     if (text.empty() || !catalog->Load(text, &perr)) {
