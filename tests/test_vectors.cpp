@@ -1,10 +1,15 @@
-// Runs the pattern-language test vectors (a JSON file kept beside the language
-// specification, not in this repository) against the engine.
+// Runs the pattern-language test vectors (tests/test_vectors.json) against
+// the engine. ctest runs it with the default features and the published
+// catalogue.
 //
-//   skqe_vectors <test_vectors.json> [--features a,b,...] [--verbose]
+//   skqe_vectors <test_vectors.json> [--published patterns.json]
+//                [--features a,b,...] [--verbose]
 //
 // Only vectors whose feature is enabled run; the default list grows as the
-// engine gains the features. Field vectors: decode (value, bytes after the
+// engine gains the features. A vector this engine cannot run yet is named in
+// kSkips with the reason and reported as skipped, one line each; with the
+// default features any other vector that does not run is a failure, so none
+// is dropped without a word. Field vectors: decode (value, bytes after the
 // pattern, or the error and its overread flag), then every traced leaf
 // encoded back from its value over its own bytes must give those bytes, and
 // a pattern that is one leaf must encode its value alone to encode_plain_hex.
@@ -29,8 +34,33 @@ namespace {
 // The features this engine implements.
 const char* const kDefaultFeatures[] = {"current", "context", "load", "format2", "context_decl", "range", "peek_offset", "write_arm", "packed", "unnamed_bits", "shared", "int64", "fourcc", "defaults", "grammar"};
 
-int g_passed = 0, g_failed = 0, g_skipped = 0, g_notApplicable = 0;
+// Vectors this engine does not run yet, and why.
+struct Skip {
+    const char* id;
+    const char* why;
+};
+const char kWholeField[] = "needs a whole-field encoder (EncodeSubrecord from a value alone)";
+const char kRectype[] = "the record type of a referenced form ($_rectype_) is not implemented";
+const Skip kSkips[] = {
+    {"peekoff-enc-default-arm", kWholeField}, {"peekoff-enc-case-arm", kWholeField},
+    {"peekoff-enc-outside-arm", kWholeField}, {"write-arm-size-unknown", kWholeField},
+    {"write-arm-size-known", kWholeField},    {"write-arm-absent", kWholeField},
+    {"default-enc-null-value", kWholeField},  {"default-enc-partial", kWholeField},
+    {"default-enc-no-default", kWholeField},  {"rectype-coed-10C1D5", kRectype},
+    {"rectype-coed-0640C0", kRectype},        {"rectype-coed-npc-owner", kRectype},
+    {"rectype-coed-no-resolver", kRectype},
+};
+
+int g_passed = 0, g_failed = 0, g_skipped = 0, g_notRun = 0;
 bool g_verbose = false;
+bool g_defaultFeatures = true;  // false with --features: then a vector may simply not run
+std::set<std::string> g_seenSkips;
+
+const char* SkipReason(const std::string& id) {
+    for (const Skip& s : kSkips)
+        if (id == s.id) return s.why;
+    return nullptr;
+}
 
 void Fail(const std::string& id, const std::string& why) {
     ++g_failed;
@@ -40,6 +70,23 @@ void Fail(const std::string& id, const std::string& why) {
 void Pass(const std::string& id) {
     ++g_passed;
     if (g_verbose) printf("ok   %s\n", id.c_str());
+}
+
+// A vector that does not run: listed in kSkips, or (with --features) not
+// enabled. Anything else would be a vector lost without a word, so it fails.
+void NotRun(const std::string& id, const std::string& what) {
+    if (const char* why = SkipReason(id)) {
+        ++g_skipped;
+        g_seenSkips.insert(id);
+        printf("skip %s: %s\n", id.c_str(), why);
+        return;
+    }
+    if (!g_defaultFeatures) {
+        ++g_notRun;
+        if (g_verbose) printf("not run %s: %s\n", id.c_str(), what.c_str());
+        return;
+    }
+    Fail(id, "does not run (" + what + ") and is not in the skip list");
 }
 
 std::string Json(const Value& v) {
@@ -210,11 +257,8 @@ void RunEncode(const Value& v) {
     } catch (const PatternError& e) {
         return Fail(id, std::string("pattern does not compile: ") + e.what());
     }
-    if (!PatternIsLeaf(*pat)) {
-        ++g_notApplicable;
-        if (g_verbose) printf("n/a  %s (needs a whole-field encoder)\n", id.c_str());
-        return;
-    }
+    if (!PatternIsLeaf(*pat)) return NotRun(id, "needs a whole-field encoder");
+    if (SkipReason(id)) return Fail(id, "runs now: take it out of the skip list");
     DecodeContext ctx = ContextOf(v.Find("ctx"));
     std::vector<uint8_t> enc;
     std::string err;
@@ -356,7 +400,8 @@ void RunRecord(const Value& v) {
 std::string LoadFeature(const std::string& id) {
     if (id.rfind("load-packed-", 0) == 0) return "packed";
     if (id.rfind("load-range-", 0) == 0) return "range";
-    if (id.rfind("load-ref-", 0) == 0) return "shared";
+    if (id.rfind("load-ref-", 0) == 0 || id.rfind("load-shared-", 0) == 0) return "shared";
+    if (id.rfind("load-peekoff-", 0) == 0) return "peek_offset";
     if (id.rfind("load-context-", 0) == 0) return "context_decl";
     if (id.rfind("load-grammar-", 0) == 0) return "grammar";
     if (id == "load-published-catalogue-plus-marker") return "context_decl";
@@ -381,6 +426,7 @@ void RunLoad(const Value& v, const std::string& published) {
     if (id == "load-published-catalogue" || id == "load-published-catalogue-plus-marker") {
         if (published.empty()) {
             ++g_skipped;
+            printf("skip %s: no --published catalogue given\n", id.c_str());
             return;
         }
         text = ReadFile(published);
@@ -440,7 +486,7 @@ void RunLoad(const Value& v, const std::string& published) {
         if (g_verbose) printf("     %s\n", err.c_str());
         return Pass(id);
     }
-    ++g_skipped;
+    NotRun(id, "the expected result is \"" + result + "\"");
 }
 
 }  // namespace
@@ -456,6 +502,7 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[i], "--verbose")) g_verbose = true;
         else if (!strcmp(argv[i], "--published") && i + 1 < argc) published = argv[++i];
         else if (!strcmp(argv[i], "--features") && i + 1 < argc) {
+            g_defaultFeatures = false;
             features.clear();
             std::stringstream ss(argv[++i]);
             for (std::string f; std::getline(ss, f, ',');) features.insert(f);
@@ -481,8 +528,8 @@ int main(int argc, char** argv) {
         for (const Value& v : fv->Items()) {
             // fourcc options anywhere in the vector need that feature too.
             bool fourcc = Json(v).find("\"trim\"") != std::string::npos;
-            if (enabled(v) && (!fourcc || features.count("fourcc"))) RunField(v);
-            else ++g_skipped;
+            if (enabled(v) && (!fourcc || features.count("fourcc")) && !SkipReason(Str(v, "id"))) RunField(v);
+            else NotRun(Str(v, "id"), "feature " + Str(v, "feature"));
         }
     }
     if (const Value* rv = root.Find("record_vectors")) {
@@ -492,23 +539,31 @@ int main(int argc, char** argv) {
             // Range keys in a catalogue need the range feature too.
             std::string cj = v.Find("catalog") ? Json(*v.Find("catalog")) : "";
             bool ranges = cj.find("\"..") != std::string::npos || cj.find("..\"") != std::string::npos;
-            if (enabled(v) && (!v2 || features.count("format2")) && (!ranges || features.count("range"))) RunRecord(v);
-            else ++g_skipped;
+            if (enabled(v) && (!v2 || features.count("format2")) && (!ranges || features.count("range")) && !SkipReason(Str(v, "id"))) {
+                RunRecord(v);
+            } else {
+                NotRun(Str(v, "id"), "feature " + Str(v, "feature"));
+            }
         }
     }
     if (const Value* lv = root.Find("load_vectors")) {
         for (const Value& v : lv->Items()) {
             std::string need = LoadFeature(Str(v, "id"));
-            if (features.count("load") && (need.empty() || features.count(need))) RunLoad(v, published);
-            else ++g_skipped;
+            if (features.count("load") && (need.empty() || features.count(need)) && !SkipReason(Str(v, "id"))) RunLoad(v, published);
+            else NotRun(Str(v, "id"), "feature " + (need.empty() ? std::string("load") : need));
         }
     }
     if (const Value* ev = root.Find("encode_vectors")) {
         for (const Value& v : ev->Items()) {
             if (enabled(v)) RunEncode(v);
-            else ++g_skipped;
+            else NotRun(Str(v, "id"), "feature " + Str(v, "feature"));
         }
     }
-    printf("%d passed, %d failed, %d not applicable, %d not run\n", g_passed, g_failed, g_notApplicable, g_skipped);
+    // A skip-list entry the file no longer has (or that ran) is stale.
+    if (g_defaultFeatures) {
+        for (const Skip& sk : kSkips)
+            if (!g_seenSkips.count(sk.id)) Fail(sk.id, "in the skip list, but not skipped (not in the file, or it ran)");
+    }
+    printf("%d passed, %d failed, %d skipped, %d not run\n", g_passed, g_failed, g_skipped, g_notRun);
     return g_failed ? 1 : 0;
 }
