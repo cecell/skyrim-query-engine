@@ -109,18 +109,13 @@ PluginStats CheckOne(const PatternCatalog& cat, const std::wstring& path) {
     std::vector<uint8_t> scratch;
     for (const Record& r : plugin->records()) {
         ++out.records;
-        DecodeContext ctx;
-        ctx.rt = r.type;
-        ctx.formVersion = r.formVersion;
-        ctx.localized = plugin->localized();
+        RecordContext rc(cat, r.type, r.formVersion, plugin->localized());
         if (cat.Find(r.type, "Record Header") && r.offset + 24 <= plugin->size()) {
-            ctx.fsig = "Record Header";
-            Visit(cat, r.type, "Record Header", plugin->bytes() + r.offset, 24, ctx, &acc);
+            Visit(cat, r.type, "Record Header", plugin->bytes() + r.offset, 24, rc.Before("Record Header"), &acc);
         }
         const uint8_t* body;
         size_t size;
         if (!plugin->Body(r, &scratch, &body, &size)) continue;
-        int64_t lastEpft = 0;
         uint32_t big = 0;
         bool haveBig = false;
         for (size_t q = 0; q + 6 <= size;) {
@@ -139,17 +134,8 @@ PluginStats CheckOne(const PatternCatalog& cat, const std::wstring& path) {
                 haveBig = true;
                 continue;
             }
-            if (r.type == "PERK") {
-                if (fs == "PRKE") lastEpft = 0;
-                else if (fs == "EPFT" && len) lastEpft = data[0];
-                ctx.epft = lastEpft;
-            }
-            if (r.type == "GMST" && fs == "EDID" && len) ctx.edidPrefix = std::string(1, static_cast<char>(tolower(data[0])));
-            if (r.type == "PACK" && fs == "ANAM") {
-                ctx.lastAnam.assign(reinterpret_cast<const char*>(data), strnlen(reinterpret_cast<const char*>(data), len));
-            }
-            ctx.fsig = fs;
-            Visit(cat, r.type, fs, data, len, ctx, &acc);
+            Visit(cat, r.type, fs, data, len, rc.Before(fs), &acc);
+            rc.After(fs, data, len);
         }
     }
     for (auto& [key, a] : acc) {

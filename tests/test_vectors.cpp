@@ -26,7 +26,7 @@ using namespace skqe;
 namespace {
 
 // The features this engine implements.
-const char* const kDefaultFeatures[] = {"current"};
+const char* const kDefaultFeatures[] = {"current", "context"};
 
 int g_passed = 0, g_failed = 0, g_skipped = 0;
 bool g_verbose = false;
@@ -104,12 +104,7 @@ DecodeContext ContextOf(const Value* c) {
     if (const Value* fv = c->Find("form_version")) fv->ToInt(&ctx.formVersion);
     if (const Value* l = c->Find("localized"); l && l->kind() == Value::Kind::Bool) ctx.localized = l->AsBool();
     if (const Value* vars = c->Find("vars"); vars && vars->kind() == Value::Kind::Map) {
-        for (const auto& [name, v] : vars->Members()) {
-            int64_t i;
-            if (name == "EPFT" && v.ToInt(&i)) ctx.epft = i;
-            else if (name == "EDID0" && v.IsString()) ctx.edidPrefix = v.AsString();
-            else if (name == "ANAM" && v.IsString()) ctx.lastAnam = v.AsString();
-        }
+        for (const auto& [name, v] : vars->Members()) ctx.vars.emplace_back(name, v);
     }
     return ctx;
 }
@@ -175,6 +170,74 @@ void RunField(const Value& v) {
     Pass(id);
 }
 
+// The vector's catalogue as file text. A format 1 catalogue holds each
+// pattern as JSON text in a string, as the published file does.
+std::string CatalogText(const Value& cat) {
+    if (cat.Find("$format")) return Json(cat);
+    Value out = Value::Map();
+    for (const auto& [key, val] : cat.Members()) {
+        if (!key.empty() && key[0] != '_' && !val.IsString()) out.Set(key, Value::Str(Json(val)));
+        else out.Set(key, val);
+    }
+    return Json(out);
+}
+
+void RunRecord(const Value& v) {
+    std::string id = Str(v, "id");
+    PatternCatalog cat;
+    std::string err;
+    if (!cat.Load(CatalogText(*v.Find("catalog")), &err)) return Fail(id, "catalogue does not load: " + err);
+    std::string rt = Str(v, "record_type");
+    int64_t fv = 0;
+    v.Find("form_version")->ToInt(&fv);
+    const Value* loc = v.Find("localized");
+    RecordContext rc(cat, rt, fv, !loc || loc->AsBool());
+    const auto& fields = v.Find("fields")->Items();
+    const auto& expect = v.Find("expect_fields")->Items();
+    if (fields.size() != expect.size()) return Fail(id, "fields and expect_fields differ in length");
+    for (size_t i = 0; i < fields.size(); ++i) {
+        std::string fs = Str(fields[i], "sig");
+        std::vector<uint8_t> bytes = FromHex(Str(fields[i], "hex"));
+        const Value& want = expect[i];
+        std::string at = "field " + std::to_string(i) + " " + fs + ": ";
+        const DecodeContext& ctx = rc.Before(fs);
+        if (const Value* p = want.Find("prev"); p && p->AsString() != rc.Prev()) {
+            return Fail(id, at + "prev \"" + rc.Prev() + "\", expected \"" + p->AsString() + "\"");
+        }
+        if (const Value* vars = want.Find("vars")) {
+            for (const auto& [name, val] : vars->Members()) {
+                const Value* have = nullptr;
+                for (const auto& cv : ctx.vars)
+                    if (cv.first == name) have = &cv.second;
+                if (!have || !Same(*have, val)) {
+                    return Fail(id, at + "$@" + name + " is " + (have ? Json(*have) : "unbound") + ", expected " + Json(val));
+                }
+            }
+        }
+        const Pattern* pat = cat.Find(rt, fs);
+        if (want.Find("no_pattern")) {
+            if (pat) return Fail(id, at + "has a pattern, expected none");
+        } else if (!pat) {
+            return Fail(id, at + "no pattern");
+        } else {
+            try {
+                Value got = DecodeSubrecord(*pat, bytes.data(), bytes.size(), ctx);
+                if (want.Find("decode_error")) return Fail(id, at + "decoded, an error was expected");
+                if (!Same(got, *want.Find("decoded"))) {
+                    return Fail(id, at + "decoded " + Json(got) + ", expected " + Json(*want.Find("decoded")));
+                }
+            } catch (const PatternError& e) {
+                const Value* we = want.Find("decode_error");
+                if (!we) return Fail(id, at + "decode error: " + e.what());
+                const Value* ov = we->Find("overread");
+                if (ov && ov->AsBool() != e.overread()) return Fail(id, at + "overread flag differs: " + e.what());
+            }
+        }
+        rc.After(fs, bytes.data(), bytes.size());
+    }
+    Pass(id);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -213,7 +276,15 @@ int main(int argc, char** argv) {
             else ++g_skipped;
         }
     }
-    for (const char* sec : {"encode_vectors", "record_vectors", "load_vectors"}) {
+    if (const Value* rv = root.Find("record_vectors")) {
+        for (const Value& v : rv->Items()) {
+            // A format 2 catalogue needs the format 2 loader and its context.
+            bool v2 = v.Find("catalog") && v.Find("catalog")->Find("$format");
+            if (enabled(v) && (!v2 || features.count("format2"))) RunRecord(v);
+            else ++g_skipped;
+        }
+    }
+    for (const char* sec : {"encode_vectors", "load_vectors"}) {
         if (const Value* s = root.Find(sec)) g_skipped += static_cast<int>(s->Items().size());
     }
     printf("%d passed, %d failed, %d not run\n", g_passed, g_failed, g_skipped);

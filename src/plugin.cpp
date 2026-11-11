@@ -290,11 +290,7 @@ std::vector<Field> Plugin::Fields(const Record& r, const FormIdMap* formIds, con
     const uint8_t* body;
     size_t size;
     if (!Body(r, &inflated, &body, &size)) return out;
-    DecodeContext ctx;
-    ctx.rt = r.type;
-    ctx.formVersion = r.formVersion;
-    ctx.localized = localized_;
-    int64_t lastEpft = 0;
+    RecordContext rc(*catalog_, r.type, r.formVersion, localized_);
     uint32_t big = 0;
     bool haveBig = false;
     for (size_t q = 0; q + 6 <= size;) {
@@ -313,18 +309,14 @@ std::vector<Field> Plugin::Fields(const Record& r, const FormIdMap* formIds, con
             haveBig = true;
             continue;
         }
-        if (r.type == "PERK") {
-            if (fs == "PRKE") lastEpft = 0;
-            else if (fs == "EPFT" && len) lastEpft = data[0];
-            ctx.epft = lastEpft;
+        const DecodeContext& ctx = rc.Before(fs);
+        if (wanted && !(*wanted)(fs)) {
+            rc.After(fs, data, len);
+            continue;
         }
-        if (r.type == "GMST" && fs == "EDID" && len) ctx.edidPrefix = std::string(1, static_cast<char>(tolower(data[0])));
-        if (r.type == "PACK" && fs == "ANAM") ctx.lastAnam.assign(reinterpret_cast<const char*>(data), strnlen(reinterpret_cast<const char*>(data), len));
-        if (wanted && !(*wanted)(fs)) continue;
         Field f;
         f.sig = fs;
         if (const Pattern* pat = catalog_->Find(r.type, fs)) {
-            ctx.fsig = fs;
             try {
                 f.value = DecodeSubrecord(*pat, data, len, ctx);
                 std::string path = fs;
@@ -342,6 +334,7 @@ std::vector<Field> Plugin::Fields(const Record& r, const FormIdMap* formIds, con
             }
             f.value = Value::Str(hex);
         }
+        rc.After(fs, data, len);
         out.push_back(std::move(f));
     }
     return out;

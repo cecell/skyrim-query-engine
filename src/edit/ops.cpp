@@ -158,27 +158,17 @@ struct SubTrace {
 std::vector<SubTrace> TraceSubs(const std::string& rt, uint16_t formVersion, bool localized,
                                 const std::vector<SubView>& subs, const PatternCatalog& cat) {
     std::vector<SubTrace> out(subs.size());
-    DecodeContext ctx;
-    ctx.rt = rt;
-    ctx.formVersion = formVersion;
-    ctx.localized = localized;
-    int64_t lastEpft = 0;
+    RecordContext rc(cat, rt, formVersion, localized);
     for (size_t i = 0; i < subs.size(); ++i) {
         const SubView& s = subs[i];
         std::string fs = SigText(s.sig);
-        if (rt == "PERK") {
-            if (fs == "PRKE") lastEpft = 0;
-            else if (fs == "EPFT" && s.size) lastEpft = s.data[0];
-            ctx.epft = lastEpft;
-        }
-        if (rt == "GMST" && fs == "EDID" && s.size) ctx.edidPrefix = std::string(1, static_cast<char>(tolower(s.data[0])));
-        if (rt == "PACK" && fs == "ANAM") {
-            ctx.lastAnam.assign(reinterpret_cast<const char*>(s.data), strnlen(reinterpret_cast<const char*>(s.data), s.size));
-        }
+        const DecodeContext& ctx = rc.Before(fs);
         const Pattern* pat = cat.Find(rt, fs);
-        if (!pat) continue;
+        if (!pat) {
+            rc.After(fs, s.data, s.size);
+            continue;
+        }
         out[i].hasPattern = true;
-        ctx.fsig = fs;
         try {
             out[i].value = TraceSubrecord(*pat, s.data, s.size, ctx, &out[i].leaves);
             out[i].decoded = true;
@@ -187,6 +177,7 @@ std::vector<SubTrace> TraceSubs(const std::string& rt, uint16_t formVersion, boo
             out[i].leaves.clear();
             out[i].failure = e.what();
         }
+        rc.After(fs, s.data, s.size);
     }
     return out;
 }
@@ -2437,25 +2428,21 @@ SelfCheck RunSelfCheck(const std::wstring& path, const PatternCatalog& cat) {
             ParsedBody parsed = ParseBody(body, size);
             std::string rt = SigText(child->sig());
             auto traces = TraceSubs(rt, child->formVersion(), localized, parsed.subs, cat);
-            DecodeContext ctx;
-            ctx.rt = rt;
-            ctx.formVersion = child->formVersion();
-            ctx.localized = localized;
-            int64_t lastEpft = 0;
+            RecordContext rc(cat, rt, child->formVersion(), localized);
             for (size_t i = 0; i < parsed.subs.size(); ++i) {
                 const SubView& s = parsed.subs[i];
                 const SubTrace& t = traces[i];
                 ++c.subs;
                 std::string fs = SigText(s.sig);
-                if (rt == "PERK") {
-                    if (fs == "PRKE") lastEpft = 0;
-                    else if (fs == "EPFT" && s.size) lastEpft = s.data[0];
-                    ctx.epft = lastEpft;
-                }
-                if (rt == "GMST" && fs == "EDID" && s.size) ctx.edidPrefix = std::string(1, static_cast<char>(tolower(s.data[0])));
-                if (rt == "PACK" && fs == "ANAM") ctx.lastAnam.assign(reinterpret_cast<const char*>(s.data), strnlen(reinterpret_cast<const char*>(s.data), s.size));
+                const DecodeContext& ctx = rc.Before(fs);
+                // The field updates the record's context once this pass is done with it.
+                struct AfterField {
+                    RecordContext& rc;
+                    const std::string& fs;
+                    const SubView& s;
+                    ~AfterField() { rc.After(fs, s.data, s.size); }
+                } after{rc, fs, s};
                 if (!t.hasPattern) continue;
-                ctx.fsig = fs;
                 std::string plain;
                 bool decoded = false;
                 try {

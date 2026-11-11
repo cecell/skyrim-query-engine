@@ -267,9 +267,7 @@ public:
         root.emplace_back("@FSIG", Value::Str(ctx.fsig));
         root.emplace_back("@FormVersion", Value::Int(ctx.formVersion));
         root.emplace_back("@Localized", Value::Bool(ctx.localized));
-        if (ctx.epft) root.emplace_back("@EPFT", Value::Int(*ctx.epft));
-        root.emplace_back("@EDID0", Value::Str(ctx.edidPrefix));
-        root.emplace_back("@ANAM", Value::Str(ctx.lastAnam));
+        for (const auto& [name, v] : ctx.vars) root.emplace_back("@" + name, v);
     }
     void Bind(const std::string& name, Value v) { frames_.back().emplace_back(name, std::move(v)); }
     const Value* Lookup(std::string_view name) const {
@@ -1099,6 +1097,100 @@ std::string PatternCatalog::Display(const std::string& rt, const std::string& fs
     auto it = display_.find(rt + "." + fs);
     return it == display_.end() ? std::string() : it->second;
 }
+
+// ---- record context ---------------------------------------------------------
+
+namespace {
+
+ContextAction SetTo(Value v) {
+    ContextAction a;
+    a.kind = ContextAction::Kind::Set;
+    a.set = std::move(v);
+    return a;
+}
+
+ContextAction ReadAs(const char* type, bool lower = false) {
+    ContextAction a;
+    a.kind = ContextAction::Kind::Read;
+    a.read = type;
+    a.lower = lower;
+    return a;
+}
+
+// A catalogue without declarations: the three variables the engine always
+// had. $@EDID0 and $@ANAM exist for every record type (and change only in
+// GMST and PACK), $@EPFT only in PERK.
+const std::vector<ContextVar>& LegacyContextVars(const std::string& rt) {
+    auto make = [](bool perk, bool gmst, bool pack) {
+        std::vector<ContextVar> v;
+        if (perk) v.push_back({"EPFT", Value::Int(0), {{"PRKE", SetTo(Value::Int(0))}, {"EPFT", ReadAs("uint8")}}});
+        ContextVar edid{"EDID0", Value::Str(""), {}};
+        if (gmst) edid.on.push_back({"EDID", ReadAs("char", true)});
+        v.push_back(std::move(edid));
+        ContextVar anam{"ANAM", Value::Str(""), {}};
+        if (pack) anam.on.push_back({"ANAM", ReadAs("zstring")});
+        v.push_back(std::move(anam));
+        return v;
+    };
+    static const std::vector<ContextVar> perk = make(true, false, false), gmst = make(false, true, false),
+                                         pack = make(false, false, true), other = make(false, false, false);
+    return rt == "PERK" ? perk : rt == "GMST" ? gmst : rt == "PACK" ? pack : other;
+}
+
+void ApplyAction(const ContextAction& a, const uint8_t* data, size_t size, Value* var) {
+    if (a.kind == ContextAction::Kind::Set) {
+        *var = a.set;
+        return;
+    }
+    const std::string& t = a.read;
+    auto lower = [&a](char c) { return a.lower && c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
+    if (t == "zstring") {  // byte for byte, to the first NUL or the end
+        std::string s;
+        for (size_t i = a.at; i < size && data[i]; ++i) s.push_back(lower(static_cast<char>(data[i])));
+        *var = Value::Str(std::move(s));
+        return;
+    }
+    if (t == "char") {
+        if (a.at >= size) return;  // too short: unchanged
+        *var = Value::Str(std::string(1, lower(static_cast<char>(data[a.at]))));
+        return;
+    }
+    size_t width = t == "uint8" || t == "int8" ? 1 : t == "uint16" || t == "int16" ? 2 : 4;
+    if (a.at >= size || size - a.at < width) return;  // too short: unchanged
+    uint32_t u = 0;
+    for (size_t i = 0; i < width; ++i) u |= static_cast<uint32_t>(data[a.at + i]) << (8 * i);
+    int64_t v = u;
+    if (t[0] == 'i') v = width == 1 ? static_cast<int8_t>(u) : width == 2 ? static_cast<int16_t>(u) : static_cast<int32_t>(u);
+    if (a.mask) v &= *a.mask;
+    *var = Value::Int(v);
+}
+
+}  // namespace
+
+RecordContext::RecordContext(const PatternCatalog& cat, std::string rt, int64_t formVersion, bool localized)
+    : decl_(&cat.ContextVars(rt)) {
+    ctx_.rt = std::move(rt);
+    ctx_.formVersion = formVersion;
+    ctx_.localized = localized;
+    ctx_.vars.reserve(decl_->size());
+    for (const ContextVar& v : *decl_) ctx_.vars.emplace_back(v.name, v.init);
+}
+
+const DecodeContext& RecordContext::Before(const std::string& fsig) {
+    ctx_.fsig = fsig;
+    return ctx_;
+}
+
+void RecordContext::After(const std::string& fsig, const uint8_t* data, size_t size) {
+    for (size_t i = 0; i < decl_->size(); ++i) {
+        for (const auto& [sig, action] : (*decl_)[i].on) {
+            if (sig == fsig) ApplyAction(action, data, size, &ctx_.vars[i].second);
+        }
+    }
+    prev_ = fsig;
+}
+
+const std::vector<ContextVar>& PatternCatalog::ContextVars(const std::string& rt) const { return LegacyContextVars(rt); }
 
 // ---- shapes -----------------------------------------------------------------
 

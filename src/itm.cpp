@@ -542,11 +542,7 @@ bool ReadVersion(const PluginFile& f, size_t offset, const PatternCatalog& cat, 
         size = inflated.size();
     }
     out->flags &= ~(IgnoredFlagBits(rt) | 0x00040000u);  // compression is a storage detail
-    DecodeContext ctx;
-    ctx.rt = rt;
-    ctx.formVersion = U16(rec + 20);
-    ctx.localized = f.localized;
-    int64_t lastEpft = 0;
+    RecordContext rc(cat, rt, U16(rec + 20), f.localized);
     uint32_t big = 0;
     bool haveBig = false;
     for (size_t p = 0; p + 6 <= size;) {
@@ -568,17 +564,13 @@ bool ReadVersion(const PluginFile& f, size_t offset, const PatternCatalog& cat, 
             haveBig = true;
             continue;
         }
-        if (rt == "PERK") {
-            if (fs == "PRKE") lastEpft = 0;
-            else if (fs == "EPFT" && len) lastEpft = data[0];
-            ctx.epft = lastEpft;
+        const DecodeContext& ctx = rc.Before(fs);
+        if (InSet(kIgnoredSubrecords, rt, fs)) {
+            rc.After(fs, data, len);
+            continue;
         }
-        if (rt == "GMST" && fs == "EDID" && len) ctx.edidPrefix = std::string(1, static_cast<char>(tolower(data[0])));
-        if (rt == "PACK" && fs == "ANAM") ctx.lastAnam.assign(reinterpret_cast<const char*>(data), strnlen(reinterpret_cast<const char*>(data), len));
-        if (InSet(kIgnoredSubrecords, rt, fs)) continue;
         std::string key;
         if (const Pattern* pat = cat.Find(rt, fs)) {
-            ctx.fsig = fs;
             try {
                 Canon(Adjust(rt, fs, DecodeSubrecord(*pat, data, len, ctx)), f, rt, fs, true, &key, &cat);
             } catch (const PatternError&) {
@@ -594,6 +586,7 @@ bool ReadVersion(const PluginFile& f, size_t offset, const PatternCatalog& cat, 
                 key.push_back(kHex[data[i] & 15]);
             }
         }
+        rc.After(fs, data, len);
         Field& fld = out->fields[fs];
         fld.values.push_back(std::move(key));
         // An empty marker subrecord is not "all zero": its presence is its value.

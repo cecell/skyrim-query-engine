@@ -34,12 +34,28 @@ struct Pattern;
 // One decode's context, bound at the root scope as $@RT, $@FSIG, ...
 struct DecodeContext {
     std::string rt;       // record signature
-    std::string fsig;     // subrecord signature, or "Record Header"
+    std::string fsig;     // field signature, or "Record Header"
     int64_t formVersion = 0;
     bool localized = true;
-    std::optional<int64_t> epft;  // PERK only: first byte of the last EPFT
-    std::string edidPrefix;       // GMST only: first letter of the EDID, lower case
-    std::string lastAnam;         // PACK only: text of the ANAM before this subrecord
+    // The record's context variables as the fields before this one left
+    // them, each bound as $@name. A RecordContext fills them.
+    std::vector<std::pair<std::string, Value>> vars;
+};
+
+// A context variable: its value before the record's first field, and what
+// the fields with a given signature do to it once they have been processed.
+struct ContextAction {
+    enum class Kind : uint8_t { Set, Read } kind = Kind::Set;
+    Value set;           // Set: the new value
+    std::string read;    // Read: uint8 uint16 uint32 int8 int16 int32 char zstring
+    size_t at = 0;       // Read: offset in the field
+    std::optional<int64_t> mask;
+    bool lower = false;  // char / zstring: lower-case A-Z
+};
+struct ContextVar {
+    std::string name;
+    Value init;
+    std::vector<std::pair<std::string, ContextAction>> on;  // field signature -> action
 };
 
 // Compiles a pattern from its JSON form. Throws PatternError on a bad shape.
@@ -105,6 +121,26 @@ struct Shape {
 };
 Shape ShapeOf(const Pattern& pattern);
 
+class PatternCatalog;
+
+// Walks one record's fields in order and keeps its context variables. For
+// every field, pattern or not, wanted or not (never for XXXX): Before() gives
+// the context to decode or encode it with, then After() with the bytes as
+// they are (or will be) in the file updates the variables from them.
+class RecordContext {
+public:
+    RecordContext(const PatternCatalog& cat, std::string rt, int64_t formVersion, bool localized);
+    const DecodeContext& Before(const std::string& fsig);
+    void After(const std::string& fsig, const uint8_t* data, size_t size);
+    // The signature of the field before the next one ("" before the first).
+    const std::string& Prev() const { return prev_; }
+
+private:
+    const std::vector<ContextVar>* decl_;
+    DecodeContext ctx_;
+    std::string prev_;
+};
+
 // The pattern catalog: "<RT>.<SUBRECORD>" -> compiled pattern, plus the
 // "<RT>.Record Header" pseudo-keys.
 class PatternCatalog {
@@ -131,6 +167,8 @@ public:
     // tuple at `where` in the subrecord's value ("" the value itself, "[]"
     // each list element), for "RT.FS" or else "*.FS". nullptr = none.
     const std::vector<std::string>* Names(const std::string& rt, const std::string& fs, const std::string& where) const;
+    // The context variables of a record type.
+    const std::vector<ContextVar>& ContextVars(const std::string& rt) const;
 
 private:
     std::unordered_map<std::string, std::shared_ptr<const Pattern>> byKey_;
