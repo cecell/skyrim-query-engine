@@ -17,6 +17,39 @@ import csv
 import os
 import sys
 
+# Links the earlier database didn't have, added 2026-11-10: flag sets it
+# defined but never bound to a field. Each was checked against the 5 masters +
+# USSEP: every set bit of the column has a name in the set (quest aliases'
+# bit 16 excepted, on 43 aliases). "*" = every record type with that field.
+# Notes: QUST FNAM holds both reference- and location-alias flags; the
+# reference-alias set names the same bit positions (only bit 0's wording,
+# Reserves Reference / Location, differs). SCEN FNAM is the scene's and each
+# action's; the action set is the scene set plus bits 15-17.
+# A curated link replaces the earlier database's link for the same field:
+# EFSH DATA's efsh_flags names the same bits 0-7 as its efsh_flags_unused and
+# 7 more. CAMS DATA keeps the earlier link (cams_data_flags): cams_flags swaps
+# bits 1 and 2, and no camera shot in the 80 Bethesda plugins sets only one
+# of them, so neither order can be confirmed from data.
+EXTRA_LINKS = [
+    ("ARMA", "DNAM", "weight_slider_female", None, "arma_dnam_weight_slider"),
+    ("ARMA", "DNAM", "weight_slider_male", None, "arma_dnam_weight_slider"),
+    ("BOOK", "DATA", "flags", None, "book_flags"),
+    ("CELL", "XCLL", "inherits", None, "cell_xcll_inherit_flags"),
+    ("DUAL", "DATA", "inherit_scale", None, "dual_inherit_flags"),
+    ("EFSH", "DATA", "flags_unused", None, "efsh_flags"),
+    ("FURN", "FNPR", "entry_points", None, "furn_entry_point_flags"),
+    ("FURN", "MNAM", "active_markers", None, "furn_mnam_flags"),
+    ("LCTN", "ACEP", "flags", None, "lctn_enable_parent_flags"),
+    ("LCTN", "LCEP", "flags", None, "lctn_enable_parent_flags"),
+    ("PACK", "PKDT", "general_flags", None, "pack_pkdt_flags"),
+    ("PERK", "EPF3", "script_flags", None, "perk_epf3_flags"),
+    ("QUST", "FNAM", "flags_ref_alias", None, "qust_alias_fnam_flags"),
+    ("RACE", "DATA", "flags_2", None, "race_data_flags2"),
+    ("SCEN", "FNAM", "flags", None, "scen_action_fnam_flags"),
+    ("WTHR", "NAM1", "disabled_cloud_layers", None, "wthr_nam1_cloud_layers"),
+    ("*", "DSTD", "flags", None, "dstd_stage_flags"),
+]
+
 TABLES = ["ut_data_types", "ut_stored_formats", "ut_disp_transforms", "ut_enum_kinds", "ut_enum_values",
           "ut_flag_kinds", "ut_flag_values", "ut_ctda_functions"]
 
@@ -60,6 +93,9 @@ def main():
                 lines.append(s)
         lines.append("")
     links = field_links(ut_dir, st_dir)
+    curated = {(x[0], x[1], x[2]) for x in EXTRA_LINKS}
+    links = sorted([x for x in links if (x[0], x[1], x[2]) not in curated] + EXTRA_LINKS,
+                   key=lambda x: (x[0], x[1], x[2]))
     lines.append("-- ut_field_links")
     lines.append("CREATE TABLE ut_field_links (record_type TEXT NOT NULL, subrecord TEXT NOT NULL, leaf TEXT NOT NULL,"
                  " enum_kind TEXT, flag_kind TEXT, PRIMARY KEY (record_type, subrecord, leaf)) WITHOUT ROWID;")

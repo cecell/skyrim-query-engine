@@ -145,7 +145,7 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
   stored formats, display transforms, and `ut_field_links` (which field of
   which record type used which list). `st_columns.flag_kind` / `enum_kind`
   bind columns to them, by those links first and then by name (on the 5
-  masters + USSEP: 97 flag columns, 85 value columns);
+  masters + USSEP: 119 flag columns, 85 value columns);
   `record_flags_v` / `form_flag_names_v` name record header flags;
   `conditions_v` lists every condition with its function's name.
   `skqe export --labels` puts the same names beside the values in its JSON.

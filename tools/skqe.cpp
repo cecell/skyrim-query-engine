@@ -1487,6 +1487,7 @@ struct Labels {
         if (v.kind() != Value::Kind::Int) return Value();
         std::string e, g;
         auto it = links.find(rt + "|" + fs + "|" + leaf);
+        if (it == links.end()) it = links.find("*|" + fs + "|" + leaf);
         if (it != links.end()) {
             e = it->second.first;
             g = it->second.second;
