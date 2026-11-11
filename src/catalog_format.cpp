@@ -248,8 +248,16 @@ private:
             case PrimKind::Number:
             case PrimKind::Formid:
             case PrimKind::Text:
-            case PrimKind::Fourcc:
                 if (!Keys(node, path, {"as"})) return false;
+                break;
+            case PrimKind::Fourcc:
+                if (!Keys(node, path, {"as", "trim", "other"})) return false;
+                if (const Value* tr = node.Find("trim"); tr && tr->kind() != Value::Kind::Bool) {
+                    return Err("E013", Join(path, "trim"), "'trim' must be true or false");
+                }
+                if (const Value* o = node.Find("other"); o && (!o->IsString() || (o->AsString() != "raw" && o->AsString() != "hex"))) {
+                    return Err("E013", Join(path, "other"), "'other' must be \"raw\" or \"hex\"");
+                }
                 break;
             case PrimKind::Enum:
                 if (!Keys(node, path, {"as", "enum"})) return false;

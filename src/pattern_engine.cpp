@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bitset>
+#include <cerrno>
 #include <cmath>
 #include <cstring>
 
@@ -27,6 +28,7 @@ enum class Prim : uint8_t {
     FloatRad2Deg, FloatDefault, FloatDefaultRad2Deg, FloatColor255, Scaled, ValueRef,
     ColorRgb, ColorRgba, Zstring, Str8, Str16, Str32, EnumU8, EnumU16, EnumU32,
     Fourcc, U16Div100,
+    U64, I64,  // format 2
 };
 
 struct Pattern {
@@ -39,6 +41,8 @@ struct Pattern {
     std::string scaledRead = "uint8";
     double scaledOffset = 0.0;
     double scaledDivisor = 1.0;
+    bool fourccTrim = false;  // format 2 fourcc "trim": no trailing zero bytes
+    bool fourccHex = false;   // format 2 fourcc "other":"hex": unprintable codes as 0xXXXXXXXX
     std::optional<Value> refExpr;
     bool refAsFormid = false;
 
@@ -113,6 +117,7 @@ const std::map<std::string, Prim>& PrimNames() {
         {"color_rgb", Prim::ColorRgb}, {"color_rgba", Prim::ColorRgba},
         {"zstring", Prim::Zstring}, {"str8", Prim::Str8}, {"str16", Prim::Str16}, {"str32", Prim::Str32},
         {"enum_uint8", Prim::EnumU8}, {"enum_uint16", Prim::EnumU16}, {"enum_uint32", Prim::EnumU32},
+        {"uint64", Prim::U64}, {"int64", Prim::I64},
     };
     return names;
 }
@@ -135,6 +140,9 @@ std::optional<std::string> IdOf(const Value& node) {
 }
 
 std::shared_ptr<const Pattern> Compile(const Value& j);
+
+// Primitives format 1 does not know.
+bool IsFormat2Prim(Prim p) { return p == Prim::U64 || p == Prim::I64; }
 
 }  // namespace
 
@@ -260,7 +268,9 @@ std::shared_ptr<const Pattern> Compile(const Value& j) {
                 return p;
             }
             auto it = PrimNames().find(j.AsString());
-            if (it == PrimNames().end()) throw PatternError(false, "Unknown primitive type: " + j.AsString());
+            if (it == PrimNames().end() || (!g_format2 && IsFormat2Prim(it->second))) {
+                throw PatternError(false, "Unknown primitive type: " + j.AsString());
+            }
             p->prim = it->second;
             return p;
         }
@@ -289,8 +299,12 @@ std::shared_ptr<const Pattern> Compile(const Value& j) {
         return sp;
     }
     auto prim = PrimNames().find(t);
-    if (prim != PrimNames().end()) {
+    if (prim != PrimNames().end() && (g_format2 || !IsFormat2Prim(prim->second))) {
         p->prim = prim->second;
+        if (g_format2 && p->prim == Prim::Fourcc) {
+            if (const Value* tr = j.Find("trim"); tr && tr->kind() == Value::Kind::Bool) p->fourccTrim = tr->AsBool();
+            if (const Value* o = j.Find("other"); o && o->IsString()) p->fourccHex = o->AsString() == "hex";
+        }
         if (const Value* as = j.Find("as"); as && as->IsString()) p->bindAs = as->AsString();
         if (const Value* e = j.Find("enum"); e && e->kind() == Value::Kind::Map) {
             p->enumMap.emplace();
@@ -430,6 +444,12 @@ struct Cursor {
     }
     float F32() { return BitsToFloat(U32()); }
     uint32_t ReadUint(int width) { return width == 1 ? U8() : width == 2 ? U16() : U32(); }
+    uint64_t U64() {
+        const uint8_t* b = Read(8);
+        uint64_t v = 0;
+        for (int i = 7; i >= 0; --i) v = v << 8 | b[i];
+        return v;
+    }
 };
 
 class Scope {
@@ -603,9 +623,30 @@ Value ExecPrim(const Pattern& node, Cursor& cur, Scope& scope) {
             const uint8_t* b = cur.Read(4);
             std::string code(reinterpret_cast<const char*>(b), 4);
             if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0) code.clear();
+            if (!code.empty() && node.fourccTrim) {
+                while (!code.empty() && code.back() == '\0') code.pop_back();
+            }
+            if (!code.empty() && node.fourccHex &&
+                std::any_of(code.begin(), code.end(), [](char c) { return c < 0x20 || c > 0x7E; })) {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "0x%08X", static_cast<uint32_t>(b[0] | b[1] << 8 | b[2] << 16) | static_cast<uint32_t>(b[3]) << 24);
+                code = buf;
+            }
             v = Value::Str(code);
             break;
         }
+        case Prim::U64: {
+            uint64_t u = cur.U64();
+            if (u <= static_cast<uint64_t>(INT64_MAX)) {
+                v = Value::Int(static_cast<int64_t>(u));
+            } else {  // beyond the engine's signed integer: hex text
+                char buf[24];
+                snprintf(buf, sizeof(buf), "0x%016llX", static_cast<unsigned long long>(u));
+                v = Value::Str(buf);
+            }
+            break;
+        }
+        case Prim::I64: v = Value::Int(static_cast<int64_t>(cur.U64())); break;
         case Prim::F32Div100: v = Value::Float(static_cast<double>(cur.F32()) / 100.0); break;
         case Prim::U32Div100: v = Value::Float(cur.U32() / 100.0); break;
         case Prim::Scaled: {
@@ -1351,9 +1392,47 @@ bool EncodeLeaf(const Pattern& p, const Value& in, const uint8_t* cur, size_t cu
         case Prim::Fourcc: {
             if (!in.IsString()) return Fail(err, "expected four characters");
             std::string c = in.AsString();
-            if (!c.empty() && c.size() != 4) return Fail(err, "expected four characters");
+            if (p.fourccHex && c.size() == 10 && c[0] == '0' && (c[1] == 'x' || c[1] == 'X') &&
+                c.find_first_not_of("0123456789abcdefABCDEF", 2) == std::string::npos) {
+                PutLE(std::stoul(c.substr(2), nullptr, 16), 4, out);
+                return true;
+            }
+            if (p.fourccTrim) {
+                if (c.size() > 4) return Fail(err, "expected at most four characters");
+            } else if (!c.empty() && c.size() != 4) {
+                return Fail(err, "expected four characters");
+            }
             c.resize(4, '\0');
             out->insert(out->end(), c.begin(), c.end());
+            return true;
+        }
+        case Prim::U64: {
+            uint64_t u;
+            if (in.kind() == Value::Kind::Int) {
+                if (in.AsInt() < 0) return Fail(err, std::to_string(in.AsInt()) + " does not fit 8 bytes");
+                u = static_cast<uint64_t>(in.AsInt());
+            } else if (in.IsString() && !in.AsString().empty() && in.AsString()[0] != '-') {
+                char* end = nullptr;
+                errno = 0;
+                u = strtoull(in.AsString().c_str(), &end, 0);
+                if (*end || errno == ERANGE) return Fail(err, "expected an integer that fits 8 bytes");
+            } else {
+                return Fail(err, "expected an integer");
+            }
+            PutLE(u, 8, out);
+            return true;
+        }
+        case Prim::I64: {
+            int64_t i;
+            if (in.IsString()) {
+                char* end = nullptr;
+                errno = 0;
+                i = strtoll(in.AsString().c_str(), &end, 0);
+                if (in.AsString().empty() || *end || errno == ERANGE) return Fail(err, "expected an integer that fits 8 bytes");
+            } else if (!in.ToInt(&i)) {
+                return Fail(err, "expected an integer");
+            }
+            PutLE(static_cast<uint64_t>(i), 8, out);
             return true;
         }
         case Prim::Scaled: {
@@ -1691,6 +1770,7 @@ std::optional<Shape> Walk(const Pattern& p) {
         case PType::Prim:
             switch (p.prim) {
                 case Prim::U8: case Prim::U16: case Prim::U32: case Prim::I8: case Prim::I16: case Prim::I32:
+                case Prim::U64: case Prim::I64:
                 case Prim::FloatColor255:
                     return Leaf(K::Int);
                 case Prim::F32: case Prim::FloatRad2Deg: case Prim::FloatDefault: case Prim::FloatDefaultRad2Deg:
