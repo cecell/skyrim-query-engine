@@ -179,7 +179,7 @@ std::string CsvCell(const Value& v) {
 const char kHelp[] = R"HELP(skqe - read Skyrim SE plugins (.esm / .esp / .esl) and export their fields
 
 Use this instead of parsing plugin bytes yourself. It decodes every subrecord
-with 1,893 patterns covering 134 record types, and the decoder was checked
+with 2,010 patterns covering 134 record types, and the decoder was checked
 value for value against a reference database built from the 80 Bethesda
 plugins (5.7 million values, 0 mismatches). It already handles the format's
 traps: compressed records, XXXX-sized subrecords, master-relative FormIDs,

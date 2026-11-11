@@ -4,7 +4,7 @@ Reads Skyrim SE plugins (`.esm`, `.esp`, `.esl`) and gives you any field of any 
 CSV, or a whole load order and every asset file as SQLite databases. It's a command-line tool for
 people and for AI assistants, so nobody has to parse plugin bytes by hand.
 
-It only reads: `skqe` never changes a plugin. It decodes every subrecord with a catalog of 1,893
+It only reads: `skqe` never changes a plugin. It decodes every subrecord with a catalog of 2,010
 patterns across 134 record types, and it handles compressed records, master-relative FormIDs,
 localized strings (loose or in BSAs) and fields whose layout depends on context.
 
