@@ -295,7 +295,7 @@ int CmdMasterCheck(const std::vector<std::wstring>& args) {
                 continue;
             }
             // Bytes below 0x800 under index 00 are the engine's own forms in any
-            // plugin (the Creation Kit: IsHardcoded). skqe would name their owner
+            // plugin (hard-coded forms). skqe would name their owner
             // differently before and after, for the same form.
             skqe::Plugin::FormIdMap beforeIds = [&](uint32_t v, const std::string&) {
                 return skqe::Value::Str(v < 0x800 ? "engine:" + std::to_string(v) : before->FormKey(v));

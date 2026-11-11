@@ -6,13 +6,15 @@
 The order the Creation Kit writes each record type's fields is the record
 grammar ("_records" in data/patterns.json), seeded by tools/gen_field_order.py.
 
-usage: python -I tools/gen_edit_data.py [spf_ledger.csv]
+usage: python -I tools/gen_edit_data.py <spf_ledger.csv>
 """
 import csv
 import sys
 from pathlib import Path
 
-LEDGER = Path(sys.argv[1] if len(sys.argv) > 1 else r"C:\projects\shared-skyrim-assets\docs\catalogue_corrections_ck\spf_ledger.csv")
+if len(sys.argv) != 2:
+    sys.exit(__doc__)
+LEDGER = Path(sys.argv[1])
 DATA = Path(__file__).resolve().parent.parent / "data"
 
 rows = 0

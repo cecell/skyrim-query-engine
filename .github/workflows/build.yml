@@ -1,7 +1,7 @@
 # Builds skqe.exe and runs the unit tests (valid and damaged plugins, strings
 # files, zlib streams) and the pattern-language test vectors on a clean runner,
-# with the same MSVC toolset as local builds. The decoder's reference checks need the Bethesda corpus and run
-# locally (tools/verify_tables.py).
+# with the same MSVC toolset as local builds. The decoder's reference checks
+# need the Bethesda corpus and run locally (tools/verify_tables.py).
 
 name: Build
 

@@ -1,9 +1,10 @@
 """Seeds the record grammar ("_records" in data/patterns.json), which holds
 the order the writer places new fields by.
 
-  seed   writes "_records" into data/patterns.json from the CK project's
-         ck_field_order.csv, mechanically and with no new claims: one field
-         item per position, in order; the signatures that share a position
+  seed   writes "_records" into data/patterns.json from a field order
+         table (CSV with the columns record_type, position, field_signature,
+         conditional, repeats, group), mechanically and with no new claims:
+         one field item per position, in order; the signatures that share a position
          share the item; min 1 where the field is not conditional; max "*"
          where it repeats; the group column kept as the item's label. The
          one exception: consecutive "extra-list" rows become one unordered
@@ -13,7 +14,7 @@ The grammar replaced data/field_order.csv; the seed was checked by writing
 that file back from it byte for byte. Groups are written by hand from here
 on, one record type at a time, so a new seed would undo them.
 
-usage: python -I tools/gen_field_order.py seed [ck_field_order.csv] [patterns.json]
+usage: python -I tools/gen_field_order.py seed <field_order.csv> [patterns.json]
 """
 import csv
 import json
@@ -84,7 +85,6 @@ def seed(order_path, patterns_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2 or sys.argv[1] != "seed":
+    if len(sys.argv) < 3 or sys.argv[1] != "seed":
         sys.exit(__doc__)
-    seed(sys.argv[2] if len(sys.argv) > 2 else r"C:\projects\creation-kit\tools\out\ck_field_order.csv",
-         sys.argv[3] if len(sys.argv) > 3 else DATA / "patterns.json")
+    seed(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else DATA / "patterns.json")

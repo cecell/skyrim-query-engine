@@ -2,7 +2,10 @@
 must show only the intended difference, the header must count what the file
 holds, and the output must round-trip.
 
-usage: python -I tools/check_edits.py <build dir> <work dir> [--corpus C:\\dbwork\\qs_corpus] [--mod plugin]...
+usage: python -I tools/check_edits.py <build dir> <work dir> --corpus <plugins folder> [--mod plugin]...
+
+The corpus folder holds the plugins the checks edit (Skyrim.esm, Update.esm,
+Dawnguard.esm, ccvsvsse002-pets.esl among them).
 
 Reads the plugins, writes only under <work dir>.
 """
@@ -17,7 +20,7 @@ from pathlib import Path
 ap = argparse.ArgumentParser()
 ap.add_argument("build")
 ap.add_argument("work")
-ap.add_argument("--corpus", default=r"C:\dbwork\qs_corpus")
+ap.add_argument("--corpus", required=True)
 ap.add_argument("--mod", action="append", default=[])
 a = ap.parse_args()
 
