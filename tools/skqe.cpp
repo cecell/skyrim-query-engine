@@ -656,7 +656,17 @@ fit the bytes), occurrences with bytes left after the pattern, and fields with
 no pattern. A baseline holds those numbers per plugin and key, with a SHA-256
 over the decoded value of every occurrence in file order.
 
+Without options it loads the catalogue and prints the first error, or the
+format, the pattern count and the warnings by code. A catalogue with
+"$format": "spf-patterns/2" is checked strictly: unknown members and node
+keys, wrong value types, bad enum and bit keys, duplicate names, and names
+used before they are bound are errors (E0xx); warnings (W1xx) point at
+things worth a look.
+
 OPTIONS
+  --strict                  check a catalogue without the marker as if it had it
+  --warnings                list every warning, not only the counts
+  --json                    the load's error and warnings as JSON
   --plugins <folder>        decode every .esm/.esp/.esl in the folder
   --write-baseline <file>   with --plugins: write the baseline
   --baseline <file>         with --plugins: compare with a baseline. An error
@@ -1051,6 +1061,7 @@ int CatalogCommand(int argc, wchar_t** argv) {
     std::wstring patterns = argv[3], plugins, writeBase, readBase;
     std::vector<std::string> expect;
     int threads = std::max(1u, std::thread::hardware_concurrency() / 2);
+    bool strict = false, json = false, listWarnings = false;
     for (int i = 4; i < argc; ++i) {
         std::string a = Utf8(argv[i]);
         bool hasNext = i + 1 < argc;
@@ -1060,6 +1071,9 @@ int CatalogCommand(int argc, wchar_t** argv) {
         else if (a == "--expect-changed" && hasNext) {
             for (const auto& k : SplitList(Utf8(argv[++i]))) expect.push_back(k);
         } else if (a == "--threads" && hasNext) threads = std::max(1, _wtoi(argv[++i]));
+        else if (a == "--strict") strict = true;
+        else if (a == "--json") json = true;
+        else if (a == "--warnings") listWarnings = true;
         else {
             fprintf(stderr, "catalog check: unknown option %s (skqe catalog --help)\n", a.c_str());
             return 2;
@@ -1074,8 +1088,50 @@ int CatalogCommand(int argc, wchar_t** argv) {
         return 2;
     }
     PatternCatalog cat;
-    if (!LoadCatalog(patterns, &cat)) return 2;
-    printf("catalogue: %zu patterns\n", cat.size());
+    {
+        std::ifstream pf(patterns, std::ios::binary);
+        if (!pf) {
+            fprintf(stderr, "catalog check: cannot read %s\n", Utf8(patterns).c_str());
+            return 2;
+        }
+        std::stringstream ss;
+        ss << pf.rdbuf();
+        PatternCatalog::LoadOptions lo;
+        lo.strict = strict;
+        std::string err;
+        bool ok = cat.Load(ss.str(), &err, lo);
+        std::map<std::string, size_t> byCode;
+        for (const auto& w : cat.warnings()) ++byCode[w.code];
+        if (json) {
+            Value doc = Value::Map();
+            doc.Set("format", Value::Int(ok ? cat.format() : (strict ? 2 : 0)));
+            Value errs = Value::List();
+            if (!ok) errs.Items().push_back(Value::Str(err));
+            doc.Set("errors", std::move(errs));
+            Value ws = Value::List();
+            for (const auto& w : cat.warnings()) {
+                Value x = Value::Map();
+                x.Set("code", Value::Str(w.code));
+                x.Set("key", Value::Str(w.key));
+                x.Set("path", Value::Str(w.path));
+                x.Set("message", Value::Str(w.message));
+                ws.Items().push_back(std::move(x));
+            }
+            doc.Set("warnings", std::move(ws));
+            std::string text;
+            WriteJson(doc, &text);
+            text.push_back('\n');
+            _setmode(_fileno(stdout), _O_BINARY);
+            fwrite(text.data(), 1, text.size(), stdout);
+        } else {
+            if (!ok) printf("error: %s\n", err.c_str());
+            else printf("catalogue: format %d, %zu patterns\n", cat.format(), cat.size());
+            for (const auto& [code, n] : byCode) printf("warning %s: %zu\n", code.c_str(), n);
+            if (listWarnings)
+                for (const auto& w : cat.warnings()) printf("  %s\n", w.Text().c_str());
+        }
+        if (!ok) return 1;
+    }
     if (plugins.empty()) return 0;
     CheckRun base;
     if (!readBase.empty()) {

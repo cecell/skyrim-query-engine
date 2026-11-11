@@ -1000,18 +1000,42 @@ std::string LeafTypeName(const Pattern& p) {
 }
 bool PatternIsLeaf(const Pattern& p) { return p.type == PType::Prim || p.type == PType::Bytes || p.type == PType::Bitfield; }
 
-bool PatternCatalog::Load(const std::string& jsonText, std::string* error) {
-    Value root;
-    if (!ParseJson(jsonText, &root, error)) return false;
-    if (root.kind() != Value::Kind::Map) {
-        if (error) *error = "patterns file is not a JSON object";
-        return false;
-    }
+bool IsPrimitiveName(const std::string& name) { return PrimNames().count(name) != 0; }
+
+void PatternCatalog::Clear() {
+    format_ = 1;
+    warnings_.clear();
     byKey_.clear();
     lstringClass_.clear();
     display_.clear();
     names_.clear();
     multi_.clear();
+    shared_ = records_ = options_ = meta_ = Value();
+    context_.clear();
+}
+
+bool PatternCatalog::Load(const std::string& jsonText, std::string* error) { return Load(jsonText, error, LoadOptions{}); }
+
+bool PatternCatalog::Load(const std::string& jsonText, std::string* error, const LoadOptions& options) {
+    Clear();
+    Value root;
+    std::string duplicate;
+    if (!ParseJson(jsonText, &root, error, &duplicate)) return false;
+    const Value* marker = root.kind() == Value::Kind::Map ? root.Find("$format") : nullptr;
+    bool v2 = marker || options.strict;
+    if (root.kind() != Value::Kind::Map) {
+        if (error) *error = v2 ? "E001 the catalogue is not a JSON object" : "patterns file is not a JSON object";
+        return false;
+    }
+    if (marker && (!marker->IsString() || marker->AsString() != "spf-patterns/2")) {
+        if (error) *error = "$format: E003 unknown format (this engine reads spf-patterns/2)";
+        return false;
+    }
+    if (v2) return LoadFormat2(root, duplicate, error);
+    return LoadFormat1(root, error);
+}
+
+bool PatternCatalog::LoadFormat1(const Value& root, std::string* error) {
     for (const auto& [key, val] : root.Members()) {
         if (key == "_multi" && val.kind() == Value::Kind::List) {
             for (const auto& m : val.Items())

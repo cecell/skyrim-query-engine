@@ -59,6 +59,9 @@ private:
 // Parses a complete JSON text. Integers that fit int64 become Int, other
 // numbers Float. Returns false (with *error set) on malformed input.
 bool ParseJson(std::string_view text, Value* out, std::string* error);
+// The same, and *duplicateKey (when given) gets the first key that occurs
+// twice in one object, or stays empty.
+bool ParseJson(std::string_view text, Value* out, std::string* error, std::string* duplicateKey);
 
 // Appends compact JSON. Non-finite floats are written as null, as
 // serde_json does.

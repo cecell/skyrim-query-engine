@@ -141,14 +141,35 @@ private:
     std::string prev_;
 };
 
+// True for a primitive type name ("uint8", "formid", ...); "bytes" is not one.
+bool IsPrimitiveName(const std::string& name);
+
+// An error or warning about the catalogue: a code (E0xx, W1xx), the key or
+// section, a path into the pattern ("[5].do[1]"), and a message.
+struct CatalogFinding {
+    std::string code, key, path, message;
+    std::string Text() const;  // "KEY: PATH: CODE message"
+};
+
 // The pattern catalog: "<RT>.<SUBRECORD>" -> compiled pattern, plus the
 // "<RT>.Record Header" pseudo-keys.
+//
+// Format 1 (no "$format" member): an object of key -> string, each string
+// itself JSON (or a bare primitive name); "_multi", "_lstrings", "_display"
+// and "_names" are read, other keys starting with "_" and values that are
+// not strings are skipped, a repeated key takes the last value.
+// Format 2 ("$format": "spf-patterns/2"): every member is checked, patterns
+// may be JSON values, and the first error stops the load ("KEY: PATH: E0xx
+// message"); warnings are collected.
 class PatternCatalog {
 public:
-    // Loads working_patterns.json: an object of key -> string, each string
-    // itself JSON (or a bare primitive name). Keys starting with "_" are
-    // skipped.
+    struct LoadOptions {
+        bool strict = false;  // check a format 1 file as if it had the format 2 marker
+    };
     bool Load(const std::string& jsonText, std::string* error);
+    bool Load(const std::string& jsonText, std::string* error, const LoadOptions& options);
+    int format() const { return format_; }
+    const std::vector<CatalogFinding>& warnings() const { return warnings_; }
     const Pattern* Find(const std::string& rt, const std::string& fs) const;
     size_t size() const { return byKey_.size(); }
     // Replaces (or adds) one pattern; `json` as in the file.
@@ -170,12 +191,29 @@ public:
     // The context variables of a record type.
     const std::vector<ContextVar>& ContextVars(const std::string& rt) const;
 
+    // Format 2 sections, as loaded (null when absent).
+    const Value& Shared() const { return shared_; }
+    const Value& Records() const { return records_; }
+    const Value& Options() const { return options_; }
+    const Value& Meta() const { return meta_; }
+    // The variables "_context" declares for a record type (format 2).
+    const std::vector<ContextVar>& DeclaredContext(const std::string& rt) const;
+
 private:
+    void Clear();
+    bool LoadFormat1(const Value& root, std::string* error);
+    bool LoadFormat2(const Value& root, const std::string& duplicate, std::string* error);
+    bool LoadContext(const Value& section, std::string* error);
+
+    int format_ = 1;
+    std::vector<CatalogFinding> warnings_;
     std::unordered_map<std::string, std::shared_ptr<const Pattern>> byKey_;
     std::unordered_map<std::string, std::string> lstringClass_;
     std::unordered_map<std::string, std::string> display_;
     std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::string>>> names_;
     std::set<std::string> multi_;
+    Value shared_, records_, options_, meta_;
+    std::map<std::string, std::vector<ContextVar>> context_;
 };
 
 }  // namespace skqe

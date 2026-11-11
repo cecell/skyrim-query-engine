@@ -70,6 +70,7 @@ struct Reader {
     std::string_view t;
     size_t p = 0;
     std::string err;
+    std::string* dup = nullptr;  // when set: the first key that repeats in one object
 
     void Ws() {
         while (p < t.size() && (t[p] == ' ' || t[p] == '\t' || t[p] == '\n' || t[p] == '\r')) ++p;
@@ -191,6 +192,7 @@ struct Reader {
                 ++p;
                 Value v;
                 if (!Parse(&v, depth + 1)) return false;
+                if (dup && dup->empty() && out->Find(key)) *dup = key.empty() ? std::string("\"\"") : key;
                 out->Set(std::move(key), std::move(v));
                 Ws();
                 if (p < t.size() && t[p] == ',') { ++p; continue; }
@@ -254,7 +256,12 @@ void WriteString(const std::string& s, std::string* out) {
 }  // namespace
 
 bool ParseJson(std::string_view text, Value* out, std::string* error) {
+    return ParseJson(text, out, error, nullptr);
+}
+
+bool ParseJson(std::string_view text, Value* out, std::string* error, std::string* duplicateKey) {
     Reader r{text};
+    r.dup = duplicateKey;
     if (!r.Parse(out, 0)) {
         if (error) *error = r.err;
         return false;

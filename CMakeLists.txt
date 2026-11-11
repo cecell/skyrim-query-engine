@@ -51,7 +51,8 @@ add_library(skqe STATIC
     src/staging_find.cpp
     src/asset_search.cpp
     src/data_files.cpp
-    src/catalog_check.cpp)
+    src/catalog_check.cpp
+    src/catalog_format.cpp)
 target_include_directories(skqe PUBLIC src)
 
 # The data files (patterns.json, ut_reference.sql, search_filters.txt) built

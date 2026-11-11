@@ -13,6 +13,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -26,7 +27,7 @@ using namespace skqe;
 namespace {
 
 // The features this engine implements.
-const char* const kDefaultFeatures[] = {"current", "context"};
+const char* const kDefaultFeatures[] = {"current", "context", "load"};
 
 int g_passed = 0, g_failed = 0, g_skipped = 0;
 bool g_verbose = false;
@@ -238,6 +239,89 @@ void RunRecord(const Value& v) {
     Pass(id);
 }
 
+// The feature a load vector needs besides the format 2 loader ("" = none).
+std::string LoadFeature(const std::string& id) {
+    if (id.rfind("load-packed-", 0) == 0) return "packed";
+    if (id.rfind("load-range-", 0) == 0) return "range";
+    if (id.rfind("load-ref-", 0) == 0) return "shared";
+    if (id.rfind("load-context-", 0) == 0) return "context_decl";
+    if (id.rfind("load-grammar-", 0) == 0) return "grammar";
+    if (id == "load-published-catalogue-plus-marker") return "context_decl";
+    return "";
+}
+
+std::string ReadFile(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// The context declarations that stand for the three old variables.
+const char kLegacyContext[] =
+    R"({"PERK":{"EPFT":{"init":0,"on":{"PRKE":{"set":0},"EPFT":{"read":"uint8"}}}},)"
+    R"("GMST":{"EDID0":{"init":"","on":{"EDID":{"read":"char","lower":true}}}},)"
+    R"("PACK":{"ANAM":{"init":"","on":{"ANAM":{"read":"zstring"}}}}})";
+
+void RunLoad(const Value& v, const std::string& published) {
+    std::string id = Str(v, "id");
+    std::string text = Str(v, "catalog_text");
+    const Value& want = *v.Find("format2");
+    if (id == "load-published-catalogue" || id == "load-published-catalogue-plus-marker") {
+        if (published.empty()) {
+            ++g_skipped;
+            return;
+        }
+        text = ReadFile(published);
+        PatternCatalog cat;
+        std::string err;
+        if (id == "load-published-catalogue") {
+            if (!cat.Load(text, &err)) return Fail(id, "does not load: " + err);
+            if (cat.format() != 1 || !cat.warnings().empty()) return Fail(id, "not a quiet format 1 load");
+            printf("note %s: format 1, %zu keys\n", id.c_str(), cat.size());
+            return Pass(id);
+        }
+        Value root;
+        ParseJson(text, &root, &err);
+        Value out = Value::Map();
+        out.Set("$format", Value::Str("spf-patterns/2"));
+        Value ctx;
+        ParseJson(kLegacyContext, &ctx, &err);
+        out.Set("_context", ctx);
+        for (const auto& m : root.Members()) out.Set(m.first, m.second);
+        if (!cat.Load(Json(out), &err)) return Fail(id, "does not load: " + err);
+        std::map<std::string, size_t> codes;
+        for (const auto& w : cat.warnings()) ++codes[w.code];
+        std::string list;
+        for (const auto& [c, n] : codes) list += " " + c + " " + std::to_string(n);
+        printf("note %s: format 2, %zu keys, warnings%s\n", id.c_str(), cat.size(), list.c_str());
+        return Pass(id);
+    }
+    PatternCatalog cat;
+    std::string err;
+    bool ok = cat.Load(text, &err);
+    std::string result = Str(want, "result");
+    if (result == "ok") {
+        if (!ok) return Fail(id, "does not load: " + err);
+        if (cat.format() != 2) return Fail(id, "not loaded as format 2");
+        std::set<std::string> codes, expect;
+        for (const auto& w : cat.warnings()) codes.insert(w.code);
+        if (const Value* ws = want.Find("warnings"))
+            for (const auto& w : ws->Items()) expect.insert(w.AsString());
+        if (codes != expect) {
+            std::string got;
+            for (const auto& c : codes) got += " " + c;
+            return Fail(id, "warnings:" + got);
+        }
+        return Pass(id);
+    }
+    if (result == "error") {
+        if (ok) return Fail(id, "loads, expected " + Str(want, "code"));
+        if (err.find(Str(want, "code")) == std::string::npos) return Fail(id, "error \"" + err + "\", expected " + Str(want, "code"));
+        if (g_verbose) printf("     %s\n", err.c_str());
+        return Pass(id);
+    }
+    ++g_skipped;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -246,8 +330,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::set<std::string> features(std::begin(kDefaultFeatures), std::end(kDefaultFeatures));
+    std::string published;  // the published catalogue, for the load-published-* vectors
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--verbose")) g_verbose = true;
+        else if (!strcmp(argv[i], "--published") && i + 1 < argc) published = argv[++i];
         else if (!strcmp(argv[i], "--features") && i + 1 < argc) {
             features.clear();
             std::stringstream ss(argv[++i]);
@@ -284,7 +370,14 @@ int main(int argc, char** argv) {
             else ++g_skipped;
         }
     }
-    for (const char* sec : {"encode_vectors", "load_vectors"}) {
+    if (const Value* lv = root.Find("load_vectors")) {
+        for (const Value& v : lv->Items()) {
+            std::string need = LoadFeature(Str(v, "id"));
+            if (features.count("load") && (need.empty() || features.count(need))) RunLoad(v, published);
+            else ++g_skipped;
+        }
+    }
+    for (const char* sec : {"encode_vectors"}) {
         if (const Value* s = root.Find(sec)) g_skipped += static_cast<int>(s->Items().size());
     }
     printf("%d passed, %d failed, %d not run\n", g_passed, g_failed, g_skipped);
