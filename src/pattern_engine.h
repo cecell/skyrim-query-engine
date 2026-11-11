@@ -225,6 +225,8 @@ public:
     const std::vector<ContextVar>& DeclaredContext(const std::string& rt) const;
     // The record type's grammar from "_records" (format 2), or nullptr.
     const RecordGrammar* Grammar(const std::string& rt) const;
+    // The record types that have a grammar, sorted.
+    std::vector<std::string> GrammarTypes() const;
 
 private:
     void Clear();

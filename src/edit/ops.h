@@ -19,10 +19,13 @@
 
 namespace skqe::edit {
 
-// The order the Creation Kit writes a type's subrecords (data/field_order.csv).
+// The order the Creation Kit writes a type's fields, from the catalogue's
+// record grammar ("_records"): the field items depth first, positions
+// counting from 1, every signature of an item at its position.
 class FieldOrder {
 public:
-    bool Load(const std::string& csvText);
+    // False when the catalogue has no record grammar.
+    bool Load(const PatternCatalog& catalog);
     struct Entry {
         Sig sig;
         int position;
@@ -57,8 +60,9 @@ struct EditData {
     CatalogOpen open;
 };
 
-// Loads field_order.csv and catalog_open.csv from a folder. The order file is
-// required, the ledger optional (an edit then has no catalog warnings).
+// The field order from the catalogue's record grammar (required), and
+// catalog_open.csv from a folder (optional: an edit then has no catalog
+// warnings).
 bool LoadEditData(const std::wstring& folder, const PatternCatalog* catalog, EditData* out, std::string* error);
 
 struct Change {

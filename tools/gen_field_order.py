@@ -1,5 +1,5 @@
-"""The record grammar ("_records" in data/patterns.json) and the field order
-the writer places new fields by.
+"""Seeds the record grammar ("_records" in data/patterns.json), which holds
+the order the writer places new fields by.
 
   seed   writes "_records" into data/patterns.json from the CK project's
          ck_field_order.csv, mechanically and with no new claims: one field
@@ -8,13 +8,12 @@ the writer places new fields by.
          where it repeats; the group column kept as the item's label. The
          one exception: consecutive "extra-list" rows become one unordered
          group named extra-list.
-  csv    writes data/field_order.csv back from "_records": depth first,
-         positions counting field items from 1, one row per signature, the
-         group column from the item's label or the enclosing group's name,
-         always = 1 for min 1 and max 1.
+
+The grammar replaced data/field_order.csv; the seed was checked by writing
+that file back from it byte for byte. Groups are written by hand from here
+on, one record type at a time, so a new seed would undo them.
 
 usage: python -I tools/gen_field_order.py seed [ck_field_order.csv] [patterns.json]
-       python -I tools/gen_field_order.py csv [patterns.json] [field_order.csv]
 """
 import csv
 import json
@@ -84,38 +83,8 @@ def seed(order_path, patterns_path):
     print(f"_records: {len(records)} record types")
 
 
-def write_csv(patterns_path, out_path):
-    cat = load(patterns_path)
-    rows = 0
-    with open(out_path, "w", encoding="utf-8", newline="") as out:
-        w = csv.writer(out, lineterminator="\n")
-        w.writerow(["record_type", "position", "field_signature", "group", "always"])
-        for rt, g in cat.get("_records", {}).items():
-            position = 0
-
-            def walk(items, group_name):
-                nonlocal position, rows
-                for it in items:
-                    if "group" in it:
-                        walk(it["fields"], it["group"])
-                        continue
-                    position += 1
-                    sigs = it["sig"] if isinstance(it["sig"], list) else [it["sig"]]
-                    always = "1" if it.get("min", 0) == 1 and it.get("max", 1) == 1 else ""
-                    for s in sigs:
-                        w.writerow([rt, position, s, it.get("label", group_name), always])
-                        rows += 1
-
-            walk(g["fields"], "")
-    print(f"field_order.csv: {rows} rows")
-
-
 if __name__ == "__main__":
-    if len(sys.argv) < 2 or sys.argv[1] not in ("seed", "csv"):
+    if len(sys.argv) < 2 or sys.argv[1] != "seed":
         sys.exit(__doc__)
-    if sys.argv[1] == "seed":
-        seed(sys.argv[2] if len(sys.argv) > 2 else r"C:\projects\creation-kit\tools\out\ck_field_order.csv",
-             sys.argv[3] if len(sys.argv) > 3 else DATA / "patterns.json")
-    else:
-        write_csv(sys.argv[2] if len(sys.argv) > 2 else DATA / "patterns.json",
-                  sys.argv[3] if len(sys.argv) > 3 else DATA / "field_order.csv")
+    seed(sys.argv[2] if len(sys.argv) > 2 else r"C:\projects\creation-kit\tools\out\ck_field_order.csv",
+         sys.argv[3] if len(sys.argv) > 3 else DATA / "patterns.json")

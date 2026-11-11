@@ -1,6 +1,6 @@
 // Unit tests for the plugin writer, on hand-built plugins.
 //
-//   skqeedit_tests <data folder>   (holds patterns.json, field_order.csv, catalog_open.csv)
+//   skqeedit_tests <data folder>   (holds patterns.json and catalog_open.csv)
 #include <windows.h>
 
 #include <algorithm>

@@ -140,7 +140,7 @@ if(SKQE_EDIT)
     target_link_libraries(skqeedit PRIVATE skqe_edit)
     add_dependencies(skqeedit skqe_patterns)
     # skqeedit.exe also reads these next to itself.
-    foreach(f field_order.csv catalog_open.csv)
+    foreach(f catalog_open.csv)
         add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${f}
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/${f} ${CMAKE_CURRENT_BINARY_DIR}/${f}
             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data/${f})

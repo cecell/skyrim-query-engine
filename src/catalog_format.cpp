@@ -895,6 +895,12 @@ bool PatternCatalog::LoadContext(const Value& c, std::string* error) {
     return true;
 }
 
+std::vector<std::string> PatternCatalog::GrammarTypes() const {
+    std::vector<std::string> out;
+    for (const auto& g : grammars_) out.push_back(g.first);
+    return out;
+}
+
 const RecordGrammar* PatternCatalog::Grammar(const std::string& rt) const {
     auto it = grammars_.find(rt);
     return it == grammars_.end() ? nullptr : &it->second;

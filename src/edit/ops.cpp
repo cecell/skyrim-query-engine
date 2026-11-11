@@ -302,13 +302,28 @@ bool ReadWhole(const std::wstring& path, std::string* out) {
 
 }  // namespace
 
-bool FieldOrder::Load(const std::string& csvText) {
-    auto rows = ParseCsv(csvText);
-    if (rows.empty()) return false;
-    for (size_t i = 1; i < rows.size(); ++i) {
-        if (rows[i].size() < 4 || rows[i][2].size() != 4) continue;
-        bool always = rows[i].size() > 4 && rows[i][4] == "1";
-        byType_[rows[i][0]].push_back({MakeSig(rows[i][2].c_str()), atoi(rows[i][1].c_str()), rows[i][3] == "extra-list", always});
+bool FieldOrder::Load(const PatternCatalog& catalog) {
+    byType_.clear();
+    for (const std::string& rt : catalog.GrammarTypes()) {
+        const RecordGrammar* g = catalog.Grammar(rt);
+        std::vector<Entry>& out = byType_[rt];
+        int position = 0;
+        std::function<void(const std::vector<GrammarItem>&, const std::string&)> walk =
+            [&](const std::vector<GrammarItem>& items, const std::string& groupName) {
+                for (const GrammarItem& it : items) {
+                    if (it.isGroup) {
+                        walk(it.fields, it.group);
+                        continue;
+                    }
+                    ++position;
+                    const std::string& label = it.label.empty() ? groupName : it.label;
+                    bool always = it.min == 1 && !it.many;
+                    for (const std::string& s : it.sigs) {
+                        if (s.size() == 4) out.push_back({MakeSig(s.c_str()), position, label == "extra-list", always});
+                    }
+                }
+            };
+        walk(g->items(), "");
     }
     return !byType_.empty();
 }
@@ -355,8 +370,8 @@ std::vector<CatalogOpen::Row> CatalogOpen::Overlapping(const std::string& rt, co
 bool LoadEditData(const std::wstring& folder, const PatternCatalog* catalog, EditData* out, std::string* error) {
     out->catalog = catalog;
     std::string text;
-    if (!ReadWhole(folder + L"field_order.csv", &text) || !out->order.Load(text)) {
-        *error = "cannot read field_order.csv";
+    if (!catalog || !out->order.Load(*catalog)) {
+        *error = "the catalogue has no record grammar (_records): the field order comes from it";
         return false;
     }
     if (ReadWhole(folder + L"catalog_open.csv", &text)) out->open.Load(text);
