@@ -62,7 +62,13 @@ struct ContextVar {
 };
 
 // Compiles a pattern from its JSON form. Throws PatternError on a bad shape.
+// `format2`: with the features of catalogue format 2 (range case keys,
+// read-ahead at an offset, ...); without it, as format 1.
 std::shared_ptr<const Pattern> CompilePattern(const Value& json);
+std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2);
+// Format 2 syntax helpers, shared by the compiler and the catalogue check.
+bool ParseCaseRange(const std::string& key, std::optional<int64_t>* lo, std::optional<int64_t>* hi);
+bool ParsePeek(const std::string& name, int* width, size_t* offset);
 
 // Decodes one subrecord payload. Throws PatternError when the bytes do not
 // fit the pattern. `consumed`, when given, gets where the pattern stopped:

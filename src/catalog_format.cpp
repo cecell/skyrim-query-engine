@@ -176,7 +176,9 @@ private:
             }
             return Err("E019", path, "context variable $@" + v + " is not declared for " + rt_);
         }
-        if (name == "_remaining" || name == "_pos" || name == "_peek_u8" || name == "_peek_u16" || name == "_peek_u32") return true;
+        int pw;
+        size_t po;
+        if (name == "_remaining" || name == "_pos" || ParsePeek(name, &pw, &po)) return true;
         if (name.rfind("_popcount_", 0) == 0) name = name.substr(10);
         else if (!name.empty() && name[0] == '_') return Err("E019", path, "unknown reference " + ref);
         if (!bound.count(name)) return Err("E019", path, "$" + name + " is used before an 'as' binds it");
@@ -320,7 +322,7 @@ private:
     }
 
     bool CheckUnion(const Value& node, const std::string& path, std::set<std::string>* bound) {
-        if (!Keys(node, path, {"on", "cases", "mask", "default"})) return false;
+        if (!Keys(node, path, {"on", "cases", "mask", "default", "write"})) return false;
         const Value* on = node.Find("on");
         if (!on) return Err("E012", path, "union without 'on'");
         if (!on->IsString() || on->AsString().empty() || on->AsString()[0] != '$') {
@@ -333,9 +335,28 @@ private:
         if (const Value* m = node.Find("mask"); m && m->kind() != Value::Kind::Int) {
             return Err("E013", Join(path, "mask"), "'mask' must be an integer");
         }
+        if (const Value* w = node.Find("write")) {
+            if (!w->IsString()) return Err("E013", Join(path, "write"), "'write' must be a case key");
+            if (!cases->Find(w->AsString())) return Err("E012", Join(path, "write"), "'write' names no case");
+        }
+        // Range keys: well formed, lo <= hi, no two sharing a value.
+        std::vector<std::pair<int64_t, int64_t>> spans;
+        for (const auto& m : cases->Members()) {
+            if (m.first.find("..") == std::string::npos) continue;
+            std::optional<int64_t> lo, hi;
+            std::string kp = Join(Join(path, "cases"), m.first);
+            if (!ParseCaseRange(m.first, &lo, &hi) || (!lo && !hi)) return Err("E017", kp, "a range is lo..hi, ..hi or lo..");
+            int64_t a = lo ? *lo : INT64_MIN, b = hi ? *hi : INT64_MAX;
+            if (a > b) return Err("E017", kp, "range runs backwards");
+            for (const auto& s : spans)
+                if (a <= s.second && s.first <= b) return Err("E017", kp, "ranges overlap");
+            spans.emplace_back(a, b);
+        }
         // Names an arm binds stay visible after the union, as at run time.
         std::set<std::string> after = *bound;
-        bool peek = on->AsString().rfind("$_peek_u", 0) == 0;
+        int pw = 0;
+        size_t po = 0;
+        bool peek = ParsePeek(on->AsString().substr(1), &pw, &po) && po == 0;
         bool skipsDiscriminator = false;
         for (const auto& [ck, cv] : cases->Members()) {
             std::set<std::string> inner = *bound;
@@ -536,7 +557,7 @@ bool PatternCatalog::LoadFormat2(const Value& root, const std::string& duplicate
             warnings_.push_back({"W106", key, "", "an lstring leaf in a key with no _lstrings entry"});
         }
         try {
-            byKey_[key] = CompilePattern(tree);
+            byKey_[key] = CompilePattern(tree, true);
         } catch (const PatternError& e) {
             return fail("E010", key, "", e.what());
         }

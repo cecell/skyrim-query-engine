@@ -53,6 +53,16 @@ struct Pattern {
     std::optional<int64_t> mask;  // cases are looked up on (value & mask)
     std::map<std::string, std::shared_ptr<const Pattern>> cases;
     std::shared_ptr<const Pattern> deflt;
+    // Format 2: case keys "lo..hi", "..hi", "lo.." (inclusive), tried after
+    // the exact keys when the value is an integer.
+    struct CaseRange {
+        std::optional<int64_t> lo, hi;
+        std::shared_ptr<const Pattern> arm;
+    };
+    std::vector<CaseRange> ranges;
+    std::string write;     // format 2: the arm for a new field when `on` is $_remaining
+    int peekWidth = 0;     // format 2: `on` is $_peek_uW+N, read N bytes ahead
+    size_t peekOffset = 0;
 
     // Bitfield
     int size = 4;
@@ -62,6 +72,10 @@ struct Pattern {
 namespace {
 
 [[noreturn]] void BadShape(const std::string& what) { throw PatternError(false, "Bad pattern shape: " + what); }
+
+// Compiling a format 2 catalogue: its features are on. Format 1 compiles
+// exactly as it always did.
+thread_local bool g_format2 = false;
 
 const std::map<std::string, Prim>& PrimNames() {
     static const std::map<std::string, Prim> names = {
@@ -102,6 +116,47 @@ std::optional<std::string> IdOf(const Value& node) {
 }
 
 std::shared_ptr<const Pattern> Compile(const Value& j);
+
+}  // namespace
+
+// "lo..hi", "..hi", "lo..": decimal integers, a leading '-' allowed.
+bool ParseCaseRange(const std::string& key, std::optional<int64_t>* lo, std::optional<int64_t>* hi) {
+    size_t dots = key.find("..");
+    if (dots == std::string::npos) return false;
+    auto num = [](const std::string& s, std::optional<int64_t>* out) {
+        if (s.empty()) return true;
+        size_t i = s[0] == '-' ? 1 : 0;
+        if (i == s.size() || s.size() - i > 18 || s.find_first_not_of("0123456789", i) != std::string::npos) return false;
+        *out = std::stoll(s);
+        return true;
+    };
+    lo->reset();
+    hi->reset();
+    return num(key.substr(0, dots), lo) && num(key.substr(dots + 2), hi);
+}
+
+// "_peek_u8", "_peek_u16+4": the width in bytes and the offset.
+bool ParsePeek(const std::string& name, int* width, size_t* offset) {
+    static const char* const kNames[] = {"_peek_u8", "_peek_u16", "_peek_u32"};
+    static const int kWidths[] = {1, 2, 4};
+    for (int i = 0; i < 3; ++i) {
+        std::string n = kNames[i];
+        if (name.compare(0, n.size(), n) != 0) continue;
+        std::string rest = name.substr(n.size());
+        if (rest.empty()) {
+            *width = kWidths[i];
+            *offset = 0;
+            return true;
+        }
+        if (rest[0] != '+' || rest.size() < 2 || rest.size() > 7 || rest.find_first_not_of("0123456789", 1) != std::string::npos) return false;
+        *width = kWidths[i];
+        *offset = static_cast<size_t>(std::stoul(rest.substr(1)));
+        return true;
+    }
+    return false;
+}
+
+namespace {
 
 std::vector<std::pair<std::shared_ptr<const Pattern>, std::optional<std::string>>> CompileItems(const Value& list) {
     std::vector<std::pair<std::shared_ptr<const Pattern>, std::optional<std::string>>> items;
@@ -190,9 +245,26 @@ std::shared_ptr<const Pattern> Compile(const Value& j) {
             p->mask = m;
         }
         if (const Value* cs = j.Find("cases"); cs && cs->kind() == Value::Kind::Map) {
-            for (const auto& m : cs->Members()) p->cases[m.first] = Compile(m.second);
+            for (const auto& m : cs->Members()) {
+                Pattern::CaseRange r;
+                if (g_format2 && ParseCaseRange(m.first, &r.lo, &r.hi)) {
+                    r.arm = Compile(m.second);
+                    p->ranges.push_back(std::move(r));
+                } else {
+                    p->cases[m.first] = Compile(m.second);
+                }
+            }
         }
         if (const Value* d = j.Find("default")) p->deflt = Compile(*d);
+        if (g_format2) {
+            if (const Value* w = j.Find("write"); w && w->IsString()) p->write = w->AsString();
+            int width;
+            size_t off;
+            if (ParsePeek(p->on.substr(1), &width, &off) && p->on[0] == '$') {
+                p->peekWidth = width;
+                p->peekOffset = off;
+            }
+        }
     } else if (t == "opt") {
         p->type = PType::Opt;
         p->body = Compile(Required(j, "do", "opt"));
@@ -614,7 +686,18 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
         }
 
         case PType::Union: {
-            Value on = scope.Resolve(Value::Str(p.on), cur);
+            Value on;
+            if (p.peekWidth) {  // format 2 read-ahead, possibly at an offset
+                if (cur.Remaining() < p.peekOffset + p.peekWidth) {
+                    throw PatternError(true, "Overread: peek " + std::to_string(p.peekWidth) + " at " +
+                                                 std::to_string(cur.pos + p.peekOffset));
+                }
+                Cursor c = cur;
+                c.pos += p.peekOffset;
+                on = Value::Int(c.ReadUint(p.peekWidth));
+            } else {
+                on = scope.Resolve(Value::Str(p.on), cur);
+            }
             if (p.mask) {
                 int64_t i;
                 if (!on.ToInt(&i)) BadShape("union 'mask' on a value that is not an integer");
@@ -622,7 +705,16 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
             }
             std::string key = on.LookupKey();
             auto it = p.cases.find(key);
-            const Pattern* c = it != p.cases.end() ? it->second.get() : p.deflt.get();
+            const Pattern* c = it != p.cases.end() ? it->second.get() : nullptr;
+            if (!c && on.kind() == Value::Kind::Int) {
+                for (const auto& r : p.ranges) {
+                    if ((!r.lo || on.AsInt() >= *r.lo) && (!r.hi || on.AsInt() <= *r.hi)) {
+                        c = r.arm.get();
+                        break;
+                    }
+                }
+            }
+            if (!c) c = p.deflt.get();
             if (!c) BadShape("union: no case for key " + key);
             return Exec(*c, cur, scope);
         }
@@ -687,6 +779,15 @@ std::optional<Value> Exec(const Pattern& p, Cursor& cur, Scope& scope) {
 }  // namespace
 
 std::shared_ptr<const Pattern> CompilePattern(const Value& json) { return Compile(json); }
+
+std::shared_ptr<const Pattern> CompilePattern(const Value& json, bool format2) {
+    struct Flag {
+        bool saved = g_format2;
+        ~Flag() { g_format2 = saved; }
+    } flag;
+    g_format2 = format2;
+    return Compile(json);
+}
 
 Value DecodeSubrecord(const Pattern& pattern, const uint8_t* data, size_t size, const DecodeContext& ctx,
                       size_t* consumed) {
@@ -1318,6 +1419,7 @@ std::optional<Shape> Walk(const Pattern& p) {
                 else m = m ? Merge(*m, *s) : *s;
             };
             for (const auto& c : p.cases) add(*c.second);
+            for (const auto& r : p.ranges) add(*r.arm);
             if (p.deflt) add(*p.deflt);
             if (!m && anySkip) return std::nullopt;
             return m ? *m : Leaf(K::Unknown);
