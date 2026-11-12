@@ -31,7 +31,7 @@
 namespace skqe {
 namespace {
 
-constexpr int kSchemaVersion = 9;
+constexpr int kSchemaVersion = 10;
 constexpr size_t kBatchRows = 50000;
 constexpr int64_t kKeyShift = 1 << 24;
 
@@ -106,6 +106,8 @@ struct PluginInfo {
     int loadOrder = -1, modIndex = -1;
     bool exists = false, light = false, master = false, localized = false;
     uint32_t flags = 0;
+    uint16_t formVersion = 0;  // the TES4 record header's form version (44 = saved by an SE tool)
+    bool hasFormVersion = false;  // the header's first 24 bytes were read
     float hedrVersion = 0;
     uint32_t numRecords = 0, nextObjectId = 0;
     std::string author, description;
@@ -127,6 +129,10 @@ bool ReadHeader(PluginInfo* p) {
     uint8_t hdr[24];
     DWORD got = 0;
     bool ok = ReadFile(h, hdr, 24, &got, nullptr) && got == 24 && memcmp(hdr, "TES4", 4) == 0;
+    if (ok) {
+        p->formVersion = U16(hdr + 20);
+        p->hasFormVersion = true;
+    }
     std::vector<uint8_t> body;
     // The header's size comes from the file: no larger than the file itself,
     // and far below 64 MB (big override lists make it a few hundred KB).
@@ -1789,6 +1795,17 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
                    conditions + ") x LEFT JOIN ut_ctda_functions u ON u.func_index = x.func_idx;\n";
         if (!db.Exec(sql, error)) return 1;
 
+        // The TES4 record header's form version: not a subrecord, so no pattern
+        // column has it. Added after the pattern columns, so their positions stay.
+        const bool tes4FormVersion = schema.TypeTable("TES4") >= 0;
+        if (tes4FormVersion) {
+            if (!db.Exec("ALTER TABLE tes4 ADD COLUMN form_version INTEGER", error)) return 1;
+            Stmt up{db.Prepare("UPDATE tes4 SET form_version = ? WHERE plugin_no = ?", error)};
+            if (!up.st) return 1;
+            for (const auto& p : all)
+                if (p.hasFormVersion) up.Int(1, p.formVersion).Int(2, p.no).Run();
+        }
+
         // The data dictionary.
         Stmt insT{db.Prepare("INSERT INTO st_tables VALUES(?,?,?,?,?,?)", error)};
         Stmt insC{db.Prepare("INSERT INTO st_columns VALUES(?,?,?,?,?,?,?,?,?,?,NULL,NULL)", error)};
@@ -1837,6 +1854,13 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
                 if (c.kind == "bytes") insC.Text(10, kBlobNote);
                 else insC.Null(10);
                 insC.Run();
+            }
+            if (tes4FormVersion && t.name == "tes4") {
+                insC.Text(1, t.name).Text(2, "form_version").Int(3, pos++).Text(4, "INTEGER").Text(5, "int").Text(6, "Record Header")
+                    .Text(7, "Record Header.form_version").Null(8)
+                    .Text(9, "the plugin's form version, from its TES4 record header: 44 = saved by an SE tool, 43 = LE")
+                    .Null(10)
+                    .Run();
             }
         }
 

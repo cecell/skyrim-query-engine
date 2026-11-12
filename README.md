@@ -168,7 +168,9 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
   `winning_forms`.
 
 - `tes4`, `tes4_mast`, `tes4_onam`: each plugin's header record (HEDR,
-  author, masters, the overridden-forms list ONAM).
+  author, masters, the overridden-forms list ONAM). `tes4.form_version`, the
+  last column, is the form version from the record header (44 = saved by an SE
+  tool, 43 = LE).
 
 Optional modules hold the bulky geometry. Their tables exist in every build
 and stay empty until the module is built:

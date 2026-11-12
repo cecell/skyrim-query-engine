@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SkyrimQueryEngine VERSION 0.95 LANGUAGES C CXX)
+project(SkyrimQueryEngine VERSION 0.96 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
