@@ -11,6 +11,7 @@
 #include <ctime>
 #include <fstream>
 #include <functional>
+#include <list>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -191,6 +192,15 @@ struct Family {
     bool Supports(const std::string& opt) const { return opt == "count" || options.count(opt) != 0; }
 };
 
+struct Noun {
+    std::string type;                                  // record type
+    std::vector<std::vector<std::string>> kwGroups;    // each group: the record has one of these keywords
+    std::vector<std::vector<int64_t>> raceGroups;      // each group: the NPC's race is one of these
+    std::string sex;                                   // "1" female, "0" male, "" any
+    std::vector<std::string> names;                    // the record's name contains one of these
+    std::vector<std::string> labels;                   // what each part means, for the reply
+};
+
 struct Resolved {
     std::vector<std::pair<int64_t, std::string>> rows;  // (id or NULL=INT64_MIN, text)
     std::string summary;                                // "252 textures named x"
@@ -203,6 +213,7 @@ struct Resolved {
     std::vector<std::string> alternatives;              // picked one of these; the user can pick another
     int pickedIndex = -1;
     std::vector<std::string> keywords;                  // type slots: keyword editor IDs that narrow the type
+    Noun noun;                                          // type slots: the parsed noun phrase
 };
 constexpr int64_t kNullId = INT64_MIN;
 
@@ -306,6 +317,9 @@ struct Engine::Impl {
             for (const auto& [k, v] : t->Members()) formats[Lower(k)] = v.AsString();
         if (const Value* t = root.Find("file_kinds"))
             for (const auto& [k, v] : t->Members()) fileKinds[k] = v.AsString();
+        if (const Value* t = root.Find("race_groups"))
+            for (const auto& [k, list] : t->Members())
+                for (const auto& w : list.Items()) raceGroups[TypeKey(k)].push_back(Lower(w.AsString()));
         if (const Value* t = root.Find("value_maps"))
             for (const auto& [kind, m] : t->Members())
                 for (const auto& [k, v] : m.Members()) valueMaps[kind][Lower(k)] = v.AsString();
@@ -394,7 +408,8 @@ struct Engine::Impl {
             for (const auto& s : f.slots) tempTables.insert("s_" + s.name);
             families.push_back(std::move(f));
         }
-        for (const char* t : {"s_plugin", "s_folder", "s_archive", "s_archive_files", "s_type_kw"}) tempTables.insert(t);
+        for (const char* t : {"s_plugin", "s_folder", "s_archive", "s_archive_files", "s_kw", "s_race", "s_sex", "s_name"})
+            tempTables.insert(t);
         // vocabulary words seen in wordings, for typo correction
         for (auto& f : families)
             for (const auto& w : f.wordings) {
@@ -471,6 +486,13 @@ struct Engine::Impl {
 
     static std::string Singular(const std::string& w) {
         if (w == "staves") return "staff";
+        if (w == "elves") return "elf";
+        if (w == "wolves") return "wolf";
+        if (w == "dwarves") return "dwarf";
+        if (w == "thieves") return "thief";
+        if (w == "draugr" || w == "deer" || w == "fish" || w == "sheep" || w == "falmer" || w == "dremora" || w == "chaurus" ||
+            w == "khajiit" || w == "atronach" || w == "skeever")
+            return w;
         if (w == "knives") return "knife";
         if (w == "people") return "person";
         if (w == "men") return "man";
@@ -494,6 +516,247 @@ struct Engine::Impl {
         for (const auto& [k, v] : types) typeIndex[TypeKey(k)] = v;
         for (const auto& [k, v] : types) typeIndex[k] = v;  // exact spellings win
     }
+    // ------------------------------------------------------------ noun phrases
+    // "khajiit women", "iron swords", "ebony boots", "enemies": adjectives
+    // (material, race, sex), then a noun (a type word, a race, a race group,
+    // women / men). Each part narrows the records; see BuildTypeFilter.
+    struct RaceInfo {
+        int64_t key;
+        std::string edid, name, edidNorm, nameNorm;
+    };
+    std::vector<RaceInfo> races;                                        // winning RACE records
+    std::map<std::string, std::vector<std::string>> materials;          // "imperial studded" -> keyword editor IDs
+    std::map<std::string, std::vector<std::string>> raceGroups;         // "enemy" -> race words (from the data file)
+    std::list<Noun> nounStore;
+
+    static std::string Squash(const std::string& s) {
+        std::string o;
+        for (char c : Lower(s))
+            if (c != ' ' && c != '-' && c != '_' && c != '\'') o += c;
+        return o;
+    }
+    static std::string SplitCamel(const std::string& s) {  // "ImperialStudded" -> "imperial studded", "KSWigs" -> "ks wigs"
+        std::string o;
+        for (size_t i = 0; i < s.size(); ++i) {
+            char c = s[i];
+            bool up = c >= 'A' && c <= 'Z';
+            if (i > 0 && up) {
+                char p = s[i - 1];
+                bool prevLower = (p >= 'a' && p <= 'z') || (p >= '0' && p <= '9');
+                bool nextLower = i + 1 < s.size() && s[i + 1] >= 'a' && s[i + 1] <= 'z';
+                if (prevLower || (nextLower && p >= 'A' && p <= 'Z')) o += ' ';
+            }
+            o += c;
+        }
+        return Lower(o);
+    }
+    void LoadNounData() {
+        races.clear();
+        materials.clear();
+        if (!hasPlugins) return;
+        for (const auto& r : Rows("SELECT f.form_key, coalesce(f.edid, ''), coalesce(r.full, '') FROM forms f JOIN race r ON "
+                                  "r.form_key = f.form_key AND r.plugin_no = f.plugin_no WHERE f.type = 'RACE' AND f.is_winner", {}))
+            races.push_back({_atoi64(r[0].c_str()), r[1], r[2], Lower(r[1]), Squash(r[2])});
+        // materials: the user's rule (2026-11-13): every KYWD with WeapMaterial / ArmorMaterial
+        // (DLC1/DLC2 and mod prefixes too), the rest of the name split at its capitals
+        static const std::regex matRe("^(?:[A-Za-z0-9]+_)?(?:DLC[0-9]+)?(?:Weap|Weapon|Armor)Material([A-Za-z0-9]+)$");
+        for (const auto& r : Rows("SELECT DISTINCT edid FROM forms WHERE type = 'KYWD' AND is_winner AND edid LIKE '%Material%'", {})) {
+            std::smatch m;
+            if (!std::regex_match(r[0], m, matRe)) continue;
+            std::string phrase = SplitCamel(m[1].str());
+            auto add = [&](const std::string& key) {
+                auto& v = materials[key];
+                if (std::find(v.begin(), v.end(), r[0]) == v.end()) v.push_back(r[0]);
+            };
+            add(phrase);
+            std::vector<std::string> words = SplitWs(phrase);
+            if (words.size() > 1) add(words[0]);  // "imperial" covers imperial heavy / light / studded
+        }
+    }
+    // Race words: "khajiit", "high elf", "sabre cat", "wraith" -> RACE records.
+    std::vector<int64_t> RaceIds(const std::string& word, std::vector<std::string>* labels) const {
+        std::vector<int64_t> ids;
+        std::string w = Squash(TypeKey(word));
+        if (w.size() < 2) return ids;
+        for (const auto& r : races) {
+            std::string e = r.edidNorm;
+            size_t us = e.rfind('_');
+            if (us != std::string::npos) e = e.substr(us + 1);
+            if (e.size() > 4 && e.compare(0, 3, "dlc") == 0 && isdigit(static_cast<unsigned char>(e[3]))) e = e.substr(4);
+            // SabreCatRace, and the variants SabreCatSnowyRace, TrollFrostRace (not DragonPriestRace for "dragon")
+            static const char* variants[] = {"snowy", "frost", "ice", "white", "black", "red", "giant", "spectral", "undead", "armored"};
+            bool variant = false;
+            if (StartsWith(e, w))
+                for (const char* v : variants)
+                    if (StartsWith(e.substr(w.size()), std::string(v) + "race")) variant = true;
+            if (StartsWith(e, w + "race") || variant) {
+                ids.push_back(r.key);
+                if (labels) labels->push_back(r.edid);
+            }
+        }
+        if (ids.empty())
+            for (const auto& r : races)
+                if (r.nameNorm == w) {
+                    ids.push_back(r.key);
+                    if (labels) labels->push_back(r.edid);
+                }
+        if (ids.empty())  // a word of the race's name: "wraith" -> Ice Wraith
+            for (const auto& r : races) {
+                std::vector<std::string> nw = SplitWs(Lower(r.name));
+                if (std::find(nw.begin(), nw.end(), Lower(word)) != nw.end() ||
+                    std::find(nw.begin(), nw.end(), Singular(Lower(word))) != nw.end()) {
+                    ids.push_back(r.key);
+                    if (labels) labels->push_back(r.edid);
+                }
+            }
+        return ids;
+    }
+    // A race word or a group of them ("enemies", "human"): the race records, and the words that matched none.
+    bool RaceTerm(const std::string& phrase, std::vector<int64_t>* ids, std::string* label) const {
+        std::string key = TypeKey(phrase);
+        auto g = raceGroups.find(key);
+        if (g != raceGroups.end()) {
+            std::vector<std::string> none;
+            for (const auto& member : g->second) {
+                auto got = RaceIds(member, nullptr);
+                if (got.empty()) none.push_back(member);
+                ids->insert(ids->end(), got.begin(), got.end());
+            }
+            *label = phrase + " (" + Join(g->second, ", ") + ")" + (none.empty() ? "" : "; no race found for " + Join(none, ", "));
+            return !ids->empty();
+        }
+        std::vector<std::string> labels;
+        *ids = RaceIds(phrase, &labels);
+        if (ids->empty()) return false;
+        if (labels.size() > 6) labels.resize(6), labels.push_back("...");
+        *label = "race " + Join(labels, ", ");
+        return true;
+    }
+
+    bool ParseNoun(const std::vector<std::string>& words, Noun* out) const {
+        const size_t n = words.size();
+        if (n == 0 || n > 8) return false;
+        for (size_t k = std::min<size_t>(4, n); k >= 1; --k) {  // the noun: the last k words
+            Noun noun;
+            std::string head = Join(std::vector<std::string>(words.end() - k, words.end()), " ");
+            std::string tv = TypeLookup(head);
+            if (tv.empty() && k == 1 && head.size() >= 4) tv = FuzzyType(head);
+            const auto* sexMap = valueMaps.count("sex") ? &valueMaps.at("sex") : nullptr;
+            std::vector<int64_t> rids;
+            std::string rlabel;
+            if (!tv.empty()) {
+                ApplyTypeValue(tv, &noun);
+            } else if (sexMap && sexMap->count(Lower(head))) {
+                noun.type = "NPC_";
+                noun.sex = sexMap->at(Lower(head));
+                noun.labels.push_back(noun.sex == "1" ? "female" : "male");
+            } else if (RaceTerm(head, &rids, &rlabel)) {
+                noun.type = "NPC_";
+                noun.raceGroups.push_back(rids);
+                noun.labels.push_back(rlabel);
+            } else if (k == 1 && n == 1 && recordCodes.count(Upper(head))) {
+                noun.type = Upper(head);
+            } else {
+                continue;
+            }
+            // the adjectives before it, longest phrase first
+            size_t i = 0;
+            bool ok = true;
+            const size_t stop = n - k;
+            while (i < stop && ok) {
+                bool took = false;
+                for (size_t len = std::min<size_t>(3, stop - i); len >= 1 && !took; --len) {
+                    std::string ph = Join(std::vector<std::string>(words.begin() + i, words.begin() + i + len), " ");
+                    std::string lp = Lower(ph);
+                    auto mat = materials.find(lp);
+                    if (mat != materials.end()) {
+                        noun.kwGroups.push_back(mat->second);
+                        noun.labels.push_back("material " + ph + " (" + Join(mat->second, ", ") + ")");
+                        took = true;
+                    } else if (sexMap && sexMap->count(lp) && (noun.type == "NPC_" || noun.type.empty())) {
+                        noun.sex = sexMap->at(lp);
+                        noun.labels.push_back(noun.sex == "1" ? "female" : "male");
+                        took = true;
+                    } else {
+                        std::vector<int64_t> ids;
+                        std::string label;
+                        if (noun.type == "NPC_" && RaceTerm(ph, &ids, &label)) {
+                            noun.raceGroups.push_back(ids);
+                            noun.labels.push_back(label);
+                            took = true;
+                        }
+                    }
+                    if (took) i += len;
+                }
+                if (!took) ok = false;
+            }
+            if (!ok) continue;
+            *out = noun;
+            return true;
+        }
+        return false;
+    }
+
+    // "WEAP|WeapTypeSword,X;name:cloak;sex:1" -> the noun's parts
+    static void ApplyTypeValue(const std::string& val, Noun* noun) {
+        noun->type = val.substr(0, val.find('|'));
+        if (val.find('|') == std::string::npos) return;
+        std::string rest = val.substr(val.find('|') + 1);
+        std::vector<std::string> segs;
+        std::string cur;
+        for (char c : rest + ";") {
+            if (c == ';') {
+                if (!Trim(cur).empty()) segs.push_back(Trim(cur));
+                cur.clear();
+            } else {
+                cur += c;
+            }
+        }
+        for (const auto& seg : segs) {
+            std::string key = "kw", body = seg;
+            size_t colon = seg.find(':');
+            if (colon != std::string::npos) key = Lower(Trim(seg.substr(0, colon))), body = seg.substr(colon + 1);
+            std::vector<std::string> items;
+            std::string it;
+            for (char c : body + ",") {
+                if (c == ',') {
+                    if (!Trim(it).empty()) items.push_back(Trim(it));
+                    it.clear();
+                } else {
+                    it += c;
+                }
+            }
+            if (items.empty()) continue;
+            if (key == "kw") {
+                noun->kwGroups.push_back(items);
+                noun->labels.push_back("keyword " + Join(items, " or "));
+            } else if (key == "name") {
+                noun->names.insert(noun->names.end(), items.begin(), items.end());
+                noun->labels.push_back("name contains " + Join(items, " or "));
+            } else if (key == "sex") {
+                noun->sex = items[0];
+                noun->labels.push_back(items[0] == "1" ? "female" : "male");
+            }
+        }
+    }
+
+    // One edit away from exactly one type word (and not a word we know otherwise).
+    std::string FuzzyType(const std::string& word) const {
+        std::string w = Lower(word);
+        if (canon.count(w) || vocab.count(w) || stop.count(w)) return "";
+        std::string single = Singular(w), found;
+        int hits = 0;
+        for (const auto& [k, v] : typeIndex) {
+            if (k.find(' ') != std::string::npos || k.size() < 3) continue;
+            if (std::abs(static_cast<int>(k.size()) - static_cast<int>(single.size())) > 1) continue;
+            if (EditDistance(k, single) == 1 || EditDistance(k, w) == 1) {
+                if (found != v) ++hits;
+                found = v;
+            }
+        }
+        return hits == 1 ? found : "";
+    }
+
     std::string TypeLookup(const std::string& phrase) const {
         auto it = typeIndex.find(Lower(phrase));
         if (it != typeIndex.end()) return it->second;
@@ -1042,6 +1305,7 @@ struct Engine::Impl {
             assetIndexes = !Scalar("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'paths_name'", {}).empty() ||
                            !Scalar("SELECT 1 FROM a.sqlite_master WHERE type = 'index' AND name = 'paths_name'", {}).empty();
         recordCodes.clear();
+        LoadNounData();
         hasNameIndex = !hasPlugins || !Scalar("SELECT 1 FROM sqlite_master WHERE type = 'index' AND tbl_name = 'form_names' AND "
                                                "sql LIKE '%form_key%'", {}).empty();
         if (hasPlugins)
@@ -1125,6 +1389,17 @@ struct Engine::Impl {
     }
 
     // Can these free words fill a slot of this kind?
+    // Every word capitalized as typed and the last one singular: written like a name
+    // ("the Iron Sword"), unlike "iron swords" or "Khajiit women".
+    static bool Titled(const std::vector<Tok>& toks, size_t i, size_t n) {
+        for (size_t k = i; k < i + n; ++k) {
+            const std::string& o = toks[k].orig;
+            if (o.empty() || !(o[0] >= 'A' && o[0] <= 'Z')) return false;
+        }
+        const std::string last = Lower(toks[i + n - 1].orig);
+        return Singular(last) == last;
+    }
+
     bool FreeFits(const std::vector<Tok>& toks, size_t i, size_t n, const std::string& kind) const {
         std::vector<std::string> words;
         bool unknown = false;
@@ -1140,8 +1415,9 @@ struct Engine::Impl {
         }
         std::string joined = Join(words, " ");
         if (kind == "type") {
-            if (!TypeLookup(joined).empty()) return true;
-            return n == 1 && recordCodes.count(Upper(joined)) != 0;
+            Noun noun;
+            if (n >= 2 && Titled(toks, i, n)) return false;  // "Iron Sword" is a record's name, not iron + sword
+            return ParseNoun(words, &noun);
         }
         if (kind == "format") return n == 1 && formats.count(joined) != 0;
         if (valueMaps.count(kind)) return n <= 3 && valueMaps.at(kind).count(joined) != 0;
@@ -1149,11 +1425,19 @@ struct Engine::Impl {
         if (kind == "game") return n == 1 && (joined == "le" || joined == "se" || joined == "sse" || joined == "oldrim" ||
                                                joined == "legendary" || joined == "both");
         if (kind == "number" || kind == "folder") return false;
-        if (kind == "field") return n <= 4;
+        if (kind == "field") {
+            Noun noun;
+            return n <= 4 && !ParseNoun(words, &noun);
+        }
         if (kind == "text" || kind == "script_name") return n <= 6;
         // names (forms, plugins, files without extension): at least one word
         // that isn't question vocabulary, and not a record type phrase ("battle axes")
+        if (Titled(toks, i, n)) return true;  // "the Iron Sword": a name
         if (!TypeLookup(joined).empty()) return false;
+        {
+            Noun noun;
+            if (ParseNoun(words, &noun)) return false;  // "iron swords", "enemies", "sabre cats"
+        }
         return unknown && n <= 6;
     }
 
@@ -1723,28 +2007,17 @@ struct Engine::Impl {
             r.rows.push_back({kNullId, s});
             r.ok = !s.empty();
         } else if (k == "type") {
-            std::string val = TypeLookup(Lower(t));
-            if (val.empty()) val = Upper(Lower(t));
-            // "WEAP|WeapTypeSword,..." = the type, narrowed to records with one of those keywords
-            std::string code = val.substr(0, val.find('|'));
-            if (val.find('|') != std::string::npos) {
-                std::string kws = val.substr(val.find('|') + 1), cur;
-                for (char c : kws + ",") {
-                    if (c == ',') {
-                        if (!Trim(cur).empty()) r.keywords.push_back(Trim(cur));
-                        cur.clear();
-                    } else {
-                        cur += c;
-                    }
-                }
-            }
-            if (hasPlugins && Scalar("SELECT 1 FROM st_tables WHERE record_type = ?1 LIMIT 1", {code}).empty()) {
-                r.why = "no record type " + t;
+            Noun noun;
+            if (!ParseNoun(SplitWs(Lower(t)), &noun)) {
+                r.why = "\"" + t + "\" isn't a record type I know";
+            } else if (hasPlugins && Scalar("SELECT 1 FROM st_tables WHERE record_type = ?1 LIMIT 1", {noun.type}).empty()) {
+                r.why = "no record type " + noun.type;
             } else {
-                r.rows.push_back({kNullId, code});
-                r.param = code;
+                r.rows.push_back({kNullId, noun.type});
+                r.param = noun.type;
                 r.ok = true;
-                if (!r.keywords.empty()) r.summary = code + " with the keyword " + Join(r.keywords, " or ");
+                r.noun = noun;
+                r.summary = noun.type + (noun.labels.empty() ? "" : ": " + Join(noun.labels, "; "));
             }
         } else if (k == "filekind") {
             std::string w = CanonWord(Lower(t), true);
@@ -1842,6 +2115,52 @@ struct Engine::Impl {
         return s;
     }
 
+    // The noun's parts as temp rows: s_kw(id keyword, txt group), s_race(id race, txt group),
+    // s_sex(id), s_name(txt); typeFilter is the matching clause for {typefilter}.
+    std::string typeFilter;
+    void FillNoun(const Noun& noun) {
+        typeFilter = "(f.type IN (SELECT txt FROM s_type)";
+        for (size_t g = 0; g < noun.kwGroups.size(); ++g) {
+            std::string grp = "k" + std::to_string(g);
+            for (const auto& kw : noun.kwGroups[g]) {
+                sqlite3_stmt* st = nullptr;
+                if (sqlite3_prepare_v2(db, "INSERT INTO s_kw SELECT form_key, ?2 FROM forms WHERE type = 'KYWD' AND edid = ?1", -1, &st,
+                                       nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(st, 1, kw.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(st, 2, grp.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(st);
+                    sqlite3_finalize(st);
+                }
+            }
+            typeFilter += " AND EXISTS(SELECT 1 FROM form_refs kr WHERE kr.form_key = f.form_key AND kr.plugin_no = f.plugin_no AND "
+                          "kr.ref_key IN (SELECT id FROM s_kw WHERE txt = '" + grp + "'))";
+        }
+        for (size_t g = 0; g < noun.raceGroups.size(); ++g) {
+            std::string grp = "r" + std::to_string(g);
+            for (int64_t id : noun.raceGroups[g]) Exec("INSERT INTO s_race VALUES(" + std::to_string(id) + ", '" + grp + "')");
+            typeFilter += " AND EXISTS(SELECT 1 FROM npc rn WHERE rn.form_key = f.form_key AND rn.plugin_no = f.plugin_no AND "
+                          "rn.rnam IN (SELECT id FROM s_race WHERE txt = '" + grp + "'))";
+        }
+        if (!noun.sex.empty()) {
+            Exec("INSERT INTO s_sex VALUES(" + std::to_string(atoi(noun.sex.c_str())) + ", NULL)");
+            typeFilter += " AND EXISTS(SELECT 1 FROM npc sx WHERE sx.form_key = f.form_key AND sx.plugin_no = f.plugin_no AND "
+                          "(sx.acbs_flags & 1) = (SELECT id FROM s_sex))";
+        }
+        if (!noun.names.empty()) {
+            for (const auto& nm : noun.names) {
+                sqlite3_stmt* st = nullptr;
+                if (sqlite3_prepare_v2(db, "INSERT INTO s_name VALUES(NULL, ?1)", -1, &st, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(st, 1, nm.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(st);
+                    sqlite3_finalize(st);
+                }
+            }
+            typeFilter += " AND EXISTS(SELECT 1 FROM form_names nm JOIN s_name sn ON nm.name LIKE '%' || sn.txt || '%' WHERE "
+                          "nm.form_key = f.form_key AND nm.plugin_no = f.plugin_no)";
+        }
+        typeFilter += ")";
+    }
+
     std::string BuildSql(const Family& f, const std::vector<std::string>& opts, std::string* order) const {
         std::string sql = f.sql;
         for (const auto& o : opts) {
@@ -1864,11 +2183,13 @@ struct Engine::Impl {
         sql = ReplaceAll(sql, "{defaults}", def);
         sql = ReplaceAll(sql, "{opts}", optFrag);
         sql = ReplaceAll(sql, "{order}", *order);
+        sql = ReplaceAll(sql, "{typefilter}", typeFilter.empty() ? "(f.type IN (SELECT txt FROM s_type))" : typeFilter);
         return sql;
     }
 
     bool FillTemps(const Family& f, const std::vector<SlotValue>& slots, std::map<std::string, Resolved>* res, Answer* a) {
         authorizing = false;
+        typeFilter.clear();
         for (const auto& t : tempTables) Exec("DELETE FROM " + t);
         std::vector<std::string> summaries;
         for (const auto& sv : slots) {
@@ -1901,15 +2222,7 @@ struct Engine::Impl {
                 }
             }
             std::string table = "s_" + sv.name;
-            for (const auto& kw : r.keywords) {  // the keyword records that narrow a type
-                sqlite3_stmt* ks = nullptr;
-                if (sqlite3_prepare_v2(db, "INSERT INTO s_type_kw SELECT form_key, edid FROM forms WHERE type = 'KYWD' AND edid = ?1",
-                                       -1, &ks, nullptr) == SQLITE_OK) {
-                    sqlite3_bind_text(ks, 1, kw.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_step(ks);
-                    sqlite3_finalize(ks);
-                }
-            }
+            if (sv.kind == "type") FillNoun(r.noun);
             if (sv.name == "archive" ||
                 std::any_of(a->interp.options.begin(), a->interp.options.end(), [](const std::string& o) { return o == "in_archive"; })) {
                 // archives as files rows, for in_archive

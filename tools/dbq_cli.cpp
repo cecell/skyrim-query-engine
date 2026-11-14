@@ -424,23 +424,247 @@ std::string ReadLineConsole(bool* eof) {
     return U8(buf);
 }
 
-std::string Prompt(bool* eof) {
-    Box b = Lines();
-    size_t w = static_cast<size_t>(std::max(40, g.width - 2));
-    if (g.color) {
-        Out(std::string(GREY) + b.tl + Rep(b.h, w - 2) + b.tr + RESET + "\n");
-        Out(std::string(GREY) + b.v + RESET + std::string(w - 2, ' ') + GREY + b.v + RESET + "\n");
-        Out(std::string(GREY) + b.bl + Rep(b.h, w - 2) + b.br + RESET);
-        Out("\x1b[1A\r" + std::string(GREY) + b.v + RESET + " " + ACCENT + "> " + RESET);
+// Earlier questions, oldest first, for Up / Down.
+std::vector<std::wstring> LoadInputHistory() {
+    std::vector<std::wstring> h;
+    std::ifstream f(skqe::dbq::StateDir() + L"\\history.jsonl", std::ios::binary);
+    std::string l;
+    while (std::getline(f, l)) {
+        skqe::Value v;
+        std::string err;
+        if (!skqe::ParseJson(l, &v, &err)) continue;
+        const skqe::Value* q = v.Find("q");
+        if (!q || !q->IsString() || q->AsString().empty()) continue;
+        std::wstring w = W(q->AsString());
+        if (h.empty() || h.back() != w) h.push_back(w);
+    }
+    if (h.size() > 1000) h.erase(h.begin(), h.end() - 1000);
+    return h;
+}
+
+// The input box: a bordered box that grows a line at a time as the text
+// wraps, with the cursor anywhere in it. Up / Down move between wrapped
+// lines, and from the first / last line through earlier questions; Down
+// past the newest returns what was being typed. Esc clears, Ctrl+C clears
+// (or leaves on an empty box), Ctrl+Left / Right jump words, Home / End.
+class InputBox {
+public:
+    explicit InputBox(std::vector<std::wstring>* history) : hist_(history) {}
+
+    std::string Read(bool* eof) {
+        HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+        DWORD oldMode = 0;
+        if (!g.color || !GetConsoleMode(in, &oldMode)) return Plain(eof);
+        SetConsoleMode(in, (oldMode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_WINDOW_INPUT);
+        buf_.clear();
+        draft_.clear();
+        cur_ = 0;
+        hi_ = hist_->size();
+        drawnRows_ = 0;
+        cursorRow_ = 0;
+        Render();
+        INPUT_RECORD recs[256];
+        bool done = false;
+        while (!done) {
+            DWORD n = 0;
+            if (!ReadConsoleInputW(in, recs, 256, &n) || n == 0) {
+                *eof = true;
+                break;
+            }
+            for (DWORD i = 0; i < n && !done; ++i) {
+                const INPUT_RECORD& r = recs[i];
+                if (r.EventType == WINDOW_BUFFER_SIZE_EVENT) continue;  // Render reads the width
+                if (r.EventType != KEY_EVENT || !r.Event.KeyEvent.bKeyDown) continue;
+                const KEY_EVENT_RECORD& k = r.Event.KeyEvent;
+                const bool ctrl = (k.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
+                const wchar_t ch = k.uChar.UnicodeChar;
+                for (WORD rep = 0; rep < std::max<WORD>(1, k.wRepeatCount) && !done; ++rep) {
+                    switch (k.wVirtualKeyCode) {
+                        case VK_RETURN: {
+                            // more keys already waiting: a pasted line break, not Enter
+                            DWORD pending = 0;
+                            GetNumberOfConsoleInputEvents(in, &pending);
+                            if (i + 1 < n || pending > 0) Insert(L' ');
+                            else done = true;
+                            break;
+                        }
+                        case VK_BACK:
+                            if (cur_ > 0) {
+                                size_t from = ctrl ? WordLeft(cur_) : cur_ - 1;
+                                buf_.erase(from, cur_ - from);
+                                cur_ = from;
+                            }
+                            break;
+                        case VK_DELETE:
+                            if (cur_ < buf_.size()) buf_.erase(cur_, ctrl ? WordRight(cur_) - cur_ : 1);
+                            break;
+                        case VK_LEFT: cur_ = ctrl ? WordLeft(cur_) : (cur_ ? cur_ - 1 : 0); break;
+                        case VK_RIGHT: cur_ = ctrl ? WordRight(cur_) : std::min(buf_.size(), cur_ + 1); break;
+                        case VK_HOME: cur_ = 0; break;
+                        case VK_END: cur_ = buf_.size(); break;
+                        case VK_UP: Up(); break;
+                        case VK_DOWN: Down(); break;
+                        case VK_ESCAPE:
+                            buf_.clear();
+                            cur_ = 0;
+                            hi_ = hist_->size();
+                            break;
+                        default:
+                            if (ch == 3) {  // Ctrl+C
+                                if (buf_.empty()) *eof = done = true;
+                                buf_.clear();
+                                cur_ = 0;
+                            } else if ((ch == 4 || ch == 26) && buf_.empty()) {  // Ctrl+D / Ctrl+Z
+                                *eof = done = true;
+                            } else if (ch == 1) {
+                                cur_ = 0;  // Ctrl+A
+                            } else if (ch == 5) {
+                                cur_ = buf_.size();  // Ctrl+E
+                            } else if (ch == 21) {  // Ctrl+U
+                                buf_.erase(0, cur_);
+                                cur_ = 0;
+                            } else if (ch == 11) {  // Ctrl+K
+                                buf_.erase(cur_);
+                            } else if (ch == L'\t') {
+                                Insert(L' ');
+                            } else if (ch >= 32 && (!ctrl || (k.dwControlKeyState & RIGHT_ALT_PRESSED))) {  // AltGr reports Ctrl too
+                                Insert(ch);
+                            }
+                    }
+                }
+            }
+            if (!done) Render();
+        }
+        // leave the box drawn with the question in it, cursor below it
+        cur_ = buf_.size();
+        Render();
+        Out("\x1b[" + std::to_string(std::max(1, drawnRows_ - 1 - cursorRow_)) + "B\r\n");
         fflush(stdout);
-        std::string line = ReadLineConsole(eof);
-        Out("\x1b[1B\r\n");
+        SetConsoleMode(in, oldMode);
+        std::string line = U8(buf_);
+        if (!line.empty() && (hist_->empty() || hist_->back() != buf_)) hist_->push_back(buf_);
         return line;
     }
-    Out("> ");
-    fflush(stdout);
-    return ReadLineConsole(eof);
-}
+
+private:
+    std::vector<std::wstring>* hist_;
+    std::wstring buf_, draft_;
+    size_t cur_ = 0, hi_ = 0;
+    int drawnRows_ = 0, cursorRow_ = 0;
+
+    static std::string Plain(bool* eof) {
+        Out("> ");
+        fflush(stdout);
+        return ReadLineConsole(eof);
+    }
+    void Insert(wchar_t c) {
+        buf_.insert(buf_.begin() + static_cast<std::ptrdiff_t>(cur_), c);
+        ++cur_;
+    }
+    size_t WordLeft(size_t p) const {
+        while (p > 0 && buf_[p - 1] == L' ') --p;
+        while (p > 0 && buf_[p - 1] != L' ') --p;
+        return p;
+    }
+    size_t WordRight(size_t p) const {
+        while (p < buf_.size() && buf_[p] != L' ') ++p;
+        while (p < buf_.size() && buf_[p] == L' ') ++p;
+        return p;
+    }
+    size_t TextWidth() const { return static_cast<size_t>(std::max(20, ConsoleWidth() - 7)); }
+    static int ConsoleWidth() {
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info)) return info.srWindow.Right - info.srWindow.Left + 1;
+        return g.width;
+    }
+    // where each wrapped line starts (breaking after a space when one is in reach)
+    std::vector<size_t> Starts(size_t cw) const {
+        std::vector<size_t> s = {0};
+        size_t pos = 0;
+        while (buf_.size() - pos > cw) {
+            size_t brk = pos + cw;
+            for (size_t j = pos + cw; j > pos + cw / 2; --j)
+                if (buf_[j - 1] == L' ') {
+                    brk = j;
+                    break;
+                }
+            s.push_back(brk);
+            pos = brk;
+        }
+        return s;
+    }
+    void Where(const std::vector<size_t>& s, size_t cw, size_t* line, size_t* col) const {
+        size_t l = 0;
+        while (l + 1 < s.size() && s[l + 1] <= cur_) ++l;
+        size_t c = cur_ - s[l];
+        if (c >= cw) {  // after a full last line: the start of a new one
+            ++l;
+            c = 0;
+        }
+        *line = l;
+        *col = c;
+    }
+    void Up() {
+        size_t cw = TextWidth(), line, col;
+        auto s = Starts(cw);
+        Where(s, cw, &line, &col);
+        if (line > 0) {
+            size_t prevLen = s[line] - s[line - 1];
+            cur_ = s[line - 1] + std::min(col, prevLen ? prevLen - 1 : 0);
+            return;
+        }
+        if (hi_ == 0) return;
+        if (hi_ == hist_->size()) draft_ = buf_;
+        --hi_;
+        buf_ = (*hist_)[hi_];
+        cur_ = buf_.size();
+    }
+    void Down() {
+        size_t cw = TextWidth(), line, col;
+        auto s = Starts(cw);
+        Where(s, cw, &line, &col);
+        if (line + 1 < s.size()) {
+            size_t end = line + 2 < s.size() ? s[line + 2] : buf_.size();
+            cur_ = std::min(s[line + 1] + col, end);
+            return;
+        }
+        if (hi_ >= hist_->size()) return;
+        ++hi_;
+        buf_ = hi_ == hist_->size() ? draft_ : (*hist_)[hi_];
+        cur_ = buf_.size();
+    }
+    void Render() {
+        const size_t cw = TextWidth();
+        auto s = Starts(cw);
+        size_t line, col;
+        Where(s, cw, &line, &col);
+        size_t lines = std::max(s.size(), line + 1);
+        Box b = Lines();
+        std::string out;
+        if (drawnRows_ > 0) {
+            if (cursorRow_ > 0) out += "\x1b[" + std::to_string(cursorRow_) + "A";
+            out += "\r\x1b[J";
+        }
+        out += std::string(GREY) + b.tl + Rep(b.h, cw + 4) + b.tr + RESET + "\n";
+        for (size_t i = 0; i < lines; ++i) {
+            std::wstring text;
+            if (i < s.size()) text = buf_.substr(s[i], (i + 1 < s.size() ? s[i + 1] : buf_.size()) - s[i]);
+            std::string t = U8(text);
+            out += std::string(GREY) + b.v + RESET + " " + (i == 0 ? std::string(ACCENT) + "> " + RESET : std::string("  ")) + t +
+                   std::string(cw - std::min(cw, text.size()), ' ') + " " + GREY + b.v + RESET + "\n";
+        }
+        out += std::string(GREY) + b.bl + Rep(b.h, cw + 4) + b.br + RESET;
+        const int rows = static_cast<int>(lines) + 2;
+        const int target = static_cast<int>(line) + 1;
+        out += "\x1b[" + std::to_string(rows - 1 - target) + "A";
+        if (rows - 1 - target == 0) out.erase(out.size() - 4);  // ESC[0A moves one line on some consoles
+        out += "\x1b[" + std::to_string(col + 5) + "G";
+        Out(out);
+        fflush(stdout);
+        drawnRows_ = rows;
+        cursorRow_ = target;
+    }
+};
 
 void Banner(Engine& e) {
     Box b = Lines();
@@ -471,6 +695,8 @@ void Banner(Engine& e) {
 }
 
 int RunConsole(Engine& e, std::vector<std::wstring> dbs, int64_t pageSize) {
+    std::vector<std::wstring> inputHistory = LoadInputHistory();
+    InputBox input(&inputHistory);
     Banner(e);
     Interpretation last;
     bool hasLast = false;
@@ -481,7 +707,7 @@ int RunConsole(Engine& e, std::vector<std::wstring> dbs, int64_t pageSize) {
     std::vector<Interpretation> choices;
     while (true) {
         bool eof = false;
-        std::string line = Prompt(&eof);
+        std::string line = input.Read(&eof);
         if (eof) break;
         std::string cmd = line;
         while (!cmd.empty() && cmd.back() == ' ') cmd.pop_back();
