@@ -55,6 +55,10 @@
 using namespace skqe;
 
 std::wstring WidenUtf8(const std::string& s);
+// tools/dbq_cli.cpp
+int DbUseCommand(int argc, wchar_t** argv);
+int DbqCommand(int argc, wchar_t** argv);
+extern const char kHelpDbq[];
 
 namespace {
 
@@ -200,6 +204,9 @@ COMMANDS
                                   --name X.esp --in <folder>: every copy of a name)
   skqe build-db [options]          a SQLite database of a whole load order
   skqe db add <module> --db x.db   add an optional module (navmesh, landscape...) later
+  skqe db use <file.db> [<file.db>]  remember the database(s) for dbq
+  skqe dbq ["question"]            ask a database in plain English ("which meshes use
+                                  femalehead.dds"); no question = interactive console
   skqe build-assets [options]      a SQLite database of every asset file (Data, mod
                                   staging folders, MO2, BSA contents) with winners
   skqe search <text>               find files by name in Data and its BSAs;
@@ -995,7 +1002,8 @@ int Usage() {
 int Help(const std::string& topic) {
     const char* text = topic == "info" ? kHelpInfo : topic == "fields" ? kHelpFields : topic == "staging" ? kHelpStaging : topic == "search" ? kHelpSearch
                      : topic == "export" ? kHelpExport : topic == "diff" ? kHelpDiff : topic == "build-db" ? kHelpBuildDb
-                     : topic == "db" ? kHelpDb : topic == "build-assets" ? kHelpBuildAssets : kHelp;
+                     : topic == "db" ? kHelpDb : topic == "build-assets" ? kHelpBuildAssets
+                     : topic == "dbq" ? kHelpDbq : kHelp;
     _setmode(_fileno(stdout), _O_BINARY);
     fwrite(text, 1, strlen(text), stdout);
     return 0;
@@ -2621,7 +2629,7 @@ int wmain(int argc, wchar_t** argv) {
         printf("skqe %s\nGPL-3.0. Credits and third-party notices: THIRD_PARTY_NOTICES.md\n", SKQE_VERSION);
         printf("data files (SKQE_DATA, next to the exe, then %s):\n",
                DataFilesEmbedded() ? "built in" : "none built into this build");
-        for (const wchar_t* name : {L"patterns.json", L"ut_reference.sql", L"search_filters.txt"}) {
+        for (const wchar_t* name : {L"patterns.json", L"ut_reference.sql", L"search_filters.txt", L"dbq_families.json"}) {
             const std::wstring from = DataFileSource(name);
             printf("  %-20s %s\n", Utf8(name).c_str(), from.empty() ? "NOT FOUND" : Utf8(from).c_str());
         }
@@ -2634,7 +2642,9 @@ int wmain(int argc, wchar_t** argv) {
         if (a == "--help" || a == "-h") return Help(arg1);
     }
     if (arg1 == "build-db") return BuildDbCommand(argc, argv);
+    if (arg1 == "db" && argc > 2 && Utf8(argv[2]) == "use") return DbUseCommand(argc, argv);
     if (arg1 == "db") return DbCommand(argc, argv);
+    if (arg1 == "dbq") return DbqCommand(argc, argv);
     if (arg1 == "build-assets") return BuildAssetsCommand(argc, argv);
     if (arg1 == "staging") return StagingCommand(argc, argv);
     if (arg1 == "search") return SearchCommand(argc, argv);

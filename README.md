@@ -271,10 +271,12 @@ writes. Data and staging folders are only read.
   `pex` (script and parent), `tri` / `tri_morphs` (FaceGen and BodySlide
   morph names); `voice` and `facegen` from their path conventions (plugin +
   object id). `nif.game` follows Cathedral Assets Optimizer's rule, never
-  the BS version. assets.db schema version 3.
+  the BS version. assets.db schema version 4.
 - Extras, on by default (`--skip` leaves them out): `nif_textures` (every
   texture path a mesh expects, `path_id` NULL when no such file exists) and
-  the indexes `files_path`, `files_root`, `files_archive`, `paths_kind`.
+  the indexes `files_path`, `files_root`, `files_archive`, `paths_kind`,
+  `paths_name` (a file by its name alone) and `nif_textures_path` (which
+  meshes use a texture).
 - Views `winning_files` and `conflicts`; `st_tables` / `st_columns`.
 
 Winners: a staging file that is the same physical file as the Data file at
@@ -288,6 +290,49 @@ overwrite highest, real Data lowest) decides `in_data`.
 
 The real Data folder (870,401 loose files, 892 BSAs, 1.53 million rows)
 builds in about 100 seconds (1.3 GB).
+
+## `skqe dbq`: ask a database in plain English
+
+```
+skqe db use plugins.db assets.db        remember the database(s), once
+skqe dbq                                the interactive console
+skqe dbq "which meshes use femalehead.dds"
+skqe dbq --next                         the next 10
+skqe dbq "only the ones in bsas"        narrow the last question
+skqe dbq "how many"
+skqe dbq "same for malehead.dds"
+skqe dbq --list                         every question it knows
+```
+
+You don't need to know the tables. `dbq` reads the question, finds the names
+in it (files, paths, plugins, `Plugin.esm:XXXXXX`, 8-digit load-order FormIDs,
+editor IDs, display names), picks the question it matches and runs that
+question's tested SQL template, read-only. It never writes SQL of its own.
+Each answer starts with how it read the question
+(`● meshes using texture "femalehead.dds"`), so a misreading shows at once.
+When a name matches several things it asks (or, for a record name like
+"Lydia", uses the NPC and lists the hair part and others to pick by number).
+
+The questions cover every column and details pane of the
+[WHAM](https://github.com/cecell/wham-asset-manager) shell extension
+(plugins, BSAs, meshes, textures, sounds, animations, scripts) and what the
+other skqe commands return: a plugin's header, masters, dependents and record
+counts; every copy of a record with the winner, the fields that differ
+between copies, one field across copies; references to and from a record;
+the files a record names and which of them the game can't find; textures a
+mesh needs and which are missing; loose files that override archives, and more.
+`skqe dbq --list` shows them all with an example each.
+
+The console keeps follow-ups and paging (Enter for the next page, a number
+to pick a choice, `/sql` to see the SQL, `/csv` and `/json` for the whole
+answer, `/good` and `/bad` to mark an answer). Scripts use
+`skqe dbq "..." --db x.db --json` (no state).
+
+Every question is saved, with how it was read, in
+`%LOCALAPPDATA%\skqe\dbq\history.jsonl`, so the wording can be tuned from
+real questions. Nothing leaves your PC. `skqe dbq --selftest` runs every
+question family's tests against the databases. The families are
+`dbq_families.json` next to skqe.exe (built into releases).
 
 ## `skqeedit`: writing and editing plugins
 

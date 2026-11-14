@@ -104,9 +104,12 @@ std::string NormalizePath(const std::string& utf8) {
 
 std::string NormalizeAssetPath(const std::string& raw, const std::string& root) {
     std::string s = NormalizePath(raw);
-    while (!s.empty() && (s.back() == ' ' || s.back() == '\\')) s.pop_back();
+    // Spaces, tabs, line breaks (some plugins store a path with a trailing CR
+    // or CRLF) and slashes at either end.
+    auto junk = [](char c) { return static_cast<unsigned char>(c) <= ' ' || c == '\\'; };
+    while (!s.empty() && junk(s.back())) s.pop_back();
     size_t lead = 0;
-    while (lead < s.size() && (s[lead] == ' ' || s[lead] == '\\')) ++lead;
+    while (lead < s.size() && junk(s[lead])) ++lead;
     s.erase(0, lead);
     if (s.empty()) return s;
     // Absolute or Data-relative paths left by exporters: keep from the root.

@@ -50,7 +50,8 @@ add_library(skqe STATIC
     src/asset_build.cpp
     src/staging_find.cpp
     src/asset_search.cpp
-    src/data_files.cpp)
+    src/data_files.cpp
+    src/dbq.cpp)
 target_include_directories(skqe PUBLIC src)
 
 # The data files (patterns.json, ut_reference.sql, search_filters.txt) built
@@ -62,7 +63,8 @@ if(SKQE_EMBED_DATA)
     set(SKQE_DATA_FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/data/patterns.json
         ${CMAKE_CURRENT_SOURCE_DIR}/data/ut_reference.sql
-        ${CMAKE_CURRENT_SOURCE_DIR}/data/search_filters.txt)
+        ${CMAKE_CURRENT_SOURCE_DIR}/data/search_filters.txt
+        ${CMAKE_CURRENT_SOURCE_DIR}/data/dbq_families.json)
     add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/embedded_data.cpp
         COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_CURRENT_BINARY_DIR}/embedded_data.cpp
                 "-DFILES=${SKQE_DATA_FILES}" -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_data.cmake
@@ -74,7 +76,7 @@ else()
 endif()
 target_link_libraries(skqe PUBLIC sqlite3 PRIVATE bsa::reader asset::metadata bcrypt shell32 ole32 advapi32)
 
-add_executable(skqe_cli tools/skqe.cpp)
+add_executable(skqe_cli tools/skqe.cpp tools/dbq_cli.cpp)
 if(WIN32)
     target_sources(skqe_cli PRIVATE res/skqe.rc)  # the icon
 endif()
@@ -93,6 +95,11 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/search_filters.txt
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/search_filters.txt ${CMAKE_CURRENT_BINARY_DIR}/search_filters.txt
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data/search_filters.txt)
 add_custom_target(skqe_search_filters ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/search_filters.txt)
+# skqe dbq's question families, next to the exe.
+add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/dbq_families.json
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/dbq_families.json ${CMAKE_CURRENT_BINARY_DIR}/dbq_families.json
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/data/dbq_families.json)
+add_custom_target(skqe_dbq_families ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/dbq_families.json)
 # The lookup tables build-db loads (ut_*), next to the exe.
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ut_reference.sql
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/ut_reference.sql ${CMAKE_CURRENT_BINARY_DIR}/ut_reference.sql

@@ -29,7 +29,7 @@
 namespace skqe {
 namespace {
 
-constexpr int kAssetSchemaVersion = 3;
+constexpr int kAssetSchemaVersion = 4;
 constexpr size_t kBatchRows = 20000;
 // Header reads: how much of a file a reader may need. Whole files are read
 // for NIF texture paths, PEX and TRI (names at the end), up to these caps.
@@ -856,6 +856,9 @@ const AssetExtra kAssetExtras[] = {
     {"files_archive", "index files(archive_id): every file packed in an archive",
      "CREATE INDEX files_archive ON files(archive_id) WHERE archive_id IS NOT NULL;"},
     {"paths_kind", "index paths(kind)", "CREATE INDEX paths_kind ON paths(kind);"},
+    {"paths_name", "index paths(name): find a file by its name alone", "CREATE INDEX paths_name ON paths(name);"},
+    {"nif_textures_path", "index nif_textures(path_id): which meshes use a texture",
+     "CREATE INDEX nif_textures_path ON nif_textures(path_id);"},
 };
 
 // st_tables rows: name, kind, description.
@@ -1545,8 +1548,9 @@ int BuildAssets(const AssetOptions& opt, std::string* error) {
             static_cast<long long>(pathCount), static_cast<long long>(detailRows), static_cast<long long>(errors));
 
         std::string sql;
+        const std::string late = "nif_textures_path";  // after path_id is filled in
         for (const auto& e : kAssetExtras)
-            if (e.sql && extras.count(e.name)) sql += e.sql;
+            if (e.sql && extras.count(e.name) && e.name != late) sql += e.sql;
         if (!sql.empty() && !db.Exec(sql, error)) return 1;
         say("indexes");
         if (!db.Exec(kWinners, error)) return 1;
@@ -1554,6 +1558,9 @@ int BuildAssets(const AssetOptions& opt, std::string* error) {
             !db.Exec("UPDATE nif_textures SET path_id = (SELECT p.path_id FROM paths p WHERE p.path = nif_textures.texture);",
                      error))
             return 1;
+        for (const auto& e : kAssetExtras)
+            if (e.name == late && extras.count(e.name) && extras.count("nif_textures") && !db.Exec(e.sql, error))
+                return 1;
         if (!db.Exec(kViews, error)) return 1;
         say("winners");
 

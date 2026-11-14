@@ -428,6 +428,10 @@ void TestAssetPaths() {
     CHECK(NormalizeAssetPath("Meshes/Clutter/Key01.nif", "meshes\\") == "meshes\\clutter\\key01.nif");
     CHECK(NormalizeAssetPath("Sound\\FX\\a.wav", "sound\\") == "sound\\fx\\a.wav");
     CHECK(NormalizeAssetPath("C:\\Games\\Data\\Music\\x.wav", "music\\") == "music\\x.wav");
+    // some plugins store a path with a trailing CR or CRLF (or a tab)
+    CHECK(NormalizeAssetPath("Armor\\Circlets\\a.nif\r", "meshes\\") == "meshes\\armor\\circlets\\a.nif");
+    CHECK(NormalizeAssetPath("Sound\\FX\\b.wav\r\n", "sound\\") == "sound\\fx\\b.wav");
+    CHECK(NormalizeAssetPath("\tc.nif ", "meshes\\") == "meshes\\c.nif");
     PathParts p = SplitPath("textures\\armor\\x.dds");
     CHECK(p.dir == "textures\\armor" && p.name == "x.dds" && p.ext == "dds");
     CHECK(SplitPath("readme").ext == "" && SplitPath("readme").dir == "");
