@@ -242,6 +242,7 @@ struct Engine::Impl {
     std::map<std::string, std::string> canon;
     std::set<std::string> stop, vocab;
     std::map<std::string, std::string> types, formats, fileKinds;
+    std::map<std::string, std::map<std::string, std::string>> valueMaps;  // slot kind -> word -> value
     size_t maxTypeWords = 1;
     std::vector<std::pair<std::string, std::vector<std::vector<std::string>>>> options;  // id -> phrases
     struct Scope {
@@ -295,6 +296,9 @@ struct Engine::Impl {
             for (const auto& [k, v] : t->Members()) formats[Lower(k)] = v.AsString();
         if (const Value* t = root.Find("file_kinds"))
             for (const auto& [k, v] : t->Members()) fileKinds[k] = v.AsString();
+        if (const Value* t = root.Find("value_maps"))
+            for (const auto& [kind, m] : t->Members())
+                for (const auto& [k, v] : m.Members()) valueMaps[kind][Lower(k)] = v.AsString();
         if (const Value* o = root.Find("options"))
             for (const auto& [id, def] : o->Members()) {
                 std::vector<std::vector<std::string>> phrases;
@@ -387,12 +391,145 @@ struct Engine::Impl {
                 for (const auto& piece : SplitWs(CleanWords(w)))
                     if (piece.find('{') == std::string::npos) vocab.insert(CanonWord(piece, false));
             }
-        for (auto& f : families)
+        LoadTaught();
+        Compile();
+        return true;
+    }
+
+    void Compile() {
+        for (auto& f : families) {
+            f.patterns.clear();
+            f.implied.clear();
             for (const auto& w : f.wordings) {
                 std::vector<std::string> imp;
                 f.patterns.push_back(CompilePattern(f, w, &imp));
                 f.implied.push_back(imp);
             }
+        }
+    }
+
+    // ------------------------------------------------------------ taught words
+    // Words the user taught ("draw a connection between "person", "actor" -> NPC_"),
+    // kept in taught.json next to the history and merged over the built-in ones.
+    Value taught = Value::Map();
+
+    void LoadTaught() {
+        std::ifstream f(StateDir() + L"\\taught.json", std::ios::binary);
+        if (!f) return;
+        std::stringstream ss;
+        ss << f.rdbuf();
+        Value v;
+        std::string err;
+        if (!ParseJson(ss.str(), &v, &err) || v.kind() != Value::Kind::Map) return;
+        taught = v;
+        if (const Value* t = v.Find("types"))
+            for (const auto& [k, code] : t->Members()) {
+                types[k] = code.AsString();
+                maxTypeWords = std::max(maxTypeWords, SplitWs(k).size());
+            }
+        if (const Value* t = v.Find("synonyms"))
+            for (const auto& [k, c] : t->Members()) canon[k] = c.AsString();
+        if (const Value* t = v.Find("values"))
+            for (const auto& [kind, m] : t->Members())
+                for (const auto& [k, val] : m.Members()) valueMaps[kind][k] = val.AsString();
+    }
+
+    void SaveTaught() {
+        std::string text;
+        WriteJson(taught, &text);
+        std::ofstream f(StateDir() + L"\\taught.json", std::ios::binary | std::ios::trunc);
+        f << text;
+    }
+
+    void TaughtSet(const char* group, const std::string& key, const std::string& value, const std::string& sub = "") {
+        Value g = taught.Find(group) ? *taught.Find(group) : Value::Map();
+        if (sub.empty()) {
+            g.Set(key, Value::Str(value));
+        } else {
+            Value m = g.Find(sub) ? *g.Find(sub) : Value::Map();
+            m.Set(key, Value::Str(value));
+            g.Set(sub, m);
+        }
+        taught.Set(group, g);
+    }
+
+    // "draw a connection between "actor", "npc", "person" -> NPC_", "teach women = female",
+    // "connect bsa to archive". Returns false when the line isn't a teaching line.
+    bool Teach(const std::string& line, std::string* message) {
+        static const std::regex re(
+            "^\\s*(?:please\\s+)?(?:draw\\s+an?\\s+(?:connection|link)\\s+between|connect|link|teach(?:\\s+that)?|treat|map|remember\\s+that)\\s+"
+            "(.+?)\\s*(?:->|=>|\xE2\x86\x92|=|\\s+means?\\s+|\\s+as\\s+|\\s+to\\s+|\\s+is\\s+|\\s+are\\s+)\\s*(.+?)\\s*[.!]?\\s*$",
+            std::regex::icase);
+        std::smatch m;
+        if (!std::regex_match(line, m, re)) return false;
+        std::string lhs = m[1].str(), target = Trim(m[2].str());
+        for (char q : {'"', '\'', '`'}) target.erase(std::remove(target.begin(), target.end(), q), target.end());
+        // the terms: quoted, or split on commas / and / or
+        std::vector<std::string> terms;
+        static const std::regex quoted("[\"\xE2\x80\x9C\xE2\x80\x9D']([^\"\xE2\x80\x9C\xE2\x80\x9D']+)[\"\xE2\x80\x9C\xE2\x80\x9D']");
+        for (std::sregex_iterator it(lhs.begin(), lhs.end(), quoted), end; it != end; ++it) terms.push_back(Lower(Trim((*it)[1].str())));
+        if (terms.empty()) {
+            std::string cur;
+            std::string l = ReplaceAll(ReplaceAll(Lower(lhs), " and ", ","), " or ", ",");
+            for (char c : l + ",") {
+                if (c == ',') {
+                    if (!Trim(cur).empty()) terms.push_back(Trim(cur));
+                    cur.clear();
+                } else {
+                    cur += c;
+                }
+            }
+        }
+        if (terms.empty()) return false;
+        std::string lt = Lower(target), code;
+        if (recordCodes.count(Upper(target))) code = Upper(target);
+        else if (types.count(lt)) code = types.at(lt);
+        std::vector<std::string> done;
+        if (!code.empty()) {
+            for (const auto& t : terms) {
+                types[t] = code;
+                TaughtSet("types", t, code);
+                maxTypeWords = std::max(maxTypeWords, SplitWs(t).size());
+                if (t.back() != 's' && t.find(' ') == std::string::npos && !types.count(t + "s")) {
+                    types[t + "s"] = code;
+                    TaughtSet("types", t + "s", code);
+                }
+                done.push_back("\"" + t + "\"");
+            }
+            *message = "Learned: " + Join(done, ", ") + " mean the record type " + code + ".";
+        } else {
+            // a value word ("women" = female) or a word for a word ("bsa" = archive)
+            std::string valueKind, value;
+            for (const auto& [kind, mp] : valueMaps)
+                if (mp.count(lt)) valueKind = kind, value = mp.at(lt);
+            std::string c = valueKind.empty() ? CanonWord(lt, false) : "";
+            if (valueKind.empty() && !vocab.count(c) && !canon.count(lt)) {
+                *message = "I don't know \"" + target + "\" yet, so I can't connect anything to it. Connect words to a record type "
+                           "(NPC_, WEAP, ARMO...) or to a word I already know (mesh, texture, plugin, female...).";
+                return true;
+            }
+            for (const auto& t : terms) {
+                if (!valueKind.empty()) {
+                    valueMaps[valueKind][t] = value;
+                    TaughtSet("values", t, value, valueKind);
+                } else if (t.find(' ') == std::string::npos) {
+                    canon[t] = c;
+                    TaughtSet("synonyms", t, c);
+                } else {
+                    continue;  // several words for one word: not supported
+                }
+                done.push_back("\"" + t + "\"");
+            }
+            if (done.empty()) {
+                *message = "Only single words can stand for \"" + target + "\".";
+                return true;
+            }
+            *message = "Learned: " + Join(done, ", ") + " mean \"" + target + "\".";
+            Compile();
+        }
+        resolveCache.clear();
+        SaveTaught();
+        *message += " (saved in " + ToUtf8(StateDir()) + "\\taught.json)";
         return true;
     }
 
@@ -864,8 +1001,11 @@ struct Engine::Impl {
         for (size_t k = i; k < i + n; ++k) {
             if (toks[k].ent != Ent::None) return false;
             words.push_back(toks[k].raw);
+            bool valueWord = false;
+            for (const auto& [vk, mp] : valueMaps)
+                if (mp.count(toks[k].raw)) valueWord = true;
             if (!vocab.count(toks[k].word) && !canon.count(toks[k].raw) && !types.count(toks[k].raw) &&
-                !recordCodes.count(Upper(toks[k].raw)))
+                !recordCodes.count(Upper(toks[k].raw)) && !valueWord)
                 unknown = true;
         }
         std::string joined = Join(words, " ");
@@ -874,6 +1014,7 @@ struct Engine::Impl {
             return n == 1 && recordCodes.count(Upper(joined)) != 0;
         }
         if (kind == "format") return n == 1 && formats.count(joined) != 0;
+        if (valueMaps.count(kind)) return n <= 3 && valueMaps.at(kind).count(joined) != 0;
         if (kind == "filekind") return n == 1 && fileKinds.count(toks[i].word) != 0;
         if (kind == "game") return n == 1 && (joined == "le" || joined == "se" || joined == "sse" || joined == "oldrim" ||
                                                joined == "legendary" || joined == "both");
@@ -1473,6 +1614,14 @@ struct Engine::Impl {
                 r.ok = true;
             } else {
                 r.why = "unknown texture format " + t;
+            }
+        } else if (valueMaps.count(k)) {
+            std::string lt = Lower(t);
+            if (valueMaps.at(k).count(lt)) {
+                r.param = valueMaps.at(k).at(lt);
+                r.ok = true;
+            } else {
+                r.why = "\"" + t + "\" isn't a known " + k;
             }
         } else if (k == "game") {
             std::string lt = Lower(t);
@@ -2242,6 +2391,7 @@ Answer Engine::Ask(const std::string& q, const Interpretation* last, int64_t off
     return impl_->AskQ(q, last, offset, page);
 }
 Answer Engine::Run(const Interpretation& in, int64_t offset, int64_t page) { return impl_->RunInterp(in, offset, page); }
+bool Engine::Teach(const std::string& line, std::string* message) { return impl_->Teach(line, message); }
 
 std::vector<Engine::FamilyInfo> Engine::Families() const {
     std::vector<FamilyInfo> out;

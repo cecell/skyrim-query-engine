@@ -147,6 +147,10 @@
     "animation": "animation", "facegen": "facegen", "interface": "interface", "plugin": "plugin",
     "archive": "archive", "string": "strings", "bodyslide": "bodyslide"
   },
+  "value_maps": {
+    "sex": {"female": "1", "females": "1", "woman": "1", "women": "1", "girl": "1", "girls": "1", "lady": "1", "ladies": "1", "she": "1",
+            "male": "0", "males": "0", "man": "0", "men": "0", "boy": "0", "boys": "0", "guy": "0", "guys": "0", "gentlemen": "0", "he": "0"}
+  },
   "options": {
     "count":         {"phrases": ["how many", "number of", "count of", "count the", "count", "total", "how much"]},
     "missing_only":  {"phrases": ["only missing", "missing ones", "only the missing", "that are missing", "which are missing", "that dont exist", "that don't exist", "not found", "missing only", "the missing"]},
@@ -660,6 +664,16 @@
      "note": "Both plugins have a copy of these records; use 'conflicts of <record>' to see which fields differ.",
      "wordings": ["do {plugin} and {plugin2} conflict", "conflicts between {plugin} and {plugin2}", "what do {plugin} and {plugin2} both change", "overlap between {plugin} and {plugin2}", "records shared by {plugin} and {plugin2}", "{plugin} vs {plugin2}", "compare {plugin} and {plugin2}", "does {plugin} conflict with {plugin2}", "what records do {plugin} and {plugin2} share"],
      "tests": [{"q": "do Dawnguard.esm and Dragonborn.esm conflict", "min_rows": 0}]},
+
+    {"id": "p_npcs_by_sex", "db": "plugins", "group": "Records",
+     "title": "{sex} NPCs",
+     "slots": [{"name": "sex", "kind": "sex"}],
+     "options": {"in_plugin": "AND f.plugin_no IN (SELECT id FROM s_plugin)", "by_type": {"sql": "SELECT r.name AS plugin, count(*) AS npcs FROM forms f JOIN npc n ON n.form_key = f.form_key AND n.plugin_no = f.plugin_no JOIN plugins r ON r.plugin_no = f.plugin_no WHERE f.is_winner AND f.type = 'NPC_' AND (n.acbs_flags & 1) = CAST(:sex AS INTEGER) {opts} GROUP BY r.name ORDER BY npcs DESC"}},
+     "unit": "NPCs",
+     "sql": "SELECT o.name || ':' || printf('%06X', f.form_key & 16777215) AS form, f.edid, (SELECT nm.name FROM form_names nm WHERE nm.form_key = f.form_key AND nm.plugin_no = f.plugin_no AND nm.name IS NOT NULL LIMIT 1) AS name, r.name AS winner FROM forms f JOIN npc n ON n.form_key = f.form_key AND n.plugin_no = f.plugin_no JOIN plugins o ON o.plugin_no = f.form_key >> 24 JOIN plugins r ON r.plugin_no = f.plugin_no WHERE f.is_winner AND f.type = 'NPC_' AND (n.acbs_flags & 1) = CAST(:sex AS INTEGER) {opts} ORDER BY f.edid",
+     "note": "From each NPC's own Female flag (ACBS). An NPC whose traits come from a template takes its sex from the template, which this doesn't follow yet.",
+     "wordings": ["{sex} npcs", "how many {sex} are there", "how many {sex} npcs are there", "list {sex} npcs", "list the {sex}", "all {sex} npcs", "{sex} characters", "which npcs are {sex}", "every {sex} npc", "show {sex} npcs", "{sex} actors", "how many {sex} characters are there", "{sex}"],
+     "tests": [{"q": "how many female npcs are there", "min_rows": 1}, {"q": "how many women are there", "min_rows": 1}]},
 
     {"id": "p_records_of_type", "db": "plugins", "group": "Records",
      "title": "{type} records in the load order",

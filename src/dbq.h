@@ -86,6 +86,10 @@ public:
     // Answers a question. `last` (may be null) is the previous interpretation,
     // for follow-ups. pageSize rows from offset.
     Answer Ask(const std::string& question, const Interpretation* last, int64_t offset, int64_t pageSize);
+    // A teaching line ("draw a connection between "person", "actor" -> NPC_",
+    // "teach women = female"): learns the words, saves them (taught.json).
+    // False when the line isn't one.
+    bool Teach(const std::string& line, std::string* message);
     // Runs an interpretation again (paging, picking a choice).
     Answer Run(const Interpretation& in, int64_t offset, int64_t pageSize);
     // Every family: id, group, title, first wording, and whether the open dbs can answer it.

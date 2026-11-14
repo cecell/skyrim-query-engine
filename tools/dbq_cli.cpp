@@ -396,6 +396,7 @@ const char kConsoleHelp[] = R"(  Ask in plain English, for example:
   1, 2, 3      pick a numbered choice /list [word]           every question it knows
   /sql         show the SQL (toggle)  /csv [file], /json     the whole answer as CSV / JSON
   /good, /bad [why], /note text       mark the last answer (saved with your questions)
+  Teach it words: draw a connection between "person", "actor" -> NPC_   (or: teach women = female)
   /db [a.db] [b.db]                   show or change the databases
   /history     your recent questions  /clear   /exit
 )";
@@ -610,6 +611,15 @@ int RunConsole(Engine& e, std::vector<std::wstring> dbs, int64_t pageSize) {
             a = e.Run(choices[i - 1], 0, pageSize);
             logIt = true;
         } else {
+            std::string taughtMsg;
+            if (e.Teach(cmd, &taughtMsg)) {
+                Answer t;
+                t.kind = Answer::Kind::Info;
+                t.message = taughtMsg;
+                skqe::dbq::LogQuestion("console", cmd, t, dbs);
+                Out(std::string("  ") + GREEN + taughtMsg + RESET + "\n\n");
+                continue;
+            }
             offset = 0;
             a = e.Ask(cmd, hasLast ? &last : nullptr, 0, pageSize);
             logIt = true;
@@ -781,6 +791,15 @@ int DbqCommand(int argc, wchar_t** argv) {
         a = e.Run(st.choices[i - 1], 0, pageSize);
         st.offset = 0;
     } else {
+        std::string taughtMsg;
+        if (e.Teach(question, &taughtMsg)) {
+            Answer t;
+            t.kind = Answer::Kind::Info;
+            t.message = taughtMsg;
+            skqe::dbq::LogQuestion("cli", question, t, dbs);
+            printf("%s\n", taughtMsg.c_str());
+            return 0;
+        }
         a = e.Ask(question, (sameConsole && !fresh && !stateless) ? &st.last : nullptr, 0, pageSize);
         st.offset = 0;
     }
