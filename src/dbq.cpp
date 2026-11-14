@@ -202,6 +202,7 @@ struct Resolved {
     std::string param;                                  // bound :slot value
     std::vector<std::string> alternatives;              // picked one of these; the user can pick another
     int pickedIndex = -1;
+    std::vector<std::string> keywords;                  // type slots: keyword editor IDs that narrow the type
 };
 constexpr int64_t kNullId = INT64_MIN;
 
@@ -259,6 +260,15 @@ struct Engine::Impl {
     DbInfo pinfo, ainfo;
     bool hasPlugins = false, hasAssets = false;
     std::set<std::string> recordCodes;
+    bool hasNameIndex = true;  // form_names(form_key, plugin_no); older build-db databases lack it
+
+    // Without the index a form's name is a scan of form_names per row: leave it out.
+    std::string FixNames(const std::string& sql) const {
+        if (hasNameIndex || sql.find("form_names") == std::string::npos) return sql;
+        static const std::regex sub("\\(SELECT (\\w+)\\.name FROM form_names \\1 WHERE \\1\\.form_key = (\\w+)\\.form_key AND "
+                                    "\\1\\.plugin_no = \\2\\.plugin_no AND \\1\\.name IS NOT NULL LIMIT 1\\)");
+        return std::regex_replace(sql, sub, "NULL");
+    }
     bool assetIndexes = false;
     int64_t deadline = 0;
     bool authorizing = false;
@@ -384,7 +394,7 @@ struct Engine::Impl {
             for (const auto& s : f.slots) tempTables.insert("s_" + s.name);
             families.push_back(std::move(f));
         }
-        for (const char* t : {"s_plugin", "s_folder", "s_archive", "s_archive_files"}) tempTables.insert(t);
+        for (const char* t : {"s_plugin", "s_folder", "s_archive", "s_archive_files", "s_type_kw"}) tempTables.insert(t);
         // vocabulary words seen in wordings, for typo correction
         for (auto& f : families)
             for (const auto& w : f.wordings) {
@@ -392,6 +402,7 @@ struct Engine::Impl {
                     if (piece.find('{') == std::string::npos) vocab.insert(CanonWord(piece, false));
             }
         LoadTaught();
+        RebuildTypeIndex();
         Compile();
         return true;
     }
@@ -453,50 +464,166 @@ struct Engine::Impl {
         taught.Set(group, g);
     }
 
-    // "draw a connection between "actor", "npc", "person" -> NPC_", "teach women = female",
-    // "connect bsa to archive". Returns false when the line isn't a teaching line.
-    bool Teach(const std::string& line, std::string* message) {
-        static const std::regex re(
-            "^\\s*(?:please\\s+)?(?:draw\\s+an?\\s+(?:connection|link)\\s+between|connect|link|teach(?:\\s+that)?|treat|map|remember\\s+that)\\s+"
-            "(.+?)\\s*(?:->|=>|\xE2\x86\x92|=|\\s+means?\\s+|\\s+as\\s+|\\s+to\\s+|\\s+is\\s+|\\s+are\\s+)\\s*(.+?)\\s*[.!]?\\s*$",
-            std::regex::icase);
-        std::smatch m;
-        if (!std::regex_match(line, m, re)) return false;
-        std::string lhs = m[1].str(), target = Trim(m[2].str());
-        for (char q : {'"', '\'', '`'}) target.erase(std::remove(target.begin(), target.end(), q), target.end());
-        // the terms: quoted, or split on commas / and / or
+    // ------------------------------------------------------------ types by name
+    // A type phrase, singular or plural, any hyphenation: "battle axes",
+    // "non-player characters" find "battle axe", "non-player character".
+    std::map<std::string, std::string> typeIndex;
+
+    static std::string Singular(const std::string& w) {
+        if (w == "staves") return "staff";
+        if (w == "knives") return "knife";
+        if (w == "people") return "person";
+        if (w == "men") return "man";
+        if (w == "women") return "woman";
+        if (w.size() > 4 && EndsWith(w, "ies")) return w.substr(0, w.size() - 3) + "y";
+        if (w.size() > 4 && (EndsWith(w, "ches") || EndsWith(w, "shes") || EndsWith(w, "sses") || EndsWith(w, "xes")))
+            return w.substr(0, w.size() - 2);
+        if (w.size() > 3 && EndsWith(w, "s") && !EndsWith(w, "ss")) return w.substr(0, w.size() - 1);
+        return w;
+    }
+    static std::string TypeKey(const std::string& phrase) {
+        std::string p = Lower(phrase);
+        for (char& c : p)
+            if (c == '-' || c == '_') c = ' ';
+        std::vector<std::string> words = SplitWs(p);
+        for (auto& w : words) w = Singular(w);
+        return Join(words, " ");
+    }
+    void RebuildTypeIndex() {
+        typeIndex.clear();
+        for (const auto& [k, v] : types) typeIndex[TypeKey(k)] = v;
+        for (const auto& [k, v] : types) typeIndex[k] = v;  // exact spellings win
+    }
+    std::string TypeLookup(const std::string& phrase) const {
+        auto it = typeIndex.find(Lower(phrase));
+        if (it != typeIndex.end()) return it->second;
+        it = typeIndex.find(TypeKey(phrase));
+        return it == typeIndex.end() ? std::string() : it->second;
+    }
+
+    static std::vector<std::string> SplitTerms(const std::string& text) {
         std::vector<std::string> terms;
-        static const std::regex quoted("[\"\xE2\x80\x9C\xE2\x80\x9D']([^\"\xE2\x80\x9C\xE2\x80\x9D']+)[\"\xE2\x80\x9C\xE2\x80\x9D']");
-        for (std::sregex_iterator it(lhs.begin(), lhs.end(), quoted), end; it != end; ++it) terms.push_back(Lower(Trim((*it)[1].str())));
-        if (terms.empty()) {
-            std::string cur;
-            std::string l = ReplaceAll(ReplaceAll(Lower(lhs), " and ", ","), " or ", ",");
-            for (char c : l + ",") {
-                if (c == ',') {
-                    if (!Trim(cur).empty()) terms.push_back(Trim(cur));
-                    cur.clear();
-                } else {
-                    cur += c;
-                }
+        static const std::regex quoted("[\"\xE2\x80\x9C\xE2\x80\x9D]([^\"\xE2\x80\x9C\xE2\x80\x9D]+)[\"\xE2\x80\x9C\xE2\x80\x9D]");
+        for (std::sregex_iterator it(text.begin(), text.end(), quoted), end; it != end; ++it) terms.push_back(Lower(Trim((*it)[1].str())));
+        if (!terms.empty()) return terms;
+        std::string cur;
+        std::string l = ReplaceAll(ReplaceAll(Lower(text), " and ", ","), " or ", ",");
+        for (char c : l + ",") {
+            if (c == ',' || c == ';') {
+                std::string t = Trim(cur);
+                while (!t.empty() && (t.back() == '.' || t.back() == ':')) t.pop_back();
+                if (!t.empty()) terms.push_back(t);
+                cur.clear();
+            } else {
+                cur += c;
             }
         }
+        return terms;
+    }
+
+    // The keyword that names a term: WeapTypeSword for "sword", WeapTypeBattleaxe
+    // for "battle axe", WeapTypeWarhammer for "battle hammer" (by its last word).
+    static std::string PairKeyword(const std::string& term, const std::vector<std::string>& keywords) {
+        std::string t;
+        for (char c : Lower(term))
+            if (c != ' ' && c != '-') t += c;
+        std::string single = Singular(t);
+        auto stem = [](const std::string& kw) {
+            std::string k = Lower(kw);
+            for (const char* pre : {"weaptype", "armortype", "weap", "armor", "vendoritem", "clothing"})
+                if (StartsWith(k, pre) && k.size() > strlen(pre)) return k.substr(strlen(pre));
+            return k;
+        };
+        for (const auto& k : keywords)
+            if (stem(k) == t || stem(k) == single) return k;
+        std::string best;
+        auto ends = [&](const std::string& tail) {
+            for (const auto& k : keywords)
+                if (EndsWith(Lower(k), tail) && (best.empty() || k.size() < best.size())) best = k;
+        };
+        ends(single);
+        if (best.empty()) {
+            std::vector<std::string> words = SplitWs(Lower(term));
+            if (words.size() > 1) ends(Singular(words.back()));
+        }
+        if (best.empty()) {  // "battlehammer" -> WeapTypeWarhammer: the longest shared ending, 4+ letters
+            size_t bestLen = 3;
+            for (const auto& k : keywords) {
+                std::string a = stem(k), b = single;
+                size_t n = 0;
+                while (n < a.size() && n < b.size() && a[a.size() - 1 - n] == b[b.size() - 1 - n]) ++n;
+                if (n > bestLen) bestLen = n, best = k;
+            }
+        }
+        return best;
+    }
+
+    // Teaching lines:
+    //   draw a connection between "actor", "npc", "person" -> NPC_
+    //   sword, axe, battle axe = WEAP. Also associated keywords: WeapTypeSword, WeapTypeWarAxe, ...
+    //   sword = WEAP + WeapTypeSword        teach women = female        connect bsa to archive
+    // Returns false when the line isn't a teaching line.
+    bool Teach(const std::string& line, std::string* message) {
+        static const std::regex verbRe(
+            "^\\s*(?:please\\s+)?(?:draw\\s+an?\\s+(?:connection|link)\\s+between|connect|link|teach(?:\\s+that)?|treat|map|remember\\s+that)\\s+"
+            "(.+?)\\s*(?:->|=>|\xE2\x86\x92|=|\\s+means?\\s+|\\s+as\\s+|\\s+to\\s+|\\s+is\\s+|\\s+are\\s+)\\s*(.+?)\\s*$",
+            std::regex::icase);
+        static const std::regex bareRe("^\\s*([^=>]+?)\\s*(?:->|=>|\xE2\x86\x92|=)\\s*(.+?)\\s*$");
+        std::smatch m;
+        bool verb = std::regex_match(line, m, verbRe);
+        if (!verb && !std::regex_match(line, m, bareRe)) return false;
+        std::string lhs = m[1].str(), rhs = Trim(m[2].str());
+        // "WEAP. Also associated keywords: A, B, C" / "WEAP + A" / "WEAP with keyword A"
+        std::vector<std::string> keywordList;
+        static const std::regex kwRe("^(.*?)(?:[.;,]?\\s*(?:also\\s+)?(?:associated\\s+|with\\s+(?:the\\s+)?)?keywords?\\s*:?\\s*|\\s*\\+\\s*)(.+)$",
+                                     std::regex::icase);
+        std::smatch km;
+        std::string target = rhs;
+        if (std::regex_match(rhs, km, kwRe)) {
+            target = Trim(km[1].str());
+            for (const auto& k : SplitTerms(km[2].str())) {
+                std::string kk = Trim(k);
+                // keep the editor ID's case from the line
+                size_t at = Lower(km[2].str()).find(kk);
+                keywordList.push_back(at == std::string::npos ? kk : Trim(km[2].str().substr(at, kk.size())));
+            }
+        }
+        for (char q : {'"', '\'', '`', '.'}) target.erase(std::remove(target.begin(), target.end(), q), target.end());
+        target = Trim(target);
+        std::vector<std::string> terms = SplitTerms(lhs);
         if (terms.empty()) return false;
         std::string lt = Lower(target), code;
         if (recordCodes.count(Upper(target))) code = Upper(target);
-        else if (types.count(lt)) code = types.at(lt);
+        else if (!TypeLookup(lt).empty()) code = TypeLookup(lt).substr(0, TypeLookup(lt).find('|'));
+        if (!verb && code.empty() && keywordList.empty()) {
+            // a bare "x = y" is only a teaching line when y is something we know
+            bool known = canon.count(lt) || vocab.count(CanonWord(lt, false));
+            for (const auto& [kind, mp] : valueMaps)
+                if (mp.count(lt)) known = true;
+            if (!known) return false;
+        }
         std::vector<std::string> done;
         if (!code.empty()) {
+            // check the keywords exist
+            std::vector<std::string> missingKw;
+            for (const auto& k : keywordList)
+                if (Scalar("SELECT 1 FROM forms WHERE type = 'KYWD' AND edid = ?1 LIMIT 1", {k}).empty()) missingKw.push_back(k);
+            std::vector<std::string> unpaired;
             for (const auto& t : terms) {
-                types[t] = code;
-                TaughtSet("types", t, code);
+                std::string kw = keywordList.size() == 1 ? keywordList[0] : PairKeyword(t, keywordList);
+                std::string val = code + (kw.empty() ? "" : "|" + kw);
+                types[t] = val;
+                TaughtSet("types", t, val);
                 maxTypeWords = std::max(maxTypeWords, SplitWs(t).size());
-                if (t.back() != 's' && t.find(' ') == std::string::npos && !types.count(t + "s")) {
-                    types[t + "s"] = code;
-                    TaughtSet("types", t + "s", code);
-                }
-                done.push_back("\"" + t + "\"");
+                done.push_back("\"" + t + "\" = " + code + (kw.empty() ? "" : " with " + kw));
+                if (kw.empty() && !keywordList.empty()) unpaired.push_back(t);
             }
-            *message = "Learned: " + Join(done, ", ") + " mean the record type " + code + ".";
+            RebuildTypeIndex();
+            *message = "Learned:\n    " + Join(done, "\n    ");
+            if (!unpaired.empty())
+                *message += "\n  No keyword matched " + Join(unpaired, ", ") + ", so they mean every " + code +
+                            ". To give one a keyword: " + unpaired[0] + " = " + code + " + <keyword>";
+            if (!missingKw.empty()) *message += "\n  Not in this database (no such KYWD): " + Join(missingKw, ", ");
         } else {
             // a value word ("women" = female) or a word for a word ("bsa" = archive)
             std::string valueKind, value;
@@ -505,7 +632,8 @@ struct Engine::Impl {
             std::string c = valueKind.empty() ? CanonWord(lt, false) : "";
             if (valueKind.empty() && !vocab.count(c) && !canon.count(lt)) {
                 *message = "I don't know \"" + target + "\" yet, so I can't connect anything to it. Connect words to a record type "
-                           "(NPC_, WEAP, ARMO...) or to a word I already know (mesh, texture, plugin, female...).";
+                           "(NPC_, WEAP, ARMO...), a type and keyword (WEAP + WeapTypeSword), or a word I already know "
+                           "(mesh, texture, plugin, female...).";
                 return true;
             }
             for (const auto& t : terms) {
@@ -529,7 +657,7 @@ struct Engine::Impl {
         }
         resolveCache.clear();
         SaveTaught();
-        *message += " (saved in " + ToUtf8(StateDir()) + "\\taught.json)";
+        *message += "\n  (saved in " + ToUtf8(StateDir()) + "\\taught.json)";
         return true;
     }
 
@@ -785,7 +913,7 @@ struct Engine::Impl {
     std::vector<std::vector<std::string>> Rows(const std::string& sql, const std::vector<std::string>& args, int limit = 100000) {
         std::vector<std::vector<std::string>> out;
         sqlite3_stmt* st = nullptr;
-        if (sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) != SQLITE_OK) return out;
+        if (sqlite3_prepare_v2(db, FixNames(sql).c_str(), -1, &st, nullptr) != SQLITE_OK) return out;
         for (size_t i = 0; i < args.size(); ++i)
             sqlite3_bind_text(st, static_cast<int>(i + 1), args[i].c_str(), -1, SQLITE_TRANSIENT);
         while (static_cast<int>(out.size()) < limit && sqlite3_step(st) == SQLITE_ROW) {
@@ -914,6 +1042,8 @@ struct Engine::Impl {
             assetIndexes = !Scalar("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'paths_name'", {}).empty() ||
                            !Scalar("SELECT 1 FROM a.sqlite_master WHERE type = 'index' AND name = 'paths_name'", {}).empty();
         recordCodes.clear();
+        hasNameIndex = !hasPlugins || !Scalar("SELECT 1 FROM sqlite_master WHERE type = 'index' AND tbl_name = 'form_names' AND "
+                                               "sql LIKE '%form_key%'", {}).empty();
         if (hasPlugins)
             for (const auto& r : Rows("SELECT DISTINCT record_type FROM st_tables WHERE record_type IS NOT NULL", {})) recordCodes.insert(r[0]);
         sqlite3_progress_handler(db, 10000, &Impl::Progress, this);
@@ -1004,13 +1134,13 @@ struct Engine::Impl {
             bool valueWord = false;
             for (const auto& [vk, mp] : valueMaps)
                 if (mp.count(toks[k].raw)) valueWord = true;
-            if (!vocab.count(toks[k].word) && !canon.count(toks[k].raw) && !types.count(toks[k].raw) &&
+            if (!vocab.count(toks[k].word) && !canon.count(toks[k].raw) && TypeLookup(toks[k].raw).empty() &&
                 !recordCodes.count(Upper(toks[k].raw)) && !valueWord)
                 unknown = true;
         }
         std::string joined = Join(words, " ");
         if (kind == "type") {
-            if (types.count(joined)) return true;
+            if (!TypeLookup(joined).empty()) return true;
             return n == 1 && recordCodes.count(Upper(joined)) != 0;
         }
         if (kind == "format") return n == 1 && formats.count(joined) != 0;
@@ -1022,7 +1152,8 @@ struct Engine::Impl {
         if (kind == "field") return n <= 4;
         if (kind == "text" || kind == "script_name") return n <= 6;
         // names (forms, plugins, files without extension): at least one word
-        // that isn't question vocabulary
+        // that isn't question vocabulary, and not a record type phrase ("battle axes")
+        if (!TypeLookup(joined).empty()) return false;
         return unknown && n <= 6;
     }
 
@@ -1592,13 +1723,28 @@ struct Engine::Impl {
             r.rows.push_back({kNullId, s});
             r.ok = !s.empty();
         } else if (k == "type") {
-            std::string lt = Lower(t);
-            std::string code = types.count(lt) ? types.at(lt) : Upper(lt);
+            std::string val = TypeLookup(Lower(t));
+            if (val.empty()) val = Upper(Lower(t));
+            // "WEAP|WeapTypeSword,..." = the type, narrowed to records with one of those keywords
+            std::string code = val.substr(0, val.find('|'));
+            if (val.find('|') != std::string::npos) {
+                std::string kws = val.substr(val.find('|') + 1), cur;
+                for (char c : kws + ",") {
+                    if (c == ',') {
+                        if (!Trim(cur).empty()) r.keywords.push_back(Trim(cur));
+                        cur.clear();
+                    } else {
+                        cur += c;
+                    }
+                }
+            }
             if (hasPlugins && Scalar("SELECT 1 FROM st_tables WHERE record_type = ?1 LIMIT 1", {code}).empty()) {
                 r.why = "no record type " + t;
             } else {
                 r.rows.push_back({kNullId, code});
+                r.param = code;
                 r.ok = true;
+                if (!r.keywords.empty()) r.summary = code + " with the keyword " + Join(r.keywords, " or ");
             }
         } else if (k == "filekind") {
             std::string w = CanonWord(Lower(t), true);
@@ -1670,7 +1816,9 @@ struct Engine::Impl {
             for (const auto& v : slots)
                 if (v.name == sd.name) val = v.text;
             std::string key = "{" + sd.name + "}";
-            if (val.empty()) {
+            if (val.empty() && sd.kind == "type") {
+                s = ReplaceAll(s, key, "records");
+            } else if (val.empty()) {
                 s = ReplaceAll(s, key + " ", "");
                 s = ReplaceAll(s, " " + key, "");
                 s = ReplaceAll(s, key, "");
@@ -1753,6 +1901,15 @@ struct Engine::Impl {
                 }
             }
             std::string table = "s_" + sv.name;
+            for (const auto& kw : r.keywords) {  // the keyword records that narrow a type
+                sqlite3_stmt* ks = nullptr;
+                if (sqlite3_prepare_v2(db, "INSERT INTO s_type_kw SELECT form_key, edid FROM forms WHERE type = 'KYWD' AND edid = ?1",
+                                       -1, &ks, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(ks, 1, kw.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(ks);
+                    sqlite3_finalize(ks);
+                }
+            }
             if (sv.name == "archive" ||
                 std::any_of(a->interp.options.begin(), a->interp.options.end(), [](const std::string& o) { return o == "in_archive"; })) {
                 // archives as files rows, for in_archive
@@ -1799,7 +1956,7 @@ struct Engine::Impl {
         sqlite3_stmt* st = nullptr;
         authorizing = true;
         deadline = NowMs() + 120000;
-        int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr);
+        int rc = sqlite3_prepare_v2(db, FixNames(sql).c_str(), -1, &st, nullptr);
         if (rc != SQLITE_OK) {
             authorizing = false;
             a->kind = Answer::Kind::Error;
@@ -1927,6 +2084,9 @@ struct Engine::Impl {
         }
         if (!RunPaged(sql, res, offset, page, &a)) return a;
         a.kind = Answer::Kind::Rows;
+        if (!hasNameIndex && sql.find("form_names") != std::string::npos)
+            a.note += std::string(a.note.empty() ? "" : " ") +
+                      "(Names are left out: this database was built before skqe indexed them. A new build-db fills them in.)";
         a.ms = static_cast<double>(NowMs() - t0);
         return a;
     }

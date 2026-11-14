@@ -772,6 +772,7 @@ bool BuildFtsNames(ExtraContext& c, std::string* error) {
            "LEFT JOIN full_names n ON n.form_key = f.form_key AND n.plugin_no = f.plugin_no "
            "WHERE f.edid IS NOT NULL OR n.name IS NOT NULL ORDER BY f.form_key, f.plugin_no;\n"
            "DROP TABLE full_names;\n"
+           "CREATE INDEX IF NOT EXISTS form_names_key ON form_names(form_key, plugin_no);\n"  // a form's name (skqe dbq)
            "INSERT INTO fts_names(fts_names) VALUES('rebuild');\n"
            "INSERT INTO fts_names_tri(fts_names_tri) VALUES('rebuild');\n";
     return db.Exec(sql, error);
