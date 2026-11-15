@@ -149,7 +149,11 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
   which record type used which list). `st_columns.flag_kind` / `enum_kind`
   bind columns to them, by those links first and then by name (on the 5
   masters + USSEP: 119 flag columns, 85 value columns);
-  `record_flags_v` / `form_flag_names_v` name record header flags;
+  `record_flags_v` / `form_flag_names_v` name record header flags. Flag and
+  enum kinds (`ut_flag_kinds`, `ut_enum_kinds`, bound by `st_columns.flag_kind` /
+  `enum_kind`) are named `{rt}_{fs}` (flag sets), `{rt}_{fs}_{field}` (enumerations)
+  and `{rt}_head` (record header flags), with all 4 characters of each signature
+  (`npc__acbs`, `spel_spit_cast_type`); generic sets keep generic names (`ctda_run_on`);
   `conditions_v` lists every condition with its function's name.
   `skqe export --labels` puts the same names beside the values in its JSON.
 - `plugin_facts_v`: the shell extension's columns per plugin by name (master

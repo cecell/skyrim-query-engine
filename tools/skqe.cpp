@@ -1504,11 +1504,11 @@ struct Labels {
                 for (char& c : t) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c);
                 return t;
             };
-            const std::string base = lower(rt) + "_" + lower(fs) + (leaf.empty() ? "" : "_" + leaf);
+            // the naming rule: {rt}_{fs}[_{field}] flag sets, {rt}_{fs}_{field} enumerations
+            const std::string rf = lower(rt) + "_" + lower(fs), base = rf + (leaf.empty() ? "" : "_" + leaf);
             if (flags.count(base)) g = base;
-            else if (flags.count(base + "_flags")) g = base + "_flags";
+            else if (flags.count(rf)) g = rf;
             else if (enums.count(base)) e = base;
-            else if (enums.count(base + "_type")) e = base + "_type";
         }
         if (!e.empty()) {
             auto k = enums.find(e);

@@ -1194,7 +1194,7 @@ const char* kReferenceTables[][2] = {
     {"ut_disp_transforms", "Display transforms (float rounding, radians to degrees, ...)."},
     {"ut_enum_kinds", "Named enumerations; st_columns.enum_kind binds a column to one."},
     {"ut_enum_values", "The values of each enumeration (position = stored code)."},
-    {"ut_flag_kinds", "Named flag sets; st_columns.flag_kind binds a column to one. <type>_record_flags name the record header flags (view record_flags_v)."},
+    {"ut_flag_kinds", "Named flag sets; st_columns.flag_kind binds a column to one. {rt}_head name the record header flags (view record_flags_v); other sets are {rt}_{fs}, enumerations {rt}_{fs}_{field}."},
     {"ut_flag_values", "The bits of each flag set: bit number and label."},
     {"ut_stored_formats", "Stored formats of the old database's field dictionary."},
     {"ut_field_links", "Which field of which record type (\"*\" = any) uses which enumeration or flag set: the old database's links plus curated ones; build-db binds st_columns by these first."},
@@ -1330,14 +1330,14 @@ JOIN plugins p ON p.plugin_no = m.plugin_no
 JOIN plugins x ON x.plugin_no = m.master_no
 WHERE p.load_order >= 0 AND x.load_order IS NULL;
 
--- Record header flag names per record type (ut_flag_kinds <type>_record_flags),
+-- Record header flag names per record type (ut_flag_kinds {rt}_head),
 -- and every set flag of every form occurrence by name.
 CREATE VIEW record_flags_v AS
 SELECT t.record_type, v.bit, v.label
 FROM ut_flag_kinds k
 JOIN ut_flag_values v ON v.fk_kind = k.id
-JOIN st_tables t ON t.kind = 'type' AND rtrim(lower(t.record_type), '_') = substr(k.kind_name, 1, length(k.kind_name) - 13)
-WHERE k.kind_name LIKE '%\_record\_flags' ESCAPE '\';
+JOIN st_tables t ON t.kind = 'type' AND lower(t.record_type) = substr(k.kind_name, 1, 4)
+WHERE k.kind_name GLOB '????_head';
 CREATE VIEW form_flag_names_v AS
 SELECT f.form_key, f.plugin_no, f.type, r.bit, r.label
 FROM forms f JOIN record_flags_v r ON r.record_type = f.type
@@ -1446,7 +1446,7 @@ bool LoadReference(Db& db, const std::wstring& patterns, std::string* error) {
 
 // Binds data-dictionary columns to the lookup tables by name, the old
 // database's rule: <table>_<column>, optionally with _flags / _type.
-// Record flags (<type>_record_flags) name forms.flags bits per type.
+// Record flags ({rt}_head) name forms.flags bits per type.
 const char kBindReference[] = R"SQL(
 -- 1. The field links (ut_field_links): record type ("*" = any) or the
 --    record type's own entry, subrecord and field; also when the field is
@@ -1456,7 +1456,7 @@ UPDATE st_columns SET (enum_kind, flag_kind) = (
   SELECT l.enum_kind, l.flag_kind FROM ut_field_links l
   JOIN st_tables t ON t.record_type = l.record_type OR l.record_type = '*'
   WHERE t.table_name = st_columns.table_name AND l.subrecord = st_columns.subrecord
-    AND (st_columns.path = l.subrecord || '.' || l.leaf OR st_columns.path = l.subrecord
+    AND (st_columns.path = l.subrecord || '.' || l.leaf OR st_columns.path = l.subrecord OR st_columns.path = l.leaf
          OR st_columns.path GLOB l.subrecord || '.*.' || l.leaf
          OR st_columns.path GLOB l.subrecord || '[[]*[]].' || l.leaf)
   ORDER BY l.record_type = '*'
@@ -1465,22 +1465,27 @@ WHERE EXISTS (
   SELECT 1 FROM ut_field_links l
   JOIN st_tables t ON t.record_type = l.record_type OR l.record_type = '*'
   WHERE t.table_name = st_columns.table_name AND l.subrecord = st_columns.subrecord
-    AND (st_columns.path = l.subrecord || '.' || l.leaf OR st_columns.path = l.subrecord
+    AND (st_columns.path = l.subrecord || '.' || l.leaf OR st_columns.path = l.subrecord OR st_columns.path = l.leaf
          OR st_columns.path GLOB l.subrecord || '.*.' || l.leaf
          OR st_columns.path GLOB l.subrecord || '[[]*[]].' || l.leaf));
--- 2. Columns with no link, by name: <table>_<column>[_flags] for flag sets,
---    then <table>_<column>[_type] for enumerations.
+-- 2. Columns with no link, by the naming rule: {rt}_{fs} (or {rt}_{fs}_{field})
+--    for flag sets, {rt}_{fs}_{field} for enumerations; rt and fs are all
+--    4 characters of the signature, lower case ("npc__acbs").
 UPDATE st_columns SET flag_kind = (
-  SELECT k.kind_name FROM ut_flag_kinds k
-  WHERE k.kind_name IN (st_columns.table_name || '_' || st_columns.column_name,
-                        st_columns.table_name || '_' || st_columns.column_name || '_flags'))
-WHERE kind IN ('int', 'flags') AND enum_kind IS NULL AND flag_kind IS NULL;
+  SELECT k.kind_name FROM ut_flag_kinds k JOIN st_tables t ON t.table_name = st_columns.table_name
+  WHERE k.kind_name = lower(t.record_type) || '_' || lower(st_columns.subrecord) || '_' ||
+                      substr(st_columns.path, instr(st_columns.path, '.') + 1)
+     OR (k.kind_name = lower(t.record_type) || '_' || lower(st_columns.subrecord)  -- the subrecord's flags field
+         AND (st_columns.path = st_columns.subrecord OR st_columns.path = st_columns.subrecord || '.flags'))
+  ORDER BY length(k.kind_name) DESC LIMIT 1)
+WHERE kind IN ('int', 'flags') AND enum_kind IS NULL AND flag_kind IS NULL AND subrecord IS NOT NULL;
 UPDATE st_columns SET enum_kind = (
-  SELECT k.kind_name FROM ut_enum_kinds k
-  WHERE k.kind_name IN (st_columns.table_name || '_' || st_columns.column_name,
-                        st_columns.table_name || '_' || st_columns.column_name || '_type'))
-WHERE kind IN ('int', 'text') AND enum_kind IS NULL AND flag_kind IS NULL;
-UPDATE st_columns SET flag_kind = 'record_flags'
+  SELECT k.kind_name FROM ut_enum_kinds k JOIN st_tables t ON t.table_name = st_columns.table_name
+  WHERE k.kind_name = lower(t.record_type) || '_' || lower(st_columns.subrecord) || '_' ||
+                      substr(st_columns.path, instr(st_columns.path, '.') + 1))
+WHERE kind IN ('int', 'text') AND enum_kind IS NULL AND flag_kind IS NULL AND subrecord IS NOT NULL;
+-- forms.flags: the record header flags of every type (any__head; each type's own set is {rt}_head)
+UPDATE st_columns SET flag_kind = 'any__head'
 WHERE table_name = 'forms' AND column_name = 'flags';
 )SQL";
 
