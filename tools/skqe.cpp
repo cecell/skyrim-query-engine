@@ -742,12 +742,12 @@ WHAT IS IN IT (schema version 10)
                   is_deleted.  winning_forms = forms_v of the winners.
   skqe_meta        build settings and versions; skqe_modules = what is built.
 
-  One table per record type (weap, npc, cell, refr, ...): one row per
+  One table per record type (weap, npc_, cell, refr, ...): one row per
   occurrence (form_key, plugin_no), one column per field of each subrecord
-  that occurs once, named subrecord_field: weap.data_damage, npc.acbs_level,
+  that occurs once, named subrecord_field: weap.data_damage, npc_.acbs_level,
   weap.full (the name, as text). winning_<type> views hold the winners.
   Child tables <type>_<subrecord> (form_key, plugin_no, idx): subrecords
-  that repeat in a record (npc_snam factions, lvli_lvlo entries, conditions
+  that repeat in a record (npc__snam factions, lvli_lvlo entries, conditions
   *_ctda) and lists of FormIDs inside one (weap_kwda keywords).
   FormID columns hold form_key integers. Other lists, and anything nested
   below them, are JSON text. Bitfield flags are a JSON list of names.
@@ -838,7 +838,7 @@ EXAMPLES
   SELECT w.edid, k.edid AS keyword FROM winning_weap w
     JOIN weap_kwda x USING (form_key, plugin_no)
     JOIN winning_forms k ON k.form_key = x.kwda;
-  SELECT column_name, kind, path, description FROM st_columns WHERE table_name = 'npc';
+  SELECT column_name, kind, path, description FROM st_columns WHERE table_name = 'npc_';
   SELECT n.edid, n.name, n.plugin_no FROM fts_names
     JOIN form_names n ON n.id = fts_names.rowid WHERE fts_names MATCH 'iron sword';
   SELECT form, type, path FROM winning_refs

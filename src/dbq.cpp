@@ -271,7 +271,8 @@ struct Engine::Impl {
     DbInfo pinfo, ainfo;
     bool hasPlugins = false, hasAssets = false;
     std::set<std::string> recordCodes;
-    bool hasNameIndex = true;  // form_names(form_key, plugin_no); older build-db databases lack it
+    bool hasNameIndex = true;      // form_names(form_key, plugin_no); older build-db databases lack it
+    std::string npcTable = "npc";  // the NPC_ type table: npc_ from schema 11
 
     // Without the index a form's name is a scan of form_names per row: leave it out.
     std::string FixNames(const std::string& sql) const {
@@ -312,6 +313,12 @@ struct Engine::Impl {
             for (const auto& [k, v] : t->Members()) {
                 types[Lower(k)] = v.AsString();
                 maxTypeWords = std::max(maxTypeWords, SplitWs(k).size());
+            }
+        if (const Value* t = root.Find("record_type_names"))
+            for (const auto& [code, name] : t->Members()) {
+                std::string n = Lower(name.AsString());
+                if (!types.count(n)) types[n] = code;
+                maxTypeWords = std::max(maxTypeWords, SplitWs(n).size());
             }
         if (const Value* t = root.Find("texture_formats"))
             for (const auto& [k, v] : t->Members()) formats[Lower(k)] = v.AsString();
@@ -589,7 +596,8 @@ struct Engine::Impl {
             if (StartsWith(e, w))
                 for (const char* v : variants)
                     if (StartsWith(e.substr(w.size()), std::string(v) + "race")) variant = true;
-            if (StartsWith(e, w + "race") || variant) {
+            // ...or the word right before "Race": FrostbiteSpiderRace for "spider"
+            if (StartsWith(e, w + "race") || variant || e.find(w + "race") != std::string::npos) {
                 ids.push_back(r.key);
                 if (labels) labels->push_back(r.edid);
             }
@@ -654,7 +662,7 @@ struct Engine::Impl {
                 noun.type = "NPC_";
                 noun.raceGroups.push_back(rids);
                 noun.labels.push_back(rlabel);
-            } else if (k == 1 && n == 1 && recordCodes.count(Upper(head))) {
+            } else if (k == 1 && recordCodes.count(Upper(head))) {
                 noun.type = Upper(head);
             } else {
                 continue;
@@ -732,7 +740,7 @@ struct Engine::Impl {
                 noun->labels.push_back("keyword " + Join(items, " or "));
             } else if (key == "name") {
                 noun->names.insert(noun->names.end(), items.begin(), items.end());
-                noun->labels.push_back("name contains " + Join(items, " or "));
+                noun->labels.push_back("name or editor ID contains " + (items.size() > 8 ? Join(std::vector<std::string>(items.begin(), items.begin() + 8), " or ") + " or ..." : Join(items, " or ")));
             } else if (key == "sex") {
                 noun->sex = items[0];
                 noun->labels.push_back(items[0] == "1" ? "female" : "male");
@@ -1305,6 +1313,8 @@ struct Engine::Impl {
             assetIndexes = !Scalar("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'paths_name'", {}).empty() ||
                            !Scalar("SELECT 1 FROM a.sqlite_master WHERE type = 'index' AND name = 'paths_name'", {}).empty();
         recordCodes.clear();
+        npcTable = hasPlugins ? Scalar("SELECT table_name FROM st_tables WHERE record_type = 'NPC_' AND kind = 'type'", {}) : "";
+        if (npcTable.empty()) npcTable = "npc";
         LoadNounData();
         hasNameIndex = !hasPlugins || !Scalar("SELECT 1 FROM sqlite_master WHERE type = 'index' AND tbl_name = 'form_names' AND "
                                                "sql LIKE '%form_key%'", {}).empty();
@@ -1637,7 +1647,11 @@ struct Engine::Impl {
         }
         static const std::set<std::string> fileKinds2 = {"file", "texture", "mesh", "archive", "sound", "animation", "script", "tri", "ref_file"};
         for (const auto& sv : best.slots)
-            if (sv.kind == "text") best.score *= 0.93;  // free text is the fallback reading of a name
+            if (sv.kind == "text") {
+                best.score *= 0.93;  // free text is the fallback reading of a name
+                Noun noun;
+                if (ParseNoun(SplitWs(Lower(sv.text)), &noun)) best.score *= 0.9;  // "khajiit women": a noun, rarely a value
+            }
         for (const auto& sv : best.slots)
             if (fileKinds2.count(sv.kind) && Ext(sv.text).empty() && sv.text.find('\\') == std::string::npos) best.score *= 0.9;
         // a required slot nobody filled
@@ -2010,11 +2024,14 @@ struct Engine::Impl {
             Noun noun;
             if (!ParseNoun(SplitWs(Lower(t)), &noun)) {
                 r.why = "\"" + t + "\" isn't a record type I know";
-            } else if (hasPlugins && Scalar("SELECT 1 FROM st_tables WHERE record_type = ?1 LIMIT 1", {noun.type}).empty()) {
+            } else if (hasPlugins && [&] {
+                           std::vector<std::string> codes = SplitWs(ReplaceAll(noun.type, ",", " "));
+                           return !std::all_of(codes.begin(), codes.end(), [&](const std::string& c) { return recordCodes.count(c) != 0; });
+                       }()) {
                 r.why = "no record type " + noun.type;
             } else {
-                r.rows.push_back({kNullId, noun.type});
-                r.param = noun.type;
+                for (const auto& c : SplitWs(ReplaceAll(noun.type, ",", " "))) r.rows.push_back({kNullId, c});
+                r.param = SplitWs(ReplaceAll(noun.type, ",", " "))[0];
                 r.ok = true;
                 r.noun = noun;
                 r.summary = noun.type + (noun.labels.empty() ? "" : ": " + Join(noun.labels, "; "));
@@ -2138,12 +2155,12 @@ struct Engine::Impl {
         for (size_t g = 0; g < noun.raceGroups.size(); ++g) {
             std::string grp = "r" + std::to_string(g);
             for (int64_t id : noun.raceGroups[g]) Exec("INSERT INTO s_race VALUES(" + std::to_string(id) + ", '" + grp + "')");
-            typeFilter += " AND EXISTS(SELECT 1 FROM npc rn WHERE rn.form_key = f.form_key AND rn.plugin_no = f.plugin_no AND "
+            typeFilter += " AND EXISTS(SELECT 1 FROM \"" + npcTable + "\" rn WHERE rn.form_key = f.form_key AND rn.plugin_no = f.plugin_no AND "
                           "rn.rnam IN (SELECT id FROM s_race WHERE txt = '" + grp + "'))";
         }
         if (!noun.sex.empty()) {
             Exec("INSERT INTO s_sex VALUES(" + std::to_string(atoi(noun.sex.c_str())) + ", NULL)");
-            typeFilter += " AND EXISTS(SELECT 1 FROM npc sx WHERE sx.form_key = f.form_key AND sx.plugin_no = f.plugin_no AND "
+            typeFilter += " AND EXISTS(SELECT 1 FROM \"" + npcTable + "\" sx WHERE sx.form_key = f.form_key AND sx.plugin_no = f.plugin_no AND "
                           "(sx.acbs_flags & 1) = (SELECT id FROM s_sex))";
         }
         if (!noun.names.empty()) {
@@ -2155,10 +2172,50 @@ struct Engine::Impl {
                     sqlite3_finalize(st);
                 }
             }
-            typeFilter += " AND EXISTS(SELECT 1 FROM form_names nm JOIN s_name sn ON nm.name LIKE '%' || sn.txt || '%' WHERE "
-                          "nm.form_key = f.form_key AND nm.plugin_no = f.plugin_no)";
+            typeFilter += " AND EXISTS(SELECT 1 FROM s_name sn WHERE f.edid LIKE '%' || sn.txt || '%' OR EXISTS(SELECT 1 FROM "
+                          "form_names nm WHERE nm.form_key = f.form_key AND nm.plugin_no = f.plugin_no AND (' ' || nm.name) LIKE "
+                          "'% ' || sn.txt || '%'))";
         }
         typeFilter += ")";
+    }
+
+    // Where a value lives for these types: "(f.flags & 4) <> 0 OR EXISTS(... spit_flags & 131072 ...)".
+    std::string valueWhere;
+    std::string ValueCondition(const Resolved& type, const std::string& value, std::string* why) {
+        valueWhere.clear();
+        std::vector<std::string> conds, where;
+        std::string v = Trim(value);
+        for (const auto& row : type.rows) {
+            const std::string& rt = row.second;
+            for (const auto& m : Rows("SELECT bit FROM record_flags_v WHERE record_type = ?1 AND label = ?2 COLLATE NOCASE", {rt, v})) {
+                conds.push_back("(f.type = '" + rt + "' AND (f.flags & " + std::to_string(1LL << atoi(m[0].c_str())) + ") <> 0)");
+                where.push_back(rt + " record header flag bit " + m[0]);
+            }
+            auto fields = Rows("SELECT t.table_name, t.kind, c.column_name, c.path, 'flag', v.bit FROM st_tables t JOIN st_columns c ON "
+                               "c.table_name = t.table_name JOIN ut_flag_kinds k ON k.kind_name = c.flag_kind JOIN ut_flag_values v ON "
+                               "v.fk_kind = k.id WHERE t.record_type = ?1 AND v.label = ?2 COLLATE NOCASE UNION ALL "
+                               "SELECT t.table_name, t.kind, c.column_name, c.path, 'enum', v.position FROM st_tables t JOIN st_columns c ON "
+                               "c.table_name = t.table_name JOIN ut_enum_kinds k ON k.kind_name = c.enum_kind JOIN ut_enum_values v ON "
+                               "v.fk_kind = k.id WHERE t.record_type = ?1 AND v.label = ?2 COLLATE NOCASE",
+                               {rt, v});
+            for (const auto& fld : fields) {
+                std::string col = "x.\"" + fld[2] + "\"";
+                std::string test = fld[4] == "flag" ? "(" + col + " & " + std::to_string(1LL << atoi(fld[5].c_str())) + ") <> 0"
+                                                    : col + " = " + fld[5];
+                conds.push_back("(f.type = '" + rt + "' AND EXISTS(SELECT 1 FROM \"" + fld[0] + "\" x WHERE x.form_key = f.form_key AND "
+                                "x.plugin_no = f.plugin_no AND " + test + "))");
+                where.push_back(fld[3] + (fld[4] == "flag" ? " flag bit " : " = ") + fld[5]);
+            }
+        }
+        if (conds.empty()) {
+            std::vector<std::string> types;
+            for (const auto& row : type.rows) types.push_back(row.second);
+            *why = "No flag or value \"" + v + "\" in any " + Join(types, "/") + " field. To see the ones there are: flags of " +
+                   types[0];
+            return "";
+        }
+        valueWhere = "\"" + v + "\" is " + Join(where, ", or ");
+        return Join(conds, " OR ");
     }
 
     std::string BuildSql(const Family& f, const std::vector<std::string>& opts, std::string* order) const {
@@ -2343,6 +2400,32 @@ struct Engine::Impl {
         }
         std::map<std::string, Resolved> res;
         if (!FillTemps(*f, in.slots, &res, &a)) return a;
+        if (f->handler == "value_filter") {
+            std::string why;
+            std::string cond = ValueCondition(res["type"], res["text"].param, &why);
+            if (cond.empty()) {
+                a.kind = Answer::Kind::Unknown;
+                a.message = why;
+                return a;
+            }
+            std::string order;
+            std::string sql = ReplaceAll(BuildSql(*f, in.options, &order), "{valuecond}", cond);
+            a.sql = sql;
+            a.resolved += std::string(a.resolved.empty() ? "" : "; ") + valueWhere;
+            bool cnt = std::find(in.options.begin(), in.options.end(), "count") != in.options.end();
+            if (cnt) {
+                Answer tmp;
+                if (!RunPaged("SELECT count(*) FROM (" + sql + ")", res, 0, 1, &tmp)) return tmp;
+                a.kind = Answer::Kind::Info;
+                a.countValue = tmp.table.rows.empty() ? 0 : _atoi64(tmp.table.rows[0][0].c_str());
+                a.message = Grouped(a.countValue) + " records";
+                return a;
+            }
+            if (!RunPaged(sql, res, offset, page, &a)) return a;
+            a.kind = Answer::Kind::Rows;
+            a.ms = static_cast<double>(NowMs() - t0);
+            return a;
+        }
         if (!f->handler.empty()) {
             RunHandler(*f, res, offset, page, &a);
             a.ms = static_cast<double>(NowMs() - t0);

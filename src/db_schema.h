@@ -61,7 +61,8 @@ public:
     const SubrecordDef* Find(const std::string& rt, const std::string& fs) const;
     int TypeTable(const std::string& rt) const;  // -1 = no patterns for that type
 
-    // A record type or subrecord signature as an SQL name part ("NPC_" -> "npc").
+    // A record type or subrecord signature as an SQL name part, lower case, all 4
+    // characters ("NPC_" -> "npc_", so its child tables are "npc__snam").
     static std::string SigName(const std::string& sig);
 
 private:

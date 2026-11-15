@@ -104,11 +104,14 @@ forms, 19 million field rows, 13 million references) in about 85 seconds
 - `forms`: one row per occurrence of every form (the owner and each
   override), with type, EDID, flags, the WRLD / CELL / DIAL it sits in, and
   `is_winner`.
-- One table per record type (`weap`, `npc`, `refr`, ...) with a column per
-  field (`weap.data_damage`, `npc.acbs_level`, `weap.full` as text), and
-  child tables for repeating subrecords and FormID lists (`npc_snam`,
-  `lvli_lvlo`, `weap_kwda`). Generated from the pattern catalog, so every
+- One table per record type (`weap`, `npc_`, `refr`, ...) with a column per
+  field (`weap.data_damage`, `npc_.acbs_level`, `weap.full` as text), and
+  child tables for repeating subrecords and FormID lists (`npc__snam`,
+  `lvli_lvlo`, `weap_kwda`). Table names keep all 4 characters of the
+  record type (`NPC_` is `npc_`). Generated from the pattern catalog, so every
   record type has the same tables in every build. `winning_<type>` views.
+  `st_record_types` lists every record type; `skqe_version` says who built
+  the database and its `ddl_version` / `dml_version`.
 - `strings`: every localized string of every plugin.
 - `form_refs`: the xref, one row per FormID inside a record wherever it sits
   (columns, child tables, nested JSON), indexed both ways: what references a

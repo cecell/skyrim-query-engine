@@ -31,7 +31,11 @@
 namespace skqe {
 namespace {
 
-constexpr int kSchemaVersion = 10;
+constexpr int kSchemaVersion = 11;  // 11: NPC_ tables keep the 4th character (npc_, npc__snam); skqe_version; st_record_types
+constexpr int kDmlVersion = 1;
+#ifndef SKQE_VERSION
+#define SKQE_VERSION "dev"
+#endif
 constexpr size_t kBatchRows = 50000;
 constexpr int64_t kKeyShift = 1 << 24;
 
@@ -1207,9 +1211,28 @@ const char* kCoreTables[][2] = {
     {"ref_paths", "The field a form_refs row comes from: record type and path in the subrecord (\"SNAM.Faction\", \"KWDA\")."},
     {"skqe_meta", "Build settings and versions."},
     {"skqe_modules", "What is built: core and the optional modules."},
+    {"skqe_version", "One row: built_by / built_at, last_edited_by / last_edited_at (the build or the last skqe db add), ddl_version (= schema_version: the layout) and dml_version (how rows are filled)."},
+    {"st_record_types", "View: every record type signature that has tables, one per row (column signature)."},
     {"st_tables", "The data dictionary: tables."},
     {"st_columns", "The data dictionary: columns."},
 };
+
+// skqe_version: who built the database and who changed it last, and the two
+// versions a reader checks: ddl_version (tables, columns, views: the same as
+// skqe_meta.schema_version) and dml_version (how rows are filled: decoding,
+// binding, derived tables; bumped when the same layout gets different rows).
+const char kVersionTable[] = R"SQL(
+CREATE TABLE skqe_version(
+  built_by       TEXT NOT NULL,     -- "skqe 0.97 build-db"
+  built_at       TEXT NOT NULL,
+  last_edited_by TEXT NOT NULL,     -- the build, or the last skqe db add
+  last_edited_at TEXT NOT NULL,
+  ddl_version    INTEGER NOT NULL,
+  dml_version    INTEGER NOT NULL
+);
+CREATE VIEW st_record_types AS
+SELECT DISTINCT record_type AS signature FROM st_tables WHERE record_type IS NOT NULL ORDER BY signature;
+)SQL";
 
 // st_columns.notes of every BLOB column.
 const char kBlobNote[] = "raw bytes; SELECT hex(col) for hex text";
@@ -1313,7 +1336,7 @@ CREATE VIEW record_flags_v AS
 SELECT t.record_type, v.bit, v.label
 FROM ut_flag_kinds k
 JOIN ut_flag_values v ON v.fk_kind = k.id
-JOIN st_tables t ON t.kind = 'type' AND t.table_name = substr(k.kind_name, 1, length(k.kind_name) - 13)
+JOIN st_tables t ON t.kind = 'type' AND rtrim(lower(t.record_type), '_') = substr(k.kind_name, 1, length(k.kind_name) - 13)
 WHERE k.kind_name LIKE '%\_record\_flags' ESCAPE '\';
 CREATE VIEW form_flag_names_v AS
 SELECT f.form_key, f.plugin_no, f.type, r.bit, r.label
@@ -1886,6 +1909,12 @@ int BuildDb(const BuildOptions& opt, std::string* error) {
             if (!extras.count(e.name)) skipped += (skipped.empty() ? "" : ",") + std::string(e.name);
         putMeta("modules_not_built", skipped);
         putMeta("plugins_failed", std::to_string(failed.size()));
+        {
+            if (!db.Exec(kVersionTable, error)) return 1;
+            const std::string by = std::string("skqe ") + SKQE_VERSION + " build-db", at = NowIso();
+            Stmt v{db.Prepare("INSERT INTO skqe_version VALUES(?,?,?,?,?,?)", error)};
+            v.Text(1, by).Text(2, at).Text(3, by).Text(4, at).Int(5, kSchemaVersion).Int(6, kDmlVersion).Run();
+        }
         Stmt mod{db.Prepare("INSERT INTO skqe_modules VALUES(?, ?, NULL)", error)};
         mod.Text(1, "core").Text(2, NowIso()).Run();
         for (const auto& m : modules) mod.Text(1, m).Text(2, NowIso()).Run();
@@ -2185,6 +2214,11 @@ int AddModules(const AddOptions& opt, std::string* error) {
         return 1;
     }
 
+    {
+        std::string ignored;  // databases from before schema 11 have no skqe_version
+        Stmt v{db.Prepare("UPDATE skqe_version SET last_edited_by = ?, last_edited_at = ?", &ignored)};
+        if (v.st) v.Text(1, std::string("skqe ") + SKQE_VERSION + " db add").Text(2, NowIso()).Run();
+    }
     Stmt mod{db.Prepare("INSERT INTO skqe_modules VALUES(?, ?, NULL)", error)};
     if (!mod.st) return 1;
     for (const auto& m : modules) mod.Text(1, m).Text(2, NowIso()).Run();

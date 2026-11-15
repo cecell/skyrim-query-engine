@@ -75,6 +75,7 @@ else()
     target_sources(skqe PRIVATE src/embedded_data_stub.cpp)
 endif()
 target_link_libraries(skqe PUBLIC sqlite3 PRIVATE bsa::reader asset::metadata bcrypt shell32 ole32 advapi32)
+target_compile_definitions(skqe PRIVATE SKQE_VERSION="${PROJECT_VERSION}")
 
 add_executable(skqe_cli tools/skqe.cpp tools/dbq_cli.cpp)
 if(WIN32)

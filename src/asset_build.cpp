@@ -29,7 +29,11 @@
 namespace skqe {
 namespace {
 
-constexpr int kAssetSchemaVersion = 4;
+constexpr int kAssetSchemaVersion = 5;  // 5: skqe_version
+constexpr int kAssetDmlVersion = 1;
+#ifndef SKQE_VERSION
+#define SKQE_VERSION "dev"
+#endif
 constexpr size_t kBatchRows = 20000;
 // Header reads: how much of a file a reader may need. Whole files are read
 // for NIF texture paths, PEX and TRI (names at the end), up to these caps.
@@ -1594,6 +1598,14 @@ int BuildAssets(const AssetOptions& opt, std::string* error) {
         auto putMeta = [&](const char* k, const std::string& v) { meta.Text(1, k).Text(2, v).Run(); };
         putMeta("schema_version", std::to_string(kAssetSchemaVersion));
         putMeta("built_by", "skqe build-assets");
+        {
+            const char* ddl = "CREATE TABLE skqe_version(built_by TEXT NOT NULL, built_at TEXT NOT NULL, last_edited_by TEXT NOT NULL, "
+                              "last_edited_at TEXT NOT NULL, ddl_version INTEGER NOT NULL, dml_version INTEGER NOT NULL);";
+            if (!db.Exec(ddl, error)) return 1;
+            const std::string by = std::string("skqe ") + SKQE_VERSION + " build-assets", at = NowIso();
+            Stmt v{db.Prepare("INSERT INTO skqe_version VALUES(?,?,?,?,?,?)", error)};
+            v.Text(1, by).Text(2, at).Text(3, by).Text(4, at).Int(5, kAssetSchemaVersion).Int(6, kAssetDmlVersion).Run();
+        }
         putMeta("built_at", NowIso());
         putMeta("sqlite_version", sqlite3_libversion());
         putMeta("data_dir", Utf8(data));

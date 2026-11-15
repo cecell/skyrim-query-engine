@@ -128,8 +128,7 @@ std::string Schema::SigName(const std::string& sig) {
             out += '_';
         }
     }
-    while (!out.empty() && out.back() == '_') out.pop_back();
-    return out;
+    return out;  // all 4 characters, so 4-character pieces can be cut back out ("NPC_" -> "npc_")
 }
 
 void Schema::Build(const PatternCatalog& catalog, bool (*isUsableName)(const std::string&)) {
