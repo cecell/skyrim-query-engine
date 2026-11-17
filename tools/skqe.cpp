@@ -670,6 +670,8 @@ opened, and nothing is written except --out.
                           header flags and form version when they differ. Forms
                           whose bytes differ but whose compared fields don't are
                           listed too (summary.forms_with_only_byte_differences).
+                          The TES4 header's differing subrecords (and record
+                          flags / form version) go to "header_raw" the same way.
   --include-unknown       also compare fields named unknown or unused, which are
                           left out by default, as in export --conflicts.
   --out <file>            write to a file instead of the console.
@@ -2420,6 +2422,56 @@ int DiffCommand(int argc, wchar_t** argv) {
         headDiff.Set(k, std::move(list));
     }
 
+    // --raw: the TES4 header's subrecords whose bytes differ, each copy's occurrences as hex.
+    Value headRaw = Value::Map();
+    if (rawMode) {
+        static const char kHex[] = "0123456789ABCDEF";
+        std::vector<std::map<std::string, std::vector<std::string>>> bySig(n);
+        std::vector<std::string> order;
+        std::set<std::string> seen;
+        for (size_t i = 0; i < n; ++i) {
+            std::vector<Plugin::RawSub> subs;
+            if (!plugins[i]->RawSubrecords(plugins[i]->header(), &subs)) subs.push_back({"!ERR", {}});
+            for (const auto& sub : subs) {
+                std::string hex;
+                for (uint8_t b : sub.bytes) {
+                    hex.push_back(kHex[b >> 4]);
+                    hex.push_back(kHex[b & 15]);
+                }
+                bySig[i][sub.sig].push_back(std::move(hex));
+                if (seen.insert(sub.sig).second) order.push_back(sub.sig);
+            }
+        }
+        for (const auto& sig : order) {
+            bool differs = false;
+            for (size_t i = 1; i < n; ++i) differs = differs || bySig[i][sig] != bySig[0][sig];
+            if (!differs) continue;
+            Value perCopy = Value::List();
+            for (size_t i = 0; i < n; ++i) {
+                Value occ = Value::List();
+                for (const auto& h : bySig[i][sig]) occ.Items().push_back(Value::Str(h));
+                perCopy.Items().push_back(std::move(occ));
+            }
+            headRaw.Set(sig, std::move(perCopy));
+        }
+        bool flagsDiffer = false, fvDiffer = false;
+        for (size_t i = 1; i < n; ++i) {
+            flagsDiffer = flagsDiffer || plugins[i]->header().flags != plugins[0]->header().flags;
+            fvDiffer = fvDiffer || plugins[i]->header().formVersion != plugins[0]->header().formVersion;
+        }
+        if (flagsDiffer || fvDiffer) {
+            Value rh = Value::Map();
+            Value fl = Value::List(), fv = Value::List();
+            for (size_t i = 0; i < n; ++i) {
+                fl.Items().push_back(Value::Int(static_cast<int64_t>(plugins[i]->header().flags)));
+                fv.Items().push_back(Value::Int(static_cast<int64_t>(plugins[i]->header().formVersion)));
+            }
+            if (flagsDiffer) rh.Set("flags", std::move(fl));
+            if (fvDiffer) rh.Set("form_version", std::move(fv));
+            headRaw.Set("record_header", std::move(rh));
+        }
+    }
+
     // Every form of every distinct copy; a master's name may differ in case, and
     // the plugin itself counts as one owner whatever its file is called.
     std::set<std::string> typeSet, formSet;
@@ -2695,6 +2747,10 @@ int DiffCommand(int argc, wchar_t** argv) {
     WriteJson(copies, &out);
     out += ",\n\"header\":";
     WriteJson(headDiff, &out);
+    if (rawMode) {
+        out += ",\n\"header_raw\":";
+        WriteJson(headRaw, &out);
+    }
     out += ",\n\"summary\":";
     WriteJson(summary, &out);
     out += ",\n\"forms\":[";
