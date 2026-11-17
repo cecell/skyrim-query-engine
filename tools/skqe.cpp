@@ -663,6 +663,13 @@ opened, and nothing is written except --out.
   --form-file <file>      the same from a file ("-" = stdin): commas, spaces or lines.
   --fields P,P            only these field paths.
   --summary               name the fields that differ, without their values.
+  --raw                   also the bytes: for each form, every subrecord whose
+                          bytes differ between copies (every subrecord of a form
+                          missing from a copy), each copy's occurrences as hex
+                          ("raw":{"DATA":[["0A00"],["0B00"]]}), and the record
+                          header flags and form version when they differ. Forms
+                          whose bytes differ but whose compared fields don't are
+                          listed too (summary.forms_with_only_byte_differences).
   --include-unknown       also compare fields named unknown or unused, which are
                           left out by default, as in export --conflicts.
   --out <file>            write to a file instead of the console.
@@ -991,7 +998,7 @@ int Usage() {
             "  skqe export <plugin> [--form ID,..] [<plugin> [--form ID,..]].. [--type T,..] [--limit N [--random [--seed S]]] [--fields F,..] [--csv|--json] [--out file]\n"
             "  skqe export --request <file|-> [--data <folder>] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
             "  skqe export --load-order <plugins.txt> --data <folder> [--form ID,..] [--form-file <file|->] [--type T,..] [--fields F,..] [--csv|--json] [--out file]\n"
-            "  skqe diff <copy> <copy>.. | --name X.esp --in <folder>.. [--type T,..] [--form ID,..] [--fields F,..] [--summary] [--include-unknown] [--out file]\n"
+            "  skqe diff <copy> <copy>.. | --name X.esp --in <folder>.. [--type T,..] [--form ID,..] [--fields F,..] [--summary] [--include-unknown] [--raw] [--out file]\n"
             "  skqe build-db --out <db> --data <Data> [--load-order plugins.txt | --plugins a,b,..] [--with m,..] [--skip e,..]\n"
             "  skqe db add <module>[,..] --db <db>\n"
             "  skqe build-assets --out <db> --data <Data> [--staging <root> | --mo2 <dir> --profile <p>]\n"
@@ -2270,13 +2277,14 @@ int DiffCommand(int argc, wchar_t** argv) {
     std::vector<std::wstring> paths, roots;
     std::string nameWanted, types, fieldList, outPath, formList, formFile;
     std::wstring patternsPath;
-    bool summaryOnly = false, keepUnknown = false;
+    bool summaryOnly = false, keepUnknown = false, rawMode = false;
     for (int i = 2; i < argc; ++i) {
         std::string a = Utf8(argv[i]);
         auto next = [&](std::string* dst) {
             if (i + 1 < argc) *dst = Utf8(argv[++i]);
         };
-        if (a == "--name") next(&nameWanted);
+        if (a == "--raw") rawMode = true;
+        else if (a == "--name") next(&nameWanted);
         else if (a == "--in" && i + 1 < argc) roots.push_back(argv[++i]);
         else if (a == "--type") next(&types);
         else if (a == "--form") {
@@ -2480,6 +2488,7 @@ int DiffCommand(int argc, wchar_t** argv) {
         std::string json, type;
         bool partial = false;
         std::vector<std::string> fields;
+        bool rawDiffers = false;
     };
     std::vector<Outcome> outcomes(entries.size());
     std::atomic<size_t> nextEntry{0};
@@ -2527,7 +2536,86 @@ int DiffCommand(int argc, wchar_t** argv) {
                 }
                 if (differs) out.fields.push_back(key);
             }
-            if (out.fields.empty() && !out.partial) continue;
+            // --raw: every subrecord signature whose bytes differ between copies (all of them for a form missing
+            // from a copy), each copy's occurrences as hex, and the record header facts that differ.
+            Value raw = Value::Map(), head = Value::Map();
+            if (rawMode) {
+                static const char kHex[] = "0123456789ABCDEF";
+                static const std::vector<std::string> kNone;
+                std::vector<std::map<std::string, std::vector<std::string>>> bySig(distinct.size());
+                std::vector<std::string> sigOrder;
+                std::set<std::string> seenSig;
+                for (size_t d = 0; d < distinct.size(); ++d) {
+                    if (!entry.copy[d]) continue;
+                    std::vector<Plugin::RawSub> subs;
+                    if (!plugins[distinct[d]]->RawSubrecords(*entry.copy[d], &subs)) subs.push_back({"!ERR", {}});
+                    for (const auto& sub : subs) {
+                        std::string hex;
+                        hex.reserve(sub.bytes.size() * 2);
+                        for (uint8_t b : sub.bytes) {
+                            hex.push_back(kHex[b >> 4]);
+                            hex.push_back(kHex[b & 15]);
+                        }
+                        bySig[d][sub.sig].push_back(std::move(hex));
+                        if (seenSig.insert(sub.sig).second) sigOrder.push_back(sub.sig);
+                    }
+                }
+                auto distinctOf = [&](size_t i) {
+                    return static_cast<size_t>(std::find(distinct.begin(), distinct.end(), sameAs[i]) - distinct.begin());
+                };
+                for (const auto& sig : sigOrder) {
+                    bool differs = false;
+                    const std::vector<std::string>* base = nullptr;
+                    for (size_t d = 0; d < distinct.size(); ++d) {
+                        if (!entry.copy[d]) continue;
+                        auto it = bySig[d].find(sig);
+                        const auto* occ = it == bySig[d].end() ? &kNone : &it->second;
+                        if (!base) base = occ;
+                        else if (*occ != *base) differs = true;
+                    }
+                    if (!differs && !out.partial) continue;
+                    Value perCopy = Value::List();
+                    for (size_t i = 0; i < n; ++i) {
+                        size_t d = distinctOf(i);
+                        if (!entry.copy[d]) {
+                            perCopy.Items().push_back(Value());
+                            continue;
+                        }
+                        Value occ = Value::List();
+                        auto it = bySig[d].find(sig);
+                        if (it != bySig[d].end())
+                            for (const auto& h : it->second) occ.Items().push_back(Value::Str(h));
+                        perCopy.Items().push_back(std::move(occ));
+                    }
+                    raw.Set(sig, std::move(perCopy));
+                }
+                auto headFact = [&](const char* name, int64_t (*get)(const Record&)) {
+                    bool differs = false, started = false;
+                    int64_t base = 0;
+                    for (size_t d = 0; d < distinct.size(); ++d) {
+                        if (!entry.copy[d]) continue;
+                        int64_t v = get(*entry.copy[d]);
+                        if (!started) {
+                            base = v;
+                            started = true;
+                        } else if (v != base) {
+                            differs = true;
+                        }
+                    }
+                    if (!differs) return;
+                    Value perCopy = Value::List();
+                    for (size_t i = 0; i < n; ++i) {
+                        size_t d = distinctOf(i);
+                        perCopy.Items().push_back(entry.copy[d] ? Value::Int(get(*entry.copy[d])) : Value());
+                    }
+                    head.Set(name, std::move(perCopy));
+                };
+                // Compressed (0x40000) is only how a record is stored; it stays in the flags shown.
+                headFact("flags", [](const Record& r) { return static_cast<int64_t>(r.flags); });
+                headFact("form_version", [](const Record& r) { return static_cast<int64_t>(r.formVersion); });
+                out.rawDiffers = !raw.Members().empty() || !head.Members().empty();
+            }
+            if (out.fields.empty() && !out.partial && !out.rawDiffers) continue;
             Value obj = Value::Map();
             obj.Set("form", *rows[firstPresent].Find("form"));
             obj.Set("type", Value::Str(out.type));
@@ -2557,6 +2645,10 @@ int DiffCommand(int argc, wchar_t** argv) {
                 }
                 obj.Set("fields", std::move(values));
             }
+            if (rawMode) {
+                obj.Set("raw", std::move(raw));
+                if (!head.Members().empty()) obj.Set("record_header", std::move(head));
+            }
             WriteJson(obj, &out.json);
         }
     };
@@ -2565,7 +2657,7 @@ int DiffCommand(int argc, wchar_t** argv) {
     for (int t = 0; t < threads; ++t) pool.emplace_back(work);
     for (auto& t : pool) t.join();
 
-    size_t different = 0, partial = 0;
+    size_t different = 0, partial = 0, rawOnly = 0;
     std::map<std::string, std::pair<size_t, size_t>> byType;
     std::map<std::string, size_t> byField;
     for (const auto& o : outcomes) {
@@ -2579,12 +2671,14 @@ int DiffCommand(int argc, wchar_t** argv) {
             ++byType[o.type].second;
         }
         for (const auto& k : o.fields) ++byField[k];
+        if (o.fields.empty() && !o.partial && o.rawDiffers) ++rawOnly;
     }
     Value summary = Value::Map();
     summary.Set("identical", Value::Bool(distinct.size() == 1));
     summary.Set("forms", Value::Int(static_cast<int64_t>(entries.size())));
     summary.Set("forms_with_different_fields", Value::Int(static_cast<int64_t>(different)));
     summary.Set("forms_not_in_every_copy", Value::Int(static_cast<int64_t>(partial)));
+    if (rawMode) summary.Set("forms_with_only_byte_differences", Value::Int(static_cast<int64_t>(rawOnly)));
     Value typeCounts = Value::Map();
     for (const auto& [t, c] : byType) {
         Value one = Value::Map();

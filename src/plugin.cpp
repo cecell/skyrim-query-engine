@@ -284,6 +284,35 @@ bool Plugin::Body(const Record& r, std::vector<uint8_t>* scratch, const uint8_t*
     return true;
 }
 
+bool Plugin::RawSubrecords(const Record& r, std::vector<RawSub>* out) const {
+    out->clear();
+    std::vector<uint8_t> inflated;
+    const uint8_t* body;
+    size_t size;
+    if (!Body(r, &inflated, &body, &size)) return false;
+    uint32_t big = 0;
+    bool haveBig = false;
+    for (size_t q = 0; q + 6 <= size;) {
+        std::string fs(reinterpret_cast<const char*>(body + q), 4);
+        size_t len = U16(body + q + 4);
+        q += 6;
+        if (haveBig) {
+            len = big;
+            haveBig = false;
+        }
+        if (q + len > size) return false;
+        const uint8_t* data = body + q;
+        q += len;
+        if (fs == "XXXX" && len >= 4) {
+            big = U32(data);
+            haveBig = true;
+            continue;
+        }
+        out->push_back({fs, std::vector<uint8_t>(data, data + len)});
+    }
+    return true;
+}
+
 std::vector<Field> Plugin::Fields(const Record& r, const FormIdMap* formIds, const SigFilter* wanted) const {
     std::vector<Field> out;
     std::vector<uint8_t> inflated;

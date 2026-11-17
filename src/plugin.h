@@ -95,6 +95,14 @@ public:
     // A record's subrecord bytes, inflated when compressed (into `scratch`).
     bool Body(const Record& r, std::vector<uint8_t>* scratch, const uint8_t** body, size_t* size) const;
 
+    // A record's subrecords in file order: signature and bytes (inflated when the record is compressed; an XXXX
+    // size marker is folded into the subrecord it sizes). False when the record cannot be read.
+    struct RawSub {
+        std::string sig;
+        std::vector<uint8_t> bytes;
+    };
+    bool RawSubrecords(const Record& r, std::vector<RawSub>* out) const;
+
     const StringTables& strings() const { return strings_; }
     const uint8_t* bytes() const { return data_; }  // the whole file
     size_t size() const { return size_; }
